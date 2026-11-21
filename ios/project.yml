@@ -1,0 +1,24 @@
+name: TmuxLink
+options:
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  TmuxLink:
+    type: application
+    platform: iOS
+    sources:
+      - Terminal
+      - path: assets
+        type: folder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to the configured tmux server on your network.
+        SWIFT_OBJC_BRIDGING_HEADER: Terminal/Bridge.h
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": "$(SRCROOT)/../target/aarch64-apple-ios/release"
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": "$(SRCROOT)/../target/aarch64-apple-ios-sim/release"
+        OTHER_LDFLAGS: "-ltmux_link_mobile -framework Security -framework SystemConfiguration"

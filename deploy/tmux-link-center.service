@@ -1,0 +1,10 @@
+[Unit]
+Description=Tmux Link public relay
+After=network.target
+[Service]
+User=tmuxrelay
+ExecStart=/usr/local/bin/center 0.0.0.0:2222 /home/tmuxrelay/link/linux.sock
+Restart=on-failure
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
