@@ -16,13 +16,16 @@ final class App: UIResponder, UIApplicationDelegate {
 }
 
 final class Connect: UIViewController {
-  let fields = ["公网中心地址", "端口", "Linux 用户名", "内网 SSH 主机指纹 SHA256:…"].map { label in
+  let fields = ["公网中心地址", "端口", "远程用户名", "内网 SSH 主机指纹 SHA256:…"].map { label in
     let field = UITextField()
     field.placeholder = label
     field.borderStyle = .roundedRect
     field.autocapitalizationType = .none
     field.autocorrectionType = .no
     field.text = UserDefaults.standard.string(forKey: label)
+    if label == "远程用户名" && field.text == nil {
+      field.text = UserDefaults.standard.string(forKey: "Linux 用户名")
+    }
     return field
   }
   let status = UILabel()
@@ -30,7 +33,8 @@ final class Connect: UIViewController {
     super.viewDidLoad()
     title = "Tmux Link"
     view.backgroundColor = .systemBackground
-    if fields[1].text?.isEmpty != false { fields[1].text = "2222" }
+    if fields[0].text?.isEmpty != false { fields[0].text = "bj.lander.work" }
+    if fields[1].text?.isEmpty != false { fields[1].text = "443" }
     fields[1].keyboardType = .numberPad
     status.numberOfLines = 0
     let copy = UIButton(type: .system)

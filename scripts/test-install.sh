@@ -9,15 +9,16 @@ for bin in agent center; do
 done
 cp -R deploy "$tmp/package/share/tmux-link/"
 case "$(uname -m)" in aarch64|arm64) arch=aarch64 ;; *) arch=x86_64 ;; esac
-asset="tmux-link-linux-$arch.tar.gz"
+case "$(uname -s)" in Darwin) platform=macos ;; *) platform=linux ;; esac
+asset="tmux-link-$platform-$arch.tar.gz"
 tar -C "$tmp/package" -czf "$tmp/dist/$asset" .
-(cd "$tmp/dist" && sha256sum "$asset" > SHA256SUMS)
+(cd "$tmp/dist" && if command -v sha256sum >/dev/null; then sha256sum "$asset"; else shasum -a 256 "$asset"; fi > SHA256SUMS)
 ./install.sh --from-dir "$tmp/dist" --prefix "$tmp/installed" --role agent
-test -x "$tmp/installed/bin/agent"
-test ! -e "$tmp/installed/bin/center"
+test -x "$tmp/installed/bin/tmux-link-agent"
+test ! -e "$tmp/installed/bin/tmux-link-center"
 test -f "$tmp/installed/share/tmux-link/deploy/inner-sshd.conf"
 ./install.sh --from-dir "$tmp/dist" --prefix "$tmp/installed" --role both
-test "$("$tmp/installed/bin/center")" = fixture-center
+test "$("$tmp/installed/bin/tmux-link-center")" = fixture-center
 printf '\ncorruption\n' >> "$tmp/dist/$asset"
 if ./install.sh --from-dir "$tmp/dist" --prefix "$tmp/rejected"; then
     echo 'Corrupted package was accepted' >&2; exit 1

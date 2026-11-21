@@ -19,7 +19,10 @@ fn start(pin: &str, key_env: &str) -> (UnixStream, JoinHandle<Result<(), String>
         .as_ref()
         .to_owned();
     let port = get("TL_TEST_PORT").parse().unwrap();
-    let user = CString::new("alice").unwrap();
+    let host =
+        CString::new(std::env::var("TL_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into())).unwrap();
+    let user =
+        CString::new(std::env::var("TL_TEST_USER").unwrap_or_else(|_| "alice".into())).unwrap();
     let fingerprint = CString::new(pin).unwrap();
     let (view, core) = UnixStream::pair().unwrap();
     view.set_read_timeout(Some(Duration::from_secs(10)))
@@ -27,7 +30,7 @@ fn start(pin: &str, key_env: &str) -> (UnixStream, JoinHandle<Result<(), String>
     let worker = thread::spawn(move || unsafe {
         let error = tmux_link_mobile::tl_connect(
             core.into_raw_fd(),
-            c"127.0.0.1".as_ptr(),
+            host.as_ptr(),
             port,
             user.as_ptr(),
             fingerprint.as_ptr(),

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install verified Linux binaries from a GitHub Release.
+# Install verified Linux/macOS binaries from a GitHub Release.
 set -eu
 repo=m9rco/tmux-link
 version=latest
@@ -16,7 +16,7 @@ Defaults: agent role, ~/.local for users, /usr/local for root.
 Public GitHub downloads use curl without authentication.
 Private repository: set GH_TOKEN or GITHUB_TOKEN and install gh.
 --from-dir installs an already downloaded archive plus SHA256SUMS offline.
---with-deps installs OpenSSH and tmux using apt-get (root, Debian/Ubuntu).
+--with-deps installs OpenSSH/tmux via apt-get on Debian/Ubuntu, or tmux via Homebrew on macOS.
 The installer places binaries and deployment templates under PREFIX.
 Configure the provided templates with your user, keys and center address.
 HELP
@@ -39,18 +39,22 @@ while [ "$#" -gt 0 ]; do
 done
 case "$role" in agent|center|both) ;; *) echo "Invalid role" >&2; exit 2 ;; esac
 case "$prefix" in /*) ;; *) echo "--prefix must be absolute" >&2; exit 2 ;; esac
-[ "$(uname -s)" = Linux ] || { echo "Linux required. Build the iOS app with Xcode." >&2; exit 1; }
+case "$(uname -s)" in Linux) platform=linux ;; Darwin) platform=macos ;;
+    *) echo "Linux or macOS required" >&2; exit 1 ;; esac
 case "$(uname -m)" in
     x86_64|amd64) arch=x86_64 ;;
     aarch64|arm64) arch=aarch64 ;;
     *) echo "Unsupported CPU architecture" >&2; exit 1 ;;
 esac
-for cmd in tar sha256sum install mktemp; do
+for cmd in tar install mktemp; do
     command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 1; }
 done
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-asset="tmux-link-linux-$arch.tar.gz"
+if ! command -v sha256sum >/dev/null && ! command -v shasum >/dev/null; then
+    echo "sha256sum or shasum required" >&2; exit 1
+fi
+asset="tmux-link-$platform-$arch.tar.gz"
 if [ -n "$from_dir" ]; then
     cp "$from_dir/$asset" "$from_dir/SHA256SUMS" "$tmp/"
 elif [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
@@ -77,7 +81,7 @@ fi
 # Select exactly one hash for the expected artifact, ignoring other release files.
 awk -v name="$asset" '$2 == name {print}' "$tmp/SHA256SUMS" > "$tmp/selected"
 [ "$(wc -l < "$tmp/selected" | tr -d ' ')" = 1 ] || { echo "Missing or duplicate checksum" >&2; exit 1; }
-(cd "$tmp" && sha256sum -c selected)
+(cd "$tmp" && if command -v sha256sum >/dev/null; then sha256sum -c selected; else shasum -a 256 -c selected; fi)
 # Extract only known package members, without preserving archive permissions or owners.
 mkdir "$tmp/unpack"
 tar -xzf "$tmp/$asset" -C "$tmp/unpack" --no-same-owner --no-same-permissions \
@@ -86,18 +90,22 @@ for bin in agent center; do
     [ -f "$tmp/unpack/bin/$bin" ] && [ ! -L "$tmp/unpack/bin/$bin" ] || exit 1
 done
 if [ "$deps" = yes ]; then
-    if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null; then
+    if [ "$platform" = macos ]; then
+        command -v brew >/dev/null || { echo "Install Homebrew to use --with-deps on macOS" >&2; exit 1; }
+        brew list tmux >/dev/null 2>&1 || brew install tmux
+    elif [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null; then
         echo "--with-deps requires root and apt-get" >&2; exit 1
+    else
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client openssh-server tmux
     fi
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client openssh-server tmux
 fi
 install -d "$prefix/bin" "$prefix/share/tmux-link"
 for bin in agent center; do
     if [ "$role" = both ] || [ "$role" = "$bin" ]; then
         # Rename on the same filesystem so upgrades work with running processes.
-        stage=$(mktemp "$prefix/bin/.$bin.XXXXXX")
-        if ! install -m 755 "$tmp/unpack/bin/$bin" "$stage" || ! mv -f "$stage" "$prefix/bin/$bin"; then
+        stage=$(mktemp "$prefix/bin/.tmux-link-$bin.XXXXXX")
+        if ! install -m 755 "$tmp/unpack/bin/$bin" "$stage" || ! mv -f "$stage" "$prefix/bin/tmux-link-$bin"; then
             rm -f "$stage"
             exit 1
         fi

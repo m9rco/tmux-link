@@ -47,8 +47,18 @@ async fn run(
         ..Default::default()
     };
     let (session, channel) = timeout(Duration::from_secs(20), async {
-        let mut session =
-            client::connect(Arc::new(config), (host, port), PinnedHost(pin.into())).await?;
+        let mut session = if port == 443 || host.starts_with("ws://") || host.starts_with("wss://")
+        {
+            let url = if host.starts_with("ws://") || host.starts_with("wss://") {
+                host.to_owned()
+            } else {
+                format!("wss://{host}/tmux-link")
+            };
+            let stream = tmux_link::websocket::connect(&url).await?;
+            client::connect_stream(Arc::new(config), stream, PinnedHost(pin.into())).await?
+        } else {
+            client::connect(Arc::new(config), (host, port), PinnedHost(pin.into())).await?
+        };
         ensure!(
             session
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))

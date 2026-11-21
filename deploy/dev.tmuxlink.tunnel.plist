@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.tmuxlink.tunnel</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/YOUR_USER/.local/bin/tmux-link-agent</string>
+    <string>tunnel</string><string>tmux-center</string>
+    <string>/home/tmuxrelay/link/primary.sock</string><string>22</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>TMUX_LINK_SSH_CONFIG</key><string>/Users/YOUR_USER/.config/tmux-link/ssh_config</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+</dict></plist>

@@ -20,14 +20,19 @@ def main():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         cert, key = root / "cert.pem", root / "key.pem"
+        config = root / "openssl.cnf"
+        config.write_text("[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n"
+                          "[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n"
+                          "basicConstraints=critical,CA:TRUE\n")
         subprocess.run([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-days", "1", "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            "-config", str(config),
             "-keyout", str(key), "-out", str(cert),
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         arch = "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
-        archive = root / f"tmux-link-linux-{arch}.tar.gz"
+        system = "macos" if platform.system() == "Darwin" else "linux"
+        archive = root / f"tmux-link-{system}-{arch}.tar.gz"
         with tarfile.open(archive, "w:gz") as package:
             files = {
                 "./bin/agent": b"#!/bin/sh\necho download-agent\n",
@@ -61,22 +66,22 @@ def main():
                 'curl -fsSL "$1/install.sh" | sh -s -- --download-base-url "$1" --prefix "$2"',
                 "test", base, str(prefix),
             ], check=True, env=env)
-            assert (prefix / "bin/agent").exists()
-            assert not (prefix / "bin/center").exists()
-            assert subprocess.check_output([str(prefix / "bin/agent")]).strip() == b"download-agent"
+            assert (prefix / "bin/tmux-link-agent").exists()
+            assert not (prefix / "bin/tmux-link-center").exists()
+            assert subprocess.check_output([str(prefix / "bin/tmux-link-agent")]).strip() == b"download-agent"
             # Upgrade must replace the inode, allowing existing processes to keep running.
-            previous = (prefix / "bin/agent").stat().st_ino
+            previous = (prefix / "bin/tmux-link-agent").stat().st_ino
             subprocess.run(["sh", str(ROOT / "install.sh"), "--download-base-url", base,
                             "--prefix", str(prefix)], check=True, env=env)
-            assert (prefix / "bin/agent").stat().st_ino != previous
-            upgraded = (prefix / "bin/agent").stat().st_ino
+            assert (prefix / "bin/tmux-link-agent").stat().st_ino != previous
+            upgraded = (prefix / "bin/tmux-link-agent").stat().st_ino
             # A fetched archive with mismatched checksum must leave the installation intact.
             archive.write_bytes(archive.read_bytes() + b"corruption")
             rejected = subprocess.run(["sh", str(ROOT / "install.sh"), "--download-base-url", base,
                                       "--prefix", str(prefix)], env=env)
             assert rejected.returncode != 0
-            assert (prefix / "bin/agent").stat().st_ino == upgraded
-            assert subprocess.check_output([str(prefix / "bin/agent")]).strip() == b"download-agent"
+            assert (prefix / "bin/tmux-link-agent").stat().st_ino == upgraded
+            assert subprocess.check_output([str(prefix / "bin/tmux-link-agent")]).strip() == b"download-agent"
         finally:
             server.shutdown()
             server.server_close()

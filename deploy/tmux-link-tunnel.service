@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 User=alice
-ExecStart=/usr/local/bin/agent tunnel tmux-center /home/tmuxrelay/link/linux.sock 2201
+ExecStart=/usr/local/bin/tmux-link-agent tunnel tmux-center /home/tmuxrelay/link/primary.sock 2201
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

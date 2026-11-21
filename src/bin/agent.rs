@@ -65,7 +65,11 @@ fn main() -> Result<()> {
             let port: u16 = port.parse()?;
             let forward = format!("{socket}:127.0.0.1:{port}");
             // exec lets service managers track the tunnel and propagate signals.
-            Err(Command::new("ssh")
+            let mut ssh = Command::new("ssh");
+            if let Some(config) = env::var_os("TMUX_LINK_SSH_CONFIG") {
+                ssh.arg("-F").arg(config);
+            }
+            Err(ssh
                 .args([
                     "-NT",
                     "-o",

@@ -18,9 +18,10 @@ triple=${TL_LINUX_TARGET:-x86_64-unknown-linux-musl}
 rustup target add "$triple"
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --locked -p tmux-link --target "$triple"
 case "$triple" in x86_64-*) arch=amd64 ;; aarch64-*) arch=arm64 ;; *) exit 2 ;; esac
-docker run -d --name "$box" --platform "linux/$arch" -p 127.0.0.1::2222 debian:12 sleep infinity >/dev/null
+docker run -d --name "$box" --platform "linux/$arch" -p 127.0.0.1::2222 -p 127.0.0.1::2223 debian:12 sleep infinity >/dev/null
 docker exec "$box" sh -ec 'apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -yqq --no-install-recommends openssh-server openssh-client tmux >/dev/null; mkdir -p /etc/tmux-link'
 for bin in agent center; do docker cp "target/$triple/debug/$bin" "$box:/usr/local/bin/$bin"; done
+docker exec "$box" ln -s /usr/local/bin/agent /usr/local/bin/tmux-link-agent
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/phone"
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/untrusted"
 docker cp "$tmp/phone.pub" "$box:/etc/tmux-link/phone.keys"
@@ -36,3 +37,5 @@ docker exec "$box" test -S /home/tmuxrelay/link/linux.sock || { docker exec "$bo
 TL_TEST_PORT=$(docker port "$box" 2222/tcp | head -1 | cut -d: -f2)
 TL_TEST_PIN=$(docker exec "$box" ssh-keygen -lf /etc/tmux-link/host_ed25519.pub | awk '{print $2}')
 TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored
+TL_TEST_WS_PORT=$(docker port "$box" 2223/tcp | head -1 | cut -d: -f2)
+TL_TEST_HOST="ws://127.0.0.1:$TL_TEST_WS_PORT/tmux-link" TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_WS_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored

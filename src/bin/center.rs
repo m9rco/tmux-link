@@ -15,6 +15,11 @@ async fn main() -> Result<()> {
         .next()
         .context("usage: center LISTEN /absolute/tunnel.sock")?;
     let socket = Arc::new(PathBuf::from(args.next().context("missing tunnel socket")?));
+    let websocket = match args.next().as_deref() {
+        Some("--websocket") => true,
+        None => false,
+        _ => anyhow::bail!("expected --websocket"),
+    };
     anyhow::ensure!(
         socket.is_absolute() && args.next().is_none(),
         "expected one absolute socket path"
@@ -37,7 +42,36 @@ async fn main() -> Result<()> {
             )
             .await
             {
-                let _ = copy_bidirectional(&mut phone, &mut linux).await;
+                if websocket {
+                    let config =
+                        tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                            .max_message_size(Some(65536))
+                            .max_frame_size(Some(65536));
+                    // tungstenite requires its HTTP error response by value.
+                    #[allow(clippy::result_large_err)]
+                    let upgrade = tokio_tungstenite::accept_hdr_async_with_config(
+                        phone,
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response| {
+                            if request.uri().path() != "/tmux-link" {
+                                return Err(
+                                    tokio_tungstenite::tungstenite::http::Response::builder()
+                                        .status(404)
+                                        .body(None)
+                                        .unwrap(),
+                                );
+                            }
+                            Ok(response)
+                        },
+                        Some(config),
+                    );
+                    if let Ok(Ok(socket)) = timeout(Duration::from_secs(10), upgrade).await {
+                        let mut stream = tmux_link::websocket::byte_stream(socket);
+                        let _ = copy_bidirectional(&mut stream, &mut linux).await;
+                    }
+                } else {
+                    let _ = copy_bidirectional(&mut phone, &mut linux).await;
+                }
             }
         });
     }
