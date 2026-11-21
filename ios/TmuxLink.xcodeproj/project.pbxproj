@@ -7,7 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0C35831EC31CF34E63DB8469 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */; };
 		36108C60DDC87A82EA5C84C5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 40A95C15D89DCB37F1EEA411 /* assets */; };
+		3AFC72BEC961024B8910C016 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578B5E364A900CEF7B36DD35 /* Workspace.swift */; };
 		4ADD034A26E0AFD1BCFD3512 /* RemoteSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */; };
 		7F53244DB259EB35AFE53034 /* Screen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9449273D3949245A2F2A8160 /* Screen.swift */; };
 		9CA37C6DE7B824104910B340 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A203E797669B5349F523A4 /* App.swift */; };
@@ -26,8 +28,10 @@
 
 /* Begin PBXFileReference section */
 		01A203E797669B5349F523A4 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		40A95C15D89DCB37F1EEA411 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		4AA2EEF93695DF540A0B4342 /* Bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge.h; sourceTree = "<group>"; };
+		578B5E364A900CEF7B36DD35 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5A6144AA955D24B75D0EB605 /* TmuxLinkDeviceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TmuxLinkDeviceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5E17E7A33DF530425EC38227 /* Identity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identity.swift; sourceTree = "<group>"; };
 		7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionTests.swift; sourceTree = "<group>"; };
@@ -67,9 +71,11 @@
 			isa = PBXGroup;
 			children = (
 				01A203E797669B5349F523A4 /* App.swift */,
+				3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */,
 				4AA2EEF93695DF540A0B4342 /* Bridge.h */,
 				5E17E7A33DF530425EC38227 /* Identity.swift */,
 				9449273D3949245A2F2A8160 /* Screen.swift */,
+				578B5E364A900CEF7B36DD35 /* Workspace.swift */,
 			);
 			path = Terminal;
 			sourceTree = "<group>";
@@ -166,6 +172,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0C35831EC31CF34E63DB8469 /* Assets.xcassets in Resources */,
 				36108C60DDC87A82EA5C84C5 /* assets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -188,6 +195,7 @@
 				9CA37C6DE7B824104910B340 /* App.swift in Sources */,
 				C24030632CB36AF220E8422F /* Identity.swift in Sources */,
 				7F53244DB259EB35AFE53034 /* Screen.swift in Sources */,
+				3AFC72BEC961024B8910C016 /* Workspace.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -209,7 +217,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -219,6 +229,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
+				MARKETING_VERSION = 0.2.0;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -281,7 +292,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -291,6 +304,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
+				MARKETING_VERSION = 0.2.0;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;

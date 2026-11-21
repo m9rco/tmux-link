@@ -15,9 +15,11 @@ test -x "$agent" || { echo "Install the macOS tmux-link-agent first" >&2; exit 1
 test -f ios/LocalSigning.xcconfig || { echo "Configure the local signing team first" >&2; exit 1; }
 temp=$(mktemp -d)
 session="tmux-link-device-e2e-$$"
+other=no
 created=no
 cleanup() {
-    if [ "$created" = yes ]; then tmux kill-session -t "$session" 2>/dev/null || true; fi
+    if [ "$created" = yes ]; then tmux kill-session -t "=$session" 2>/dev/null || true; fi
+    if [ "$other" = yes ]; then tmux kill-session -t "=${session}-other" 2>/dev/null || true; fi
     rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -44,6 +46,8 @@ done
 ssh-keygen -lf "$temp/phone.pub"
 tmux new-session -d -s "$session"
 created=yes
+tmux new-session -d -s "${session}-other"
+other=yes
 python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" <<'PY'
 import fcntl
 import json

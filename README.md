@@ -18,7 +18,9 @@ iPhone ── SSH over WSS ──► bj.lander.work:443/tmux-link
                             Linux / Mac SSH → tmux
 ```
 
-一个入口对应一个内网用户和一台主机。只有一个会话时自动进入，有多个会话时显示编号供选择。在 iPhone 上可用 Esc、Tab、方向键、Ctrl-C、Ctrl-B 和系统键盘。横竖屏或键盘高度变化会通知远端 PTY 调整行列数。离开连接页面或网络中断后，重新连接即可接回服务端仍在运行的会话。
+首页保存多台客户端。点客户端读取该账号的会话，点名称进入终端，返回会话列表即可切换；后台的 tmux 会话继续运行。每台客户端独立配置入口、用户名与 SSH 指纹。长按客户端可编辑，左滑可删除。首次升级会载入之前保存的连接。旧版 agent 支持在会话列表中选择「打开兼容终端」。
+
+终端底部的快捷键栏可以横向滑动，包含 Esc、Tab、Ctrl-C、Ctrl-B、四个方向键和回车。Esc 在收到首屏后启用，发送单字节 0x1B；在 vim 插入模式中可以直接回到普通模式。横竖屏或键盘高度变化会调整远端 PTY。
 
 ## 一键安装
 
@@ -98,7 +100,7 @@ install -m 644 deploy/inner-sshd.conf /etc/tmux-link/inner-sshd.conf
 ssh-keygen -lf /etc/tmux-link/host_ed25519.pub
 ```
 
-手机填写公网中心地址 `bj.lander.work`、端口 443、内网用户名和刚核对的内网主机指纹，点「连接 tmux」。若入口不通，依次查看两端 systemd 日志、中心 socket 是否存在、内网监听 2201 的服务及 tmux 所属账号。认证和连接日志保留在系统 SSH 日志中。
+手机填写公网中心地址 `bj.lander.work`、端口 443、内网用户名和刚核对的内网主机指纹，保存客户端后点选会话。若入口不通，依次查看两端 systemd 日志、中心 socket 是否存在、内网监听 2201 的服务及 tmux 所属账号。认证和连接日志保留在系统 SSH 日志中。
 
 ## 内网 macOS
 
@@ -112,13 +114,23 @@ ssh-keygen -lf /etc/tmux-link/host_ed25519.pub
 restrict,pty,command="/usr/bin/env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin /Users/YOUR_USER/.local/bin/tmux-link-agent attach" ssh-ed25519 PHONE_PUBLIC_KEY tmux-link-ios
 ```
 
-手动验证出站隧道可运行下方命令。`TMUX_LINK_SSH_CONFIG` 指定独立配置文件，客户端也支持默认的 ~/.ssh/config。一个中心监听入口对应一个 socket，需要第二台机器时为它配置独立的中心实例和 HTTPS 路由。
+手动验证出站隧道可运行下方命令。`TMUX_LINK_SSH_CONFIG` 指定独立配置文件，客户端也支持默认的 ~/.ssh/config。同一个 center 可以转发到多台机器，各自使用独立的 socket 和 SSH 主机指纹。
 
 ```sh
 TMUX_LINK_SSH_CONFIG="$HOME/.config/tmux-link/ssh_config" tmux-link-agent tunnel tmux-center /home/tmuxrelay/link/primary.sock 22
 ```
 
 端口 443 默认使用 WSS，内网 SSH 主机指纹仍需独立核对。原有 TCP 模式可通过其他端口使用；中心启动时省略 `--websocket` 即可保持旧版传输。
+
+## 在同一中心接入第二台客户端
+
+主客户端继续使用 `/tmux-link`，也可使用 `/tmux-link/primary`。第二台机器将自己的 SSH 端口转发到单独的 socket，例如 `/home/tmuxrelay/link/build.sock`。在 center 的启动参数中显式登记该名称和路径，重新启动服务并载入新版 nginx 模板。
+
+```sh
+tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket build=/home/tmuxrelay/link/build.sock
+```
+
+在 iPhone 点「添加客户端」，填入第二台机器的名称、用户名、SSH 指纹，以及客户端路由 `build`；中心仍填 `bj.lander.work`。可以追加更多 `NAME=/absolute/socket` 参数。路由名区分大小写，最长 64 位，只允许英文字母、数字、下划线和短横线。中心拒绝未登记的路径。手机通过加密 SSH 请求读取和选择会话。
 
 ## 安全与性能边界
 
@@ -153,3 +165,16 @@ scripts/test-ios-device.sh YOUR_DEVICE_ID --pair-local-mac
 ```
 
 脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过 BJ 的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试配置与公钥导出仅用于开发构建，手机上的正常连接表单会在测试成功后填入已验证的参数。
+
+## 个人签名自动维护
+
+装有 Xcode 的 Mac 可以为已配对的 iPhone 定期检查签名。先执行上方真机测试，再在普通用户终端运行：
+
+```sh
+scripts/renew-ios.py install YOUR_DEVICE_UDID
+scripts/renew-ios.py status
+```
+
+安装命令会保存当前 iOS 源码和已编译的 Rust 库快照，签名并覆盖安装 Release 版，保留原 Bundle ID 和 Keychain。launchd 每六小时检查一次，到期前三天开始请求 Xcode 更新描述文件；只有安装成功才记录有效期。如果 Apple 暂时返回同一有效期或设备离线，会在下次检查重试。Mac 需要登录，Xcode 账号须有效，iPhone 需要能被 Xcode 访问。更新项目后重新运行安装命令以替换快照。日志在 `~/Library/Application Support/TmuxLink/Renewal/refresh.log`。运行 `scripts/renew-ios.py uninstall` 可停用任务。
+
+使用手机端 SideStore 时，从 Release 下载 `TmuxLink.ipa`，按 [SideStore 官方安装指南](https://docs.sidestore.io/docs/installation/install.html) 配置，在 My Apps 导入 IPA 并刷新。SideStore 刷新需要 Wi-Fi 和 LocalDevVPN。建议同一安装只选一种签名管理方式。免费个人团队描述文件的有效期为七天，见 [Apple 开发者账户说明](https://developer.apple.com/help/account/basics/about-your-developer-account/)。

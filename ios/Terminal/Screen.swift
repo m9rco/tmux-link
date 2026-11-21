@@ -6,52 +6,82 @@ import WebKit
 final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate {
   let host: String, user: String, pin: String
   let port: UInt16
-  private let seed: Data
+  let target: Int64
+  private let heading: String
+  private let status = UILabel()
+  private let keys = UIStackView()
+  private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
+  private var pendingBytes = 0
+  private var ready = false
   private var web: WKWebView!
   private var fd: Int32 = -1
   private var started = false
   private var active = true
   private var dimensions = (UInt16(80), UInt16(24))
-  init(host: String, port: UInt16, user: String, pin: String) throws {
-    self.host = host
-    self.port = port
-    self.user = user
-    self.pin = pin
-    self.seed = try Identity.load().rawRepresentation
+  init(client: ClientProfile, session: RemoteSession?) {
+    host = client.endpoint
+    port = client.port
+    user = client.user
+    pin = client.pin
+    target = session?.id ?? -1
+    heading = session?.name ?? client.name
     super.init(nibName: nil, bundle: nil)
   }
   required init?(coder: NSCoder) { fatalError() }
   override func viewDidLoad() {
     super.viewDidLoad()
-    title = host
+    title = heading
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
     config.userContentController.add(self, name: "terminal")
     web = WKWebView(frame: .zero, configuration: config)
     web.navigationDelegate = self
-    let bar = UIStackView()
-    bar.distribution = .fillEqually
-    for (title, key) in [
-      ("Esc", "\u{1b}"), ("Tab", "\t"), ("Ctrl-C", "\u{03}"), ("Ctrl-B", "\u{02}"),
-      ("↑", "\u{1b}[A"), ("↓", "\u{1b}[B"), ("↵", "\r"),
+    web.isOpaque = false
+    web.scrollView.isScrollEnabled = false
+    view.backgroundColor = UIColor(red: 0.04, green: 0.08, blue: 0.10, alpha: 1)
+    let accent = UIColor(red: 0.47, green: 0.91, blue: 0.79, alpha: 1)
+    status.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+    status.textColor = accent
+    status.numberOfLines = 2
+    status.text = "  ◌  正在连接 · " + heading
+    let scroll = UIScrollView()
+    scroll.showsHorizontalScrollIndicator = false
+    keys.spacing = 5
+    keys.isUserInteractionEnabled = false
+    keys.alpha = 0.45
+    for (label, key) in [
+      ("Esc", "\u{1b}"), ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
+      ("↑", "\u{1b}[A"), ("↓", "\u{1b}[B"), ("←", "\u{1b}[D"), ("→", "\u{1b}[C"), ("↵", "\r"),
     ] {
-      let button = UIButton(type: .system)
-      button.setTitle(title, for: .normal)
-      button.addAction(
-        UIAction { [weak self] _ in self?.send(0, Data(key.utf8)) }, for: .touchUpInside)
-      bar.addArrangedSubview(button)
+      var style = UIButton.Configuration.tinted()
+      style.title = label
+      style.baseForegroundColor = label == "Esc" ? .systemOrange : accent
+      style.contentInsets = .init(top: 3, leading: 8, bottom: 3, trailing: 8)
+      let button = UIButton(configuration: style)
+      button.accessibilityIdentifier = "terminal.key." + label
+      button.addAction(UIAction { [weak self] _ in self?.press(key) }, for: .touchUpInside)
+      keys.addArrangedSubview(button)
+      button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
     }
-    let stack = UIStackView(arrangedSubviews: [web, bar])
+    scroll.addSubview(keys)
+    keys.translatesAutoresizingMaskIntoConstraints = false
+    let stack = UIStackView(arrangedSubviews: [status, web, scroll])
     stack.axis = .vertical
-    view.backgroundColor = .systemBackground
+    stack.spacing = 4
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
       stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      bar.heightAnchor.constraint(equalToConstant: 42),
+      stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 6),
+      stack.trailingAnchor.constraint(
+        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -6),
+      scroll.heightAnchor.constraint(equalToConstant: 44),
+      keys.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+      keys.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+      keys.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+      keys.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+      keys.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
     ])
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
@@ -83,14 +113,23 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       finish("本地连接失败")
       return
     }
+    let seed: Data
+    do { seed = try Identity.load().rawRepresentation } catch {
+      close(reader)
+      close(worker)
+      finish(error.localizedDescription)
+      return
+    }
     resize()
-    DispatchQueue.global(qos: .userInitiated).async { [host, port, user, pin, seed, weak self] in
+    DispatchQueue.global(qos: .userInitiated).async {
+      [host, port, user, pin, seed, target, weak self] in
       let error = seed.withUnsafeBytes { buffer in
-        tl_connect(worker, host, port, user, pin, buffer.bindMemory(to: UInt8.self).baseAddress!)
+        tl_open(
+          worker, host, port, user, pin, buffer.bindMemory(to: UInt8.self).baseAddress!, target)
       }
       let message = error.map { String(cString: $0) } ?? "会话已断开"
       if let error { tl_free_error(error) }
-      DispatchQueue.main.async { self?.navigationItem.prompt = message }
+      DispatchQueue.main.async { self?.finish(message) }
     }
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       defer { close(reader) }
@@ -105,6 +144,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
           guard let self, active else {
             rendered.signal()
             return
+          }
+          if !ready && fd >= 0 {
+            ready = true
+            keys.isUserInteractionEnabled = true
+            keys.alpha = 1
+            status.text = "  ●  " + heading + "  /  " + user
           }
           web.callAsyncJavaScript(
             "await window.display(bytes)", arguments: ["bytes": bytes], in: nil, in: .page
@@ -149,28 +194,65 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     var size = UInt32(bytes.count).bigEndian
     frame.append(Data(bytes: &size, count: 4))
     frame.append(bytes)
-    let written = frame.withUnsafeBytes {
-      Darwin.send(fd, $0.baseAddress, frame.count, MSG_DONTWAIT)
+    guard pendingBytes + frame.count <= 1_048_576 else {
+      finish("输入过多，请重新连接")
+      return
     }
-    if written != frame.count { finish("输入通道已断开，请重新连接") }
+    let output = dup(fd)
+    guard output >= 0 else {
+      finish("输入通道不可用")
+      return
+    }
+    let packet = frame
+    pendingBytes += packet.count
+    input.async { [weak self] in
+      defer { close(output) }
+      let ok = packet.withUnsafeBytes { raw -> Bool in
+        var offset = 0
+        while offset < raw.count {
+          let n = Darwin.send(output, raw.baseAddress!.advanced(by: offset), raw.count - offset, 0)
+          if n < 0 && errno == EINTR { continue }
+          guard n > 0 else { return false }
+          offset += n
+        }
+        return true
+      }
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.pendingBytes -= packet.count
+        if !ok && self.fd >= 0 { self.finish("输入通道已断开") }
+      }
+    }
   }
   private func finish(_ message: String) {
-    navigationItem.prompt = message
+    status.text = "  " + message
     disconnect()
   }
   private func disconnect() {
+    ready = false
+    keys.isUserInteractionEnabled = false
+    keys.alpha = 0.45
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)
       fd = -1
     }
   }
-  override func viewDidDisappear(_ animated: Bool) {
-    super.viewDidDisappear(animated)
-    if isMovingFromParent || navigationController == nil {
-      active = false
-      disconnect()
-      web.configuration.userContentController.removeScriptMessageHandler(forName: "terminal")
-    }
+  private func press(_ key: String) {
+    guard ready else { return }
+    send(0, Data(key.utf8))
+    UISelectionFeedbackGenerator().selectionChanged()
+  }
+  override var keyCommands: [UIKeyCommand]? {
+    let escape = UIKeyCommand(
+      input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(escapeKey))
+    escape.wantsPriorityOverSystemBehavior = true
+    return [escape]
+  }
+  @objc private func escapeKey() { press("\u{1b}") }
+  func stop() {
+    active = false
+    disconnect()
+    web?.configuration.userContentController.removeScriptMessageHandler(forName: "terminal")
   }
 }

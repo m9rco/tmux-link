@@ -1,4 +1,4 @@
-const term = new Terminal({cursorBlink:true, fontSize:13, scrollback:3000, theme:{background:'#101218'}});
+const term = new Terminal({cursorBlink:true, cursorStyle:'bar', cursorWidth:2, fontFamily:'ui-monospace, Menlo, monospace', fontSize:14, lineHeight:1.12, scrollback:4000, theme:{background:'#0a141a',foreground:'#dce8eb',cursor:'#79e8c9',selectionBackground:'#345057',black:'#16272e',green:'#7ddbb5',cyan:'#75d6e9',yellow:'#efbb78',red:'#fb8985'}});
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open(document.querySelector('#term'));

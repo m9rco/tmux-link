@@ -3,7 +3,7 @@ Description=Tmux Link public relay
 After=network.target
 [Service]
 User=tmuxrelay
-ExecStart=/usr/local/bin/center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket
+ExecStart=/usr/local/bin/tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket
 Restart=on-failure
 NoNewPrivileges=true
 [Install]

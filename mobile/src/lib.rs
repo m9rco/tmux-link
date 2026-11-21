@@ -33,20 +33,18 @@ impl client::Handler for PinnedHost {
     }
 }
 
-async fn run(
+async fn authenticated(
     host: &str,
     port: u16,
     user: &str,
     pin: &str,
     key: PrivateKey,
-    socket: UnixStream,
-) -> Result<()> {
-    let (mut read, mut write) = socket.into_split();
+) -> Result<client::Handle<PinnedHost>> {
     let config = client::Config {
         keepalive_interval: Some(Duration::from_secs(20)),
         ..Default::default()
     };
-    let (session, channel) = timeout(Duration::from_secs(20), async {
+    timeout(Duration::from_secs(20), async {
         let mut session = if port == 443 || host.starts_with("ws://") || host.starts_with("wss://")
         {
             let url = if host.starts_with("ws://") || host.starts_with("wss://") {
@@ -66,12 +64,28 @@ async fn run(
                 .success(),
             "phone key rejected"
         );
+        Ok(session)
+    })
+    .await?
+}
+
+async fn run(
+    session: client::Handle<PinnedHost>,
+    socket: UnixStream,
+    target: Option<u64>,
+) -> Result<()> {
+    let (mut read, mut write) = socket.into_split();
+    let channel = timeout(Duration::from_secs(20), async {
         let channel = session.channel_open_session().await?;
         channel
             .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
             .await?;
-        channel.request_shell(true).await?;
-        Ok::<_, anyhow::Error>((session, channel))
+        if let Some(id) = target {
+            channel.exec(true, format!("tmux-link-attach {id}")).await?;
+        } else {
+            channel.request_shell(true).await?;
+        }
+        Ok::<_, anyhow::Error>(channel)
     })
     .await??;
     let (mut ssh_rx, ssh_tx) = channel.split();
@@ -138,6 +152,22 @@ pub unsafe extern "C" fn tl_connect(
     pin: *const c_char,
     seed: *const u8,
 ) -> *mut c_char {
+    unsafe { tl_open(fd, host, port, user, pin, seed, -1) }
+}
+
+/// # Safety
+/// Same ownership and pointer requirements as tl_connect. -1 opens the legacy picker,
+/// -2 lists sessions, and a nonnegative number attaches to that exact tmux session ID.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tl_open(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    target: i64,
+) -> *mut c_char {
     let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     let result = (|| -> Result<()> {
         let host = unsafe { CStr::from_ptr(host) }.to_str()?;
@@ -145,20 +175,44 @@ pub unsafe extern "C" fn tl_connect(
         let pin = unsafe { CStr::from_ptr(pin) }.to_str()?;
         let key = Ed25519Keypair::from_seed(unsafe { &*seed.cast::<[u8; 32]>() });
         socket.set_nonblocking(true)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()?;
-        runtime.block_on(async {
-            run(
-                host,
-                port,
-                user,
-                pin,
-                PrivateKey::from(key),
-                UnixStream::from_std(socket)?,
-            )
-            .await
-        })
+            .build()?
+            .block_on(async {
+                let mut socket = UnixStream::from_std(socket)?;
+                let session = authenticated(host, port, user, pin, PrivateKey::from(key)).await?;
+                if target == -2 {
+                    timeout(Duration::from_secs(15), async {
+                        let mut channel = session.channel_open_session().await?;
+                        channel.exec(true, "tmux-link-list").await?;
+                        let mut size = 0;
+                        let mut status = None;
+                        while let Some(message) = channel.wait().await {
+                            match message {
+                                ChannelMsg::Data { data } => {
+                                    size += data.len();
+                                    ensure!(size <= 1024 * 1024, "session list too large");
+                                    socket.write_all(&data).await?;
+                                }
+                                ChannelMsg::ExitStatus { exit_status } => {
+                                    status = Some(exit_status)
+                                }
+                                ChannelMsg::Failure => bail!("session list was refused"),
+                                _ => {}
+                            }
+                        }
+                        ensure!(
+                            status == Some(0),
+                            "session list unavailable; check the host agent"
+                        );
+                        Ok(())
+                    })
+                    .await?
+                } else {
+                    ensure!(target >= -1, "invalid session");
+                    run(session, socket, u64::try_from(target).ok()).await
+                }
+            })
     })();
     result.err().map_or(std::ptr::null_mut(), |err| {
         CString::new(err.to_string().replace('\0', " "))

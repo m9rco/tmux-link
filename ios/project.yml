@@ -18,6 +18,9 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
         PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: 2
+        INFOPLIST_KEY_CFBundleDisplayName: Tmux Link
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

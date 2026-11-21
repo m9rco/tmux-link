@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
-import UIKit
+import SwiftUI
+import WebKit
 import XCTest
 
 @testable import TmuxLink
@@ -125,13 +126,90 @@ final class RemoteSessionTests: XCTestCase {
     XCTFail("Expected remote output did not arrive.")
   }
 
+  func testSavedClientsMigrateAndStayIndependent() throws {
+    let suite = "dev.tmuxlink.test." + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set("alice", forKey: "Linux 用户名")
+    defaults.set("SHA256:test-a", forKey: "内网 SSH 主机指纹 SHA256:…")
+    let store = ProfileStore(defaults)
+    let first = try XCTUnwrap(store.clients.first)
+    XCTAssertEqual(first.endpoint, "bj.lander.work")
+    let second = ClientProfile(
+      name: "Build", port: 8443, route: "build", user: "bob", pin: "SHA256:test-b")
+    store.save(second)
+    XCTAssertEqual(ProfileStore(defaults).clients, [first, second])
+    XCTAssertEqual(second.endpoint, "wss://bj.lander.work:8443/tmux-link/build")
+    store.remove(first.id)
+    XCTAssertEqual(ProfileStore(defaults).clients, [second])
+    store.remove(second.id)
+    XCTAssertTrue(ProfileStore(defaults).clients.isEmpty)
+  }
+
   @MainActor
-  func testConnectionFormIsVisible() {
-    let navigation = UIApplication.shared.connectedScenes.compactMap { scene in
-      (scene as? UIWindowScene)?.windows.first(where: \.isKeyWindow)?.rootViewController
-        as? UINavigationController
+  func testWorkspaceIsVisible() {
+    XCTAssertNotNil(rootController as? UIHostingController<Workspace>)
+  }
+
+  @MainActor private var rootController: UIViewController? {
+    UIApplication.shared.connectedScenes.compactMap {
+      ($0 as? UIWindowScene)?.windows.first(where: \.isKeyWindow)?.rootViewController
     }.first
-    XCTAssertTrue(navigation?.topViewController is Connect)
+  }
+
+  @MainActor
+  func testNamedSessionsAndEscapeButton() async throws {
+    let config = try configuration()
+    let client = ClientProfile(
+      name: "Test", host: config.host, port: config.port, route: "primary",
+      user: config.user, pin: config.fingerprint)
+    let sessions = try await SessionDirectory.fetch(client)
+    let root = try XCTUnwrap(rootController)
+    for suffix in ["-other", ""] {
+      let selected = try XCTUnwrap(sessions.first { $0.name == config.sessionName + suffix })
+      let screen = Screen(client: client, session: selected)
+      root.present(screen, animated: false)
+      defer {
+        screen.stop()
+        screen.dismiss(animated: false)
+      }
+      func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+      let web = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? WKWebView }.first)
+      let escape = try XCTUnwrap(
+        descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.key.Esc" }
+          as? UIButton)
+      func waitFor(_ marker: String) async throws {
+        for _ in 0..<100 {
+          let value = try? await web.evaluateJavaScript(
+            "Array.from({length:term.rows}, (_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString(true)).join('\\n')"
+          )
+          if let output = value as? String, output.contains(marker) { return }
+          try await Task.sleep(nanoseconds: 150_000_000)
+        }
+        throw NSError(
+          domain: "TerminalTest", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "Missing terminal output " + marker])
+      }
+      // Wait for the actual PTY, then verify the shell belongs to the chosen tmux session.
+      for _ in 0..<100 where escape.superview?.isUserInteractionEnabled == false {
+        try await Task.sleep(nanoseconds: 100_000_000)
+      }
+      func type(_ command: String) async throws {
+        let _: Any? = try await web.callAsyncJavaScript(
+          "term.input(command, true); return true", arguments: ["command": command + "\r"], in: nil,
+          in: .page)
+      }
+      try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")
+      try await waitFor("__ID_$" + String(selected.id) + "__")
+      if suffix.isEmpty {
+        try await type(
+          "python3 -c 'import os,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print(\"__READ\"+\"Y__\",flush=True); b=os.read(0,1); termios.tcsetattr(0,termios.TCSANOW,t); print(\"__BYTE_%d__\"%b[0],flush=True)'"
+        )
+        try await waitFor("__READY__")
+        escape.sendActions(for: .touchUpInside)
+        try await waitFor("__BYTE_27__")
+      }
+    }
   }
 
   func testBJCommandAndReconnect() throws {
