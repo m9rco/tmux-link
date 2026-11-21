@@ -2,16 +2,47 @@ import UIKit
 
 @main
 final class App: UIResponder, UIApplicationDelegate {
-  var window: UIWindow?
   func application(
     _ app: UIApplication,
     didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    let window = UIWindow(frame: UIScreen.main.bounds)
+    #if DEBUG
+      // Development pairing exports only the public key; the private seed stays in Keychain.
+      do {
+        let documents = try FileManager.default.url(
+          for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        try Identity.publicLine().write(
+          to: documents.appendingPathComponent("tmux-link-public-key.pub"),
+          atomically: true, encoding: .utf8)
+      } catch {
+        NSLog("Development public-key export failed: %@", error.localizedDescription)
+      }
+    #endif
+    return true
+  }
+
+  func application(
+    _ application: UIApplication, configurationForConnecting session: UISceneSession,
+    options: UIScene.ConnectionOptions
+  ) -> UISceneConfiguration {
+    let configuration = UISceneConfiguration(name: "Terminal", sessionRole: session.role)
+    configuration.delegateClass = Scene.self
+    return configuration
+  }
+}
+
+final class Scene: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+
+  func scene(
+    _ scene: UIScene, willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
     window.rootViewController = UINavigationController(rootViewController: Connect())
     window.makeKeyAndVisible()
     self.window = window
-    return true
   }
 }
 

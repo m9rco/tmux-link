@@ -8,17 +8,31 @@
 
 /* Begin PBXBuildFile section */
 		36108C60DDC87A82EA5C84C5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 40A95C15D89DCB37F1EEA411 /* assets */; };
+		4ADD034A26E0AFD1BCFD3512 /* RemoteSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */; };
 		7F53244DB259EB35AFE53034 /* Screen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9449273D3949245A2F2A8160 /* Screen.swift */; };
 		9CA37C6DE7B824104910B340 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A203E797669B5349F523A4 /* App.swift */; };
 		C24030632CB36AF220E8422F /* Identity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E17E7A33DF530425EC38227 /* Identity.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		FD2110A06EB6926AF6913197 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5C5BDB09167FD465E0743470 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A7B62A3E63B3DB1B6DD09795;
+			remoteInfo = TmuxLink;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		01A203E797669B5349F523A4 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		40A95C15D89DCB37F1EEA411 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		4AA2EEF93695DF540A0B4342 /* Bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge.h; sourceTree = "<group>"; };
+		5A6144AA955D24B75D0EB605 /* TmuxLinkDeviceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TmuxLinkDeviceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5E17E7A33DF530425EC38227 /* Identity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identity.swift; sourceTree = "<group>"; };
+		7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionTests.swift; sourceTree = "<group>"; };
 		9449273D3949245A2F2A8160 /* Screen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Screen.swift; sourceTree = "<group>"; };
+		A730322DA49828E6EF160404 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		D4AC8B585736A80747E1EDD3 /* TmuxLink.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TmuxLink.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -27,8 +41,26 @@
 			isa = PBXGroup;
 			children = (
 				D4AC8B585736A80747E1EDD3 /* TmuxLink.app */,
+				5A6144AA955D24B75D0EB605 /* TmuxLinkDeviceTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		260005EEAB43CA2A0FFEC491 /* ios */ = {
+			isa = PBXGroup;
+			children = (
+				A730322DA49828E6EF160404 /* Signing.xcconfig */,
+			);
+			name = ios;
+			path = .;
+			sourceTree = "<group>";
+		};
+		8AAD70C6000F42A87C133D6A /* DeviceTests */ = {
+			isa = PBXGroup;
+			children = (
+				7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */,
+			);
+			path = DeviceTests;
 			sourceTree = "<group>";
 		};
 		AD66A9E9CB82500BAFB2E921 /* Terminal */ = {
@@ -46,6 +78,8 @@
 			isa = PBXGroup;
 			children = (
 				40A95C15D89DCB37F1EEA411 /* assets */,
+				8AAD70C6000F42A87C133D6A /* DeviceTests */,
+				260005EEAB43CA2A0FFEC491 /* ios */,
 				AD66A9E9CB82500BAFB2E921 /* Terminal */,
 				006347BAD9D9A73E64CECF50 /* Products */,
 			);
@@ -54,6 +88,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		634ADE6BFD9D0725C71CF06F /* TmuxLinkDeviceTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 249BB9DB97DAD99C4CD627A1 /* Build configuration list for PBXNativeTarget "TmuxLinkDeviceTests" */;
+			buildPhases = (
+				02B7EA527D0F15E8D1BA8A4A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D7C7C9A4CE0045460EE02B5B /* PBXTargetDependency */,
+			);
+			name = TmuxLinkDeviceTests;
+			packageProductDependencies = (
+			);
+			productName = TmuxLinkDeviceTests;
+			productReference = 5A6144AA955D24B75D0EB605 /* TmuxLinkDeviceTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		A7B62A3E63B3DB1B6DD09795 /* TmuxLink */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0DFC8BAB986C28AA5DB1A94C /* Build configuration list for PBXNativeTarget "TmuxLink" */;
@@ -81,6 +133,12 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					634ADE6BFD9D0725C71CF06F = {
+						ProvisioningStyle = Automatic;
+					};
+					A7B62A3E63B3DB1B6DD09795 = {
+						ProvisioningStyle = Automatic;
+					};
 				};
 			};
 			buildConfigurationList = AB71612E0251B03B508E97EA /* Build configuration list for PBXProject "TmuxLink" */;
@@ -98,6 +156,7 @@
 			projectRoot = "";
 			targets = (
 				A7B62A3E63B3DB1B6DD09795 /* TmuxLink */,
+				634ADE6BFD9D0725C71CF06F /* TmuxLinkDeviceTests */,
 			);
 		};
 /* End PBXProject section */
@@ -114,6 +173,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		02B7EA527D0F15E8D1BA8A4A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4ADD034A26E0AFD1BCFD3512 /* RemoteSessionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DF24F8D4E920CFB25B9A3D6B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -126,14 +193,25 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		D7C7C9A4CE0045460EE02B5B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A7B62A3E63B3DB1B6DD09795 /* TmuxLink */;
+			targetProxy = FD2110A06EB6926AF6913197 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
 		3320915FCDCC768B7BA36331 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A730322DA49828E6EF160404 /* Signing.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -150,13 +228,62 @@
 			};
 			name = Debug;
 		};
+		346D602EB67077A91BB6C16B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A730322DA49828E6EF160404 /* Signing.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.devicetests;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = Terminal/Bridge.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TmuxLink.app/TmuxLink";
+			};
+			name = Debug;
+		};
+		66C9F7F96E3F479EDCA6CFEE /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A730322DA49828E6EF160404 /* Signing.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.devicetests;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = Terminal/Bridge.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TmuxLink.app/TmuxLink";
+			};
+			name = Release;
+		};
 		A2C566179996909CBF467338 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A730322DA49828E6EF160404 /* Signing.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -300,6 +427,15 @@
 			buildConfigurations = (
 				3320915FCDCC768B7BA36331 /* Debug */,
 				A2C566179996909CBF467338 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		249BB9DB97DAD99C4CD627A1 /* Build configuration list for PBXNativeTarget "TmuxLinkDeviceTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				346D602EB67077A91BB6C16B /* Debug */,
+				66C9F7F96E3F479EDCA6CFEE /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

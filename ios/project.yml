@@ -10,11 +10,17 @@ targets:
       - Terminal
       - path: assets
         type: folder
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
     settings:
       base:
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
         PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to the configured tmux server on your network.
         SWIFT_OBJC_BRIDGING_HEADER: Terminal/Bridge.h
         SWIFT_VERSION: "5.0"
@@ -22,3 +28,31 @@ targets:
         "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": "$(SRCROOT)/../target/aarch64-apple-ios/release"
         "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": "$(SRCROOT)/../target/aarch64-apple-ios-sim/release"
         OTHER_LDFLAGS: "-ltmux_link_mobile -framework Security -framework SystemConfiguration"
+  TmuxLinkDeviceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - DeviceTests
+    dependencies:
+      - target: TmuxLink
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    settings:
+      base:
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile.devicetests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Terminal/Bridge.h
+schemes:
+  TmuxLink:
+    build:
+      targets:
+        TmuxLink: all
+    test:
+      targets:
+        - TmuxLinkDeviceTests
+      parallelizable: false

@@ -135,6 +135,11 @@ jobs:
           rustup default stable
       - run: scripts/build-ios.sh device
       - run: scripts/build-ios.sh simulator
+      - name: Compile iOS device test bundle
+        run: |
+          xcodebuild -project ios/TmuxLink.xcodeproj -scheme TmuxLink -configuration Debug \
+            -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath target/xcode-ci-tests build-for-testing
       - name: Package unsigned iOS builds
         run: |
           mkdir dist

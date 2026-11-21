@@ -140,3 +140,16 @@ TMUX_LINK_SSH_CONFIG="$HOME/.config/tmux-link/ssh_config" tmux-link-agent tunnel
 输入缓冲区在同一连接中复用，减少连续按键和粘贴时的重复分配。SSH 即使遇到输入协议错误也会发起断开，关闭等待上限为 5 秒。
 
 `cargo fmt --all -- --check` 和 `cargo clippy --workspace --all-targets -- -D warnings` 检查 Rust 代码。`scripts/e2e-linux.sh` 使用临时 Docker 容器和临时密钥，通过 iOS 同一 Rust FFI 入口访问真实 Linux tmux，检查错误指纹、未授权设备密钥、会话选择、输入回显、窗口尺寸和重连后的 shell 状态。Apple Silicon 上默认测试目标为 x86_64 Linux musl，Docker 需要支持运行 amd64 镜像。终端静态资源的 MIT 许可证位于 `ios/assets/`。
+
+
+## iPhone 个人团队与真机测试
+
+在 Xcode 的 Apple Accounts 登录账号并选择 Personal Team。将 Team ID 写入本机的 `ios/LocalSigning.xcconfig`，该文件已加入 Git 忽略列表，内容为 `DEVELOPMENT_TEAM = 你的TeamID`。App 和测试目标使用自动签名，CI 使用未签名构建。
+
+Mac 出站隧道在线后，用 USB 连接并解锁 iPhone，在普通用户终端执行下方命令。首次签名可能需要 macOS 钥匙串授权；首次启动若提示不受信任，在 iPhone 的「设置 → 通用 → VPN 与设备管理」确认自己的开发者账号。
+
+```sh
+scripts/test-ios-device.sh YOUR_DEVICE_ID --pair-local-mac
+```
+
+脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过 BJ 的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试配置与公钥导出仅用于开发构建，手机上的正常连接表单会在测试成功后填入已验证的参数。

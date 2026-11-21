@@ -7,6 +7,7 @@ case "${1:-device}" in
   *) echo "usage: $0 [device|simulator]" >&2; exit 2 ;;
 esac
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
 rustup target add "$target"
 cargo build --locked -p tmux-link-mobile --release --target "$target"
 xcodebuild -project ios/TmuxLink.xcodeproj -scheme TmuxLink -configuration Release -destination "$destination" \
