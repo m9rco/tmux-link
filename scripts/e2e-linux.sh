@@ -34,8 +34,9 @@ for _attempt in $(seq 1 50); do
     sleep 0.1
 done
 docker exec "$box" test -S /home/tmuxrelay/link/linux.sock || { docker exec "$box" cat /tmp/tunnel.log >&2; exit 1; }
+# Tests share a deliberately rate-limited SSH endpoint, so run cases serially.
 TL_TEST_PORT=$(docker port "$box" 2222/tcp | head -1 | cut -d: -f2)
 TL_TEST_PIN=$(docker exec "$box" ssh-keygen -lf /etc/tmux-link/host_ed25519.pub | awk '{print $2}')
-TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored
+TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored --test-threads=1
 TL_TEST_WS_PORT=$(docker port "$box" 2223/tcp | head -1 | cut -d: -f2)
-TL_TEST_HOST="ws://127.0.0.1:$TL_TEST_WS_PORT/tmux-link" TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_WS_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored
+TL_TEST_HOST="ws://127.0.0.1:$TL_TEST_WS_PORT/tmux-link" TL_TEST_KEY="$tmp/phone" TL_TEST_UNAUTHORIZED_KEY="$tmp/untrusted" TL_TEST_PORT="$TL_TEST_WS_PORT" TL_TEST_PIN="$TL_TEST_PIN" cargo test --locked -p tmux-link-mobile --test remote -- --ignored --test-threads=1

@@ -40,7 +40,7 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.s
 
 ```sh
 # 固定版本和自定义安装位置
-curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.2/install.sh | sh -s -- --version v0.1.2 --prefix "$HOME/.local"
+curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.3/install.sh | sh -s -- --version v0.1.3 --prefix "$HOME/.local"
 ```
 
 可用 `--from-dir /path/to/downloads` 从包含归档和 SHA256SUMS 的本地目录离线安装，也可用 `--download-base-url https://mirror.example.com/release` 指定包含同名归档和 SHA256SUMS 的 HTTPS 镜像。私有 fork 的下载可设置 `GH_TOKEN` 或 `GITHUB_TOKEN` 并安装 GitHub CLI。
