@@ -116,48 +116,15 @@ struct Workspace: View {
   @State private var message: String?
   var body: some View {
     NavigationStack {
-      List {
-        Section {
-          ForEach(store.clients) { client in
-            NavigationLink(value: client) {
-              HStack(spacing: 14) {
-                Image(systemName: "server.rack").font(.title2).foregroundStyle(mint)
-                VStack(alignment: .leading, spacing: 5) {
-                  Text(client.name).font(.headline)
-                  Text(
-                    client.user + " · " + client.host
-                      + (client.route.isEmpty ? "" : " / " + client.route)
-                  )
-                  .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
-                }
-              }.padding(.vertical, 8)
-            }.swipeActions(allowsFullSwipe: false) {
-              Button("删除", role: .destructive) { store.remove(client.id) }
-              Button("编辑") { editor = client }.tint(.blue)
-            }.contextMenu { Button("编辑客户端") { editor = client } }
+      clientList
+        .scrollContentBackground(.hidden).background(ink).navigationTitle("Tmux Link")
+        .toolbar {
+          ToolbarItem(placement: .navigationBarTrailing) {
+            Button(action: copyKey) { Image(systemName: "key") }
+              .accessibilityLabel("复制手机 SSH 公钥")
           }
-          Button {
-            editor = ClientProfile()
-          } label: {
-            Label("添加客户端", systemImage: "plus")
-          }
-        } header: {
-          Text("客户端  ·  " + String(store.clients.count)).font(.caption.monospaced())
         }
-        .listRowBackground(panel)
-      }
-      .scrollContentBackground(.hidden).background(ink).navigationTitle("Tmux Link")
-      .toolbar {
-        Button {
-          do {
-            UIPasteboard.general.string = try Identity.publicLine()
-            message = "SSH 公钥已复制"
-          } catch { message = error.localizedDescription }
-        } label: {
-          Image(systemName: "key")
-        }.accessibilityLabel("复制手机 SSH 公钥")
-      }
-      .navigationDestination(for: ClientProfile.self) { Sessions(client: $0) }
+        .navigationDestination(for: ClientProfile.self) { Sessions(client: $0) }
     }
     .tint(mint).preferredColorScheme(.dark)
     .sheet(item: $editor) { client in ProfileEditor(client: client, save: store.save) }
@@ -165,6 +132,53 @@ struct Workspace: View {
       message ?? "",
       isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })
     ) { Button("好") {} }
+  }
+
+  private var clientList: some View {
+    List {
+      Section {
+        ForEach(store.clients) { client in
+          NavigationLink(value: client) { ClientRow(client: client) }
+            .swipeActions(allowsFullSwipe: false) {
+              Button("删除", role: .destructive) { store.remove(client.id) }
+              Button("编辑") { editor = client }.tint(.blue)
+            }
+            .contextMenu { Button("编辑客户端") { editor = client } }
+        }
+        Button {
+          editor = ClientProfile()
+        } label: {
+          Label("添加客户端", systemImage: "plus")
+        }
+      } header: {
+        Text("客户端  ·  \(store.clients.count)").font(.caption.monospaced())
+      }
+      .listRowBackground(panel)
+    }
+  }
+
+  private func copyKey() {
+    do {
+      UIPasteboard.general.string = try Identity.publicLine()
+      message = "SSH 公钥已复制"
+    } catch { message = error.localizedDescription }
+  }
+}
+
+private struct ClientRow: View {
+  let client: ClientProfile
+  private var address: String {
+    let suffix = client.route.isEmpty ? "" : " / " + client.route
+    return "\(client.user) · \(client.host)\(suffix)"
+  }
+  var body: some View {
+    HStack(spacing: 14) {
+      Image(systemName: "server.rack").font(.title2).foregroundStyle(mint)
+      VStack(alignment: .leading, spacing: 5) {
+        Text(client.name).font(.headline)
+        Text(address).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+      }
+    }.padding(.vertical, 8)
   }
 }
 

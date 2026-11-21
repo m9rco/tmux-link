@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "tmux-link"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "tmux-link-mobile"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "russh",
