@@ -4,7 +4,15 @@ set -eu
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 box="tmux-link-e2e-$$"
-trap 'docker rm -f "$box" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+cleanup() {
+    code=$?
+    if [ "$code" -ne 0 ]; then
+        docker exec "$box" sh -c 'cat /tmp/tunnel.log /tmp/inner.log /tmp/outer.log /tmp/center.log' >&2 || true
+    fi
+    docker rm -f "$box" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
 # On arm64 builders prefer a native target when the corresponding linker is available.
 triple=${TL_LINUX_TARGET:-x86_64-unknown-linux-musl}
 rustup target add "$triple"

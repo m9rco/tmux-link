@@ -27,6 +27,8 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: shellcheck install.sh scripts/*.sh
       - run: scripts/test-install.sh
+      - name: HTTPS installer integration
+        run: python3 scripts/test-download.py
       - run: scripts/e2e-linux.sh
   linux:
     needs: checks
@@ -61,6 +63,18 @@ jobs:
           cp -R deploy package/share/tmux-link/
           cp README.md package/share/tmux-link/
           tar -C package -czf dist/tmux-link-linux-${{ matrix.arch }}.tar.gz .
+      - name: Install and execute built package
+        run: |
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          ./install.sh --from-dir "$PWD/dist" --prefix "$RUNNER_TEMP/tmux-link" --role both
+          test -x "$RUNNER_TEMP/tmux-link/bin/agent"
+          test -x "$RUNNER_TEMP/tmux-link/bin/center"
+          set +e
+          "$RUNNER_TEMP/tmux-link/bin/agent" > smoke.log 2>&1
+          result=$?
+          set -e
+          test "$result" = 1
+          grep -q 'usage: agent' smoke.log
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}

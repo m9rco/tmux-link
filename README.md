@@ -1,5 +1,10 @@
 # Tmux Link
 
+[![Build & integration tests](https://github.com/m9rco/tmux-link/actions/workflows/build.yml/badge.svg)](https://github.com/m9rco/tmux-link/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/m9rco/tmux-link)](https://github.com/m9rco/tmux-link/releases/latest)
+![Linux](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM64-333333?logo=linux)
+![iOS](https://img.shields.io/badge/iOS-16%2B-333333?logo=apple)
+
 用 iPhone 接入内网 Linux 上已经运行的 tmux。手机连公网中心的一个 TCP 端口，Linux 主动用 SSH 反向转发注册一个 Unix socket。中心进程在两者之间双向复制字节。手机与 Linux 在这条连接之上独立完成 SSH 握手，校验内网主机指纹并用设备公钥登录。
 
 ```text
@@ -13,15 +18,30 @@ iPhone ─── SSH 到内网主机 ───► center:2222 ─► 私有 Unix
 
 ## 一键安装
 
-私有仓库先在 Linux 运行 `gh auth login`，或给 GitHub CLI 设置有仓库 contents:read 权限的 `GH_TOKEN`。一条命令下载并安装最新 Release 的 Linux 客户端。
+在内网 Linux 上执行，无需 GitHub 登录。
 
 ```sh
-gh api repos/m9rco/tmux-link/contents/install.sh --jq .content | base64 -d > /tmp/tmux-link-install.sh && sh /tmp/tmux-link-install.sh --role agent --prefix "$HOME/.local"
+curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.sh | sh
 ```
 
-公网中心将 `--role agent` 改为 `--role center`。需要安装到系统目录时用 `sudo -E sh /tmp/tmux-link-install.sh --role both --with-deps`，其中 `--with-deps` 在 Debian/Ubuntu 上安装 OpenSSH 和 tmux。自定义安装位置的用户需将 `PREFIX/bin` 加入 PATH，并修改 systemd 模板中的可执行文件路径。
+默认只安装客户端 `agent`。普通用户安装到 `~/.local/bin`，root 安装到 `/usr/local/bin`。把安装目录加入 PATH，已有终端可以直接执行 `export PATH="$HOME/.local/bin:$PATH"`。
 
-可用 `--version v0.1.0` 固定版本，用 `--from-dir /path/to/downloads` 从包含归档和 SHA256SUMS 的本地目录离线安装。脚本根据架构下载 x86_64 或 aarch64 静态包，校验 SHA256 后安装二进制和部署模板。服务按下方说明完成公钥和主机配对后启用。
+公网中心安装并附带 OpenSSH、tmux 依赖（Debian/Ubuntu）时执行下方命令。
+
+```sh
+curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.sh | sudo sh -s -- --role center --with-deps
+```
+
+需要完整安装两种角色时选择 `--role both`。安装前先核对脚本，可先下载到文件再执行。Linux 需要 curl、tar 和 sha256sum。
+
+```sh
+# 固定版本和自定义安装位置
+curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.1/install.sh | sh -s -- --version v0.1.1 --prefix "$HOME/.local"
+```
+
+可用 `--from-dir /path/to/downloads` 从包含归档和 SHA256SUMS 的本地目录离线安装，也可用 `--download-base-url https://mirror.example.com/release` 指定包含同名归档和 SHA256SUMS 的 HTTPS 镜像。私有 fork 的下载可设置 `GH_TOKEN` 或 `GITHUB_TOKEN` 并安装 GitHub CLI。
+
+脚本自动识别 x86_64 / ARM64，下载失败会重试，SHA256 校验通过后安装。二进制升级使用同文件系统重命名，已运行进程继续使用原版本。部署模板和指南安装到 `PREFIX/share/tmux-link`。自定义安装位置时修改 systemd 模板中的可执行文件路径，按下方说明完成公钥和主机配对后启用服务。
 
 ## GitHub 构建与发布
 
@@ -83,5 +103,16 @@ ssh-keygen -lf /etc/tmux-link/host_ed25519.pub
 - 中心用 Tokio 双向转发，最多 32 条并发连接，未安装录屏或会话内容日志。终端按字节处理，输入和输出分别推进，输出随渲染进度施加背压。移动网络的实际延迟取决于手机、中心与 Linux 三者之间的链路。
 
 ## 验证
+
+| 测试 | 验证内容 |
+|---|---|
+| 安装脚本 | 离线安装、角色选择、校验失败拒绝写入 |
+| HTTPS 下载集成 | 临时 TLS 服务执行真实 `curl &#124; sh`，验证默认客户端安装、升级和损坏包拒绝 |
+| tmux 集成 | 真实 Linux / OpenSSH 隧道，验证错误指纹、未授权密钥、分片输入、尺寸调整和断线重连 |
+| 输入协议 | 超大帧和未知帧被拒绝并断开连接 |
+| 发布包 | x86_64 和 ARM64 构建包安装后执行实际二进制 |
+| iOS | 设备与 ARM64 模拟器的未签名 App 构建 |
+
+输入缓冲区在同一连接中复用，减少连续按键和粘贴时的重复分配。SSH 即使遇到输入协议错误也会发起断开，关闭等待上限为 5 秒。
 
 `cargo fmt --all -- --check` 和 `cargo clippy --workspace --all-targets -- -D warnings` 检查 Rust 代码。`scripts/e2e-linux.sh` 使用临时 Docker 容器和临时密钥，通过 iOS 同一 Rust FFI 入口访问真实 Linux tmux，检查错误指纹、未授权设备密钥、会话选择、输入回显、窗口尺寸和重连后的 shell 状态。Apple Silicon 上默认测试目标为 x86_64 Linux musl，Docker 需要支持运行 amd64 镜像。终端静态资源的 MIT 许可证位于 `ios/assets/`。

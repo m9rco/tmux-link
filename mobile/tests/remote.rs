@@ -72,16 +72,12 @@ fn expect(socket: &mut UnixStream, text: &str) {
 #[ignore = "requires a disposable Linux sshd/tmux fixture"]
 fn pinned_mobile_session() {
     let pin = std::env::var("TL_TEST_PIN").unwrap();
-    let (_view, bad) = start("SHA256:incorrect", "TL_TEST_KEY");
-    assert_eq!(bad.join().unwrap().unwrap_err(), "Unknown server key");
-    let (_view, unauthorized) = start(&pin, "TL_TEST_UNAUTHORIZED_KEY");
-    assert_eq!(
-        unauthorized.join().unwrap().unwrap_err(),
-        "phone key rejected"
-    );
     let (mut view, worker) = start(&pin, "TL_TEST_KEY");
     expect(&mut view, "Session number:");
-    send(&mut view, 0, b"1\r");
+    view.write_all(&[0, 0]).unwrap();
+    view.write_all(&[0, 0, 2]).unwrap();
+    view.write_all(b"1").unwrap();
+    view.write_all(b"\r").unwrap();
     expect(&mut view, "tl-live");
     send(&mut view, 1, &[0, 88, 0, 29]);
     send(
@@ -106,4 +102,38 @@ fn pinned_mobile_session() {
     expect(&mut view, "session-retained");
     drop(view);
     worker.join().unwrap().unwrap();
+}
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn rejects_untrusted_peers() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (_view, bad) = start("SHA256:incorrect", "TL_TEST_KEY");
+    assert_eq!(bad.join().unwrap().unwrap_err(), "Unknown server key");
+    let (_view, unauthorized) = start(&pin, "TL_TEST_UNAUTHORIZED_KEY");
+    assert_eq!(
+        unauthorized.join().unwrap().unwrap_err(),
+        "phone key rejected"
+    );
+}
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn rejects_oversized_input_frame() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start(&pin, "TL_TEST_KEY");
+    expect(&mut view, "Session number:");
+    view.write_all(&[0]).unwrap();
+    view.write_all(&65537_u32.to_be_bytes()).unwrap();
+    assert_eq!(worker.join().unwrap().unwrap_err(), "input frame too large");
+}
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn rejects_unknown_input_frame() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start(&pin, "TL_TEST_KEY");
+    expect(&mut view, "Session number:");
+    send(&mut view, 9, &[]);
+    assert_eq!(worker.join().unwrap().unwrap_err(), "invalid input frame");
 }

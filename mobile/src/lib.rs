@@ -68,12 +68,13 @@ async fn run(
     // Independent pumps keep Ctrl-C responsive while the phone renders a burst of output.
     let upload = async {
         let mut kind = [0; 1];
+        let mut bytes = Vec::new();
         while read.read(&mut kind).await? != 0 {
             let count = read.read_u32().await? as usize;
             ensure!(count <= 65536, "input frame too large");
             match kind[0] {
                 0 => {
-                    let mut bytes = vec![0; count];
+                    bytes.resize(count, 0);
                     read.read_exact(&mut bytes).await?;
                     ssh_tx.data(&bytes[..]).await?;
                 }
@@ -100,13 +101,18 @@ async fn run(
         }
         Ok::<(), anyhow::Error>(())
     };
-    tokio::select! {
-        result = upload => result?,
-        result = download => result?,
-    }
-    session
-        .disconnect(russh::Disconnect::ByApplication, "", "en")
-        .await?;
+    let result = tokio::select! {
+        result = upload => result,
+        result = download => result,
+    };
+    // Close even when input validation failed, with a bounded shutdown wait.
+    let disconnected = timeout(
+        Duration::from_secs(5),
+        session.disconnect(russh::Disconnect::ByApplication, "", "en"),
+    )
+    .await;
+    result?;
+    disconnected??;
     Ok(())
 }
 
