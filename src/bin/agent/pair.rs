@@ -117,8 +117,22 @@ pub(super) fn command(args: &[String]) -> Result<()> {
         .context("usage: tmux-link-agent pair --center HOST")?;
     ensure!(valid_center(center), "expected public center hostname");
     let port: u16 = options.get("--port").unwrap_or(&"443").parse()?;
-    let ssh_port: u16 = options.get("--ssh-port").unwrap_or(&"22").parse()?;
+    let detected_port = env::var("SSH_CONNECTION")
+        .ok()
+        .and_then(|value| {
+            value
+                .split_whitespace()
+                .last()
+                .and_then(|p| p.parse::<u16>().ok())
+        })
+        .unwrap_or(22);
+    let ssh_port: u16 = match options.get("--ssh-port") {
+        Some(port) => port.parse()?,
+        None => detected_port,
+    };
     ensure!(port != 0 && ssh_port != 0, "ports must be nonzero");
+    read_command("tmux", &["-V"])
+        .context("tmux is required on this host; install it before pairing")?;
     let home = PathBuf::from(env::var_os("HOME").context("HOME is missing")?);
     let directory = home
         .join(".config/tmux-link/paired")
