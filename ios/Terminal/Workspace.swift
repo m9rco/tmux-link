@@ -4,7 +4,7 @@ import SwiftUI
 struct ClientProfile: Codable, Hashable, Identifiable {
   var id = UUID()
   var name = ""
-  var host = "bj.lander.work"
+  var host = "center.example.com"
   var port: UInt16 = 443
   var route = ""
   var user = ""
@@ -80,7 +80,7 @@ final class ProfileStore: ObservableObject {
     } else if let pin = defaults.string(forKey: "内网 SSH 主机指纹 SHA256:…"),
       let user = defaults.string(forKey: "远程用户名") ?? defaults.string(forKey: "Linux 用户名")
     {
-      let host = defaults.string(forKey: "公网中心地址") ?? "bj.lander.work"
+      let host = defaults.string(forKey: "公网中心地址") ?? "center.example.com"
       clients = [
         ClientProfile(
           name: user + " @ " + host, host: host,

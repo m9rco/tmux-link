@@ -134,12 +134,12 @@ final class RemoteSessionTests: XCTestCase {
     defaults.set("SHA256:test-a", forKey: "内网 SSH 主机指纹 SHA256:…")
     let store = ProfileStore(defaults)
     let first = try XCTUnwrap(store.clients.first)
-    XCTAssertEqual(first.endpoint, "bj.lander.work")
+    XCTAssertEqual(first.endpoint, "center.example.com")
     let second = ClientProfile(
       name: "Build", port: 8443, route: "build", user: "bob", pin: "SHA256:test-b")
     store.save(second)
     XCTAssertEqual(ProfileStore(defaults).clients, [first, second])
-    XCTAssertEqual(second.endpoint, "wss://bj.lander.work:8443/tmux-link/build")
+    XCTAssertEqual(second.endpoint, "wss://center.example.com:8443/tmux-link/build")
     store.remove(first.id)
     XCTAssertEqual(ProfileStore(defaults).clients, [second])
     store.remove(second.id)
@@ -212,7 +212,7 @@ final class RemoteSessionTests: XCTestCase {
     }
   }
 
-  func testBJCommandAndReconnect() throws {
+  func testCommandAndReconnect() throws {
     let config = try configuration()
     try roundtrip(
       config,

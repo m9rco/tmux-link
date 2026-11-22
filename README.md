@@ -6,10 +6,10 @@
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-333333?logo=apple)
 ![iOS](https://img.shields.io/badge/iOS-16%2B-333333?logo=apple)
 
-用 iPhone 接入内网 Linux 或 macOS 上已经运行的 tmux。内网机器主动通过 SSH 反向转发注册私有 Unix socket，手机通过 `wss://bj.lander.work/tmux-link` 接入。SSH 会话在手机与内网主机之间独立加密和认证，中心转发密文。
+用 iPhone 接入内网 Linux 或 macOS 上已经运行的 tmux。内网机器主动通过 SSH 反向转发注册私有 Unix socket，手机通过 `wss://center.example.com/tmux-link` 接入。文中 `center.example.com` 是示例域名，部署时请替换成自己的公网中心地址。SSH 会话在手机与内网主机之间独立加密和认证，中心转发密文。
 
 ```text
-iPhone ── SSH over WSS ──► bj.lander.work:443/tmux-link
+iPhone ── SSH over WSS ──► center.example.com:443/tmux-link
                                       │ HTTPS → loopback center:7682
                                       ▼
                               私有 Unix socket
@@ -80,8 +80,9 @@ iOS 客户端使用 Rust SSH 核心、UIKit、Keychain 和随 App 打包的 xter
 3. 安装 `deploy/tmux-link-inner.service` 和 `deploy/tmux-link-tunnel.service` 到 `/etc/systemd/system/`，更新隧道服务中的用户名。执行 `systemctl daemon-reload && systemctl enable --now tmux-link-inner tmux-link-tunnel`。隧道断线时由 systemd 重启。
 
 ```sshconfig
+# 把示例域名换成自己的公网中心地址
 Host tmux-center
-    HostName bj.lander.work
+    HostName center.example.com
     User tmuxrelay
     IdentityFile ~/.ssh/tmux-link-relay
     IdentitiesOnly yes
@@ -100,13 +101,13 @@ install -m 644 deploy/inner-sshd.conf /etc/tmux-link/inner-sshd.conf
 ssh-keygen -lf /etc/tmux-link/host_ed25519.pub
 ```
 
-手机填写公网中心地址 `bj.lander.work`、端口 443、内网用户名和刚核对的内网主机指纹，保存客户端后点选会话。若入口不通，依次查看两端 systemd 日志、中心 socket 是否存在、内网监听 2201 的服务及 tmux 所属账号。认证和连接日志保留在系统 SSH 日志中。
+手机填写公网中心地址 `center.example.com`、端口 443、内网用户名和刚核对的内网主机指纹，保存客户端后点选会话。若入口不通，依次查看两端 systemd 日志、中心 socket 是否存在、内网监听 2201 的服务及 tmux 所属账号。认证和连接日志保留在系统 SSH 日志中。
 
 ## 内网 macOS
 
 1. 安装客户端与 tmux，在系统设置 → 通用 → 共享中开启「远程登录」，只允许需要的用户。运行 `tmux new -s work` 创建会话。Mac 客户端使用系统 OpenSSH，默认转发本机端口 22。
-2. 创建 `~/.config/tmux-link`（权限 700），用 `ssh-keygen -t ed25519 -f ~/.config/tmux-link/tunnel -N ''` 生成独立隧道密钥，将公钥授权给 BJ 的 tmuxrelay 用户。
-3. 在 `~/.config/tmux-link/ssh_config` 中写入上方的 `Host tmux-center` 配置，IdentityFile 改为该隧道密钥的绝对路径，添加已通过可信连接核对的 BJ 主机公钥到 known_hosts，并指定 `UserKnownHostsFile` 和 `StrictHostKeyChecking yes`。
+2. 创建 `~/.config/tmux-link`（权限 700），用 `ssh-keygen -t ed25519 -f ~/.config/tmux-link/tunnel -N ''` 生成独立隧道密钥，将公钥授权给公网中心的 tmuxrelay 用户。
+3. 在 `~/.config/tmux-link/ssh_config` 中写入上方的 `Host tmux-center` 配置，IdentityFile 改为该隧道密钥的绝对路径，添加已通过可信连接核对的公网中心主机公钥到 known_hosts，并指定 `UserKnownHostsFile` 和 `StrictHostKeyChecking yes`。
 4. 将手机公钥加到 Mac 的 `~/.ssh/authorized_keys`，使用下面的受限格式。替换用户名及安装路径。主机指纹来自 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`，在手机中核对。
 5. 复制 `deploy/dev.tmuxlink.tunnel.plist` 到 `~/Library/LaunchAgents/`，替换 YOUR_USER、SSH 配置路径及远端 socket。运行 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.tmuxlink.tunnel.plist`。登录用户会话后保持隧道在线，退出登录和机器睡眠会断开。
 
@@ -130,7 +131,7 @@ TMUX_LINK_SSH_CONFIG="$HOME/.config/tmux-link/ssh_config" tmux-link-agent tunnel
 tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket build=/home/tmuxrelay/link/build.sock
 ```
 
-在 iPhone 点「添加客户端」，填入第二台机器的名称、用户名、SSH 指纹，以及客户端路由 `build`；中心仍填 `bj.lander.work`。可以追加更多 `NAME=/absolute/socket` 参数。路由名区分大小写，最长 64 位，只允许英文字母、数字、下划线和短横线。中心拒绝未登记的路径。手机通过加密 SSH 请求读取和选择会话。
+在 iPhone 点「添加客户端」，填入第二台机器的名称、用户名、SSH 指纹，以及客户端路由 `build`；中心仍填 `center.example.com`。可以追加更多 `NAME=/absolute/socket` 参数。路由名区分大小写，最长 64 位，只允许英文字母、数字、下划线和短横线。中心拒绝未登记的路径。手机通过加密 SSH 请求读取和选择会话。
 
 ## 安全与性能边界
 
@@ -161,10 +162,10 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 Mac 出站隧道在线后，用 USB 连接并解锁 iPhone，在普通用户终端执行下方命令。首次签名可能需要 macOS 钥匙串授权；首次启动若提示不受信任，在 iPhone 的「设置 → 通用 → VPN 与设备管理」确认自己的开发者账号。
 
 ```sh
-scripts/test-ios-device.sh YOUR_DEVICE_ID --pair-local-mac
+TMUX_LINK_E2E_HOST=center.example.com scripts/test-ios-device.sh YOUR_DEVICE_ID --pair-local-mac
 ```
 
-脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过 BJ 的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试配置与公钥导出仅用于开发构建，手机上的正常连接表单会在测试成功后填入已验证的参数。
+脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过公网中心的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试配置与公钥导出仅用于开发构建，手机上的正常连接表单会在测试成功后填入已验证的参数。
 
 ## 个人签名自动维护
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build, pair and test the physical iPhone against this Mac through the BJ relay.
+# Build, pair and test the physical iPhone against this Mac through the public relay.
 set -eu
 cd "$(dirname "$0")/.."
 if [ "$#" -ne 2 ] || [ "$2" != --pair-local-mac ]; then
@@ -75,7 +75,7 @@ with authorized.open("a+") as handle:
     os.chmod(authorized, 0o600)
 pin = subprocess.check_output(["ssh-keygen", "-lf", "/etc/ssh/ssh_host_ed25519_key.pub"], text=True).split()[1]
 Path(output).write_text(json.dumps({
-    "host": os.environ.get("TMUX_LINK_E2E_HOST", "bj.lander.work"), "port": 443,
+    "host": os.environ.get("TMUX_LINK_E2E_HOST", "center.example.com"), "port": 443,
     "user": os.environ.get("USER", Path.home().name),
     "fingerprint": pin, "sessionName": session,
 }) + "\n")
