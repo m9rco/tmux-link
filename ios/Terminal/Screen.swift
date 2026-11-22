@@ -57,7 +57,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var expiry: Timer?
   private var completed = false
   private let transportBadge = UILabel()
-  private let keys = UIStackView()
+  private var shortcuts: ShortcutDrawer!
   private var scrollOrigin = CGPoint.zero
   private var lastScrollDistance: CGFloat = 0
   private var firstScrollStep = true
@@ -122,29 +122,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     transportBadge.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentCompressionResistancePriority(.required, for: .horizontal)
-    let scroll = UIScrollView()
-    scroll.showsHorizontalScrollIndicator = false
-    keys.spacing = 5
-    keys.isUserInteractionEnabled = false
-    keys.alpha = 0.45
-    for (label, key) in [
-      ("Esc", "\u{1b}"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"),
-      ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
-      ("↑", "\u{1b}[A"), ("↓", "\u{1b}[B"), ("←", "\u{1b}[D"), ("→", "\u{1b}[C"), ("↵", "\r"),
-    ] {
-      var style = UIButton.Configuration.tinted()
-      style.title = label
-      style.baseForegroundColor = label == "Esc" ? .systemOrange : accent
-      style.contentInsets = .init(top: 3, leading: 8, bottom: 3, trailing: 8)
-      let button = UIButton(configuration: style)
-      button.accessibilityIdentifier = "terminal.key." + label
-      button.addAction(UIAction { [weak self] _ in self?.press(key) }, for: .touchUpInside)
-      keys.addArrangedSubview(button)
-      button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-    }
-    scroll.addSubview(keys)
-    keys.translatesAutoresizingMaskIntoConstraints = false
-    let stack = UIStackView(arrangedSubviews: [bar, viewport!, scroll])
+    let stack = UIStackView(arrangedSubviews: [bar, viewport!])
     stack.axis = .vertical
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -153,13 +131,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
       stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-      scroll.heightAnchor.constraint(equalToConstant: 44),
-      keys.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
-      keys.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
-      keys.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
-      keys.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
-      keys.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
     ])
+    shortcuts = ShortcutDrawer(in: viewport, accent: accent) { [weak self] key in self?.press(key) }
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
     NotificationCenter.default.addObserver(
@@ -373,8 +346,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
-      keys.isUserInteractionEnabled = true
-      keys.alpha = 1
+      shortcuts.setReady(true)
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
     refreshStatus()
@@ -471,8 +443,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func disconnect() {
     ready = false
-    keys.isUserInteractionEnabled = false
-    keys.alpha = 0.45
+    shortcuts?.setReady(false)
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)

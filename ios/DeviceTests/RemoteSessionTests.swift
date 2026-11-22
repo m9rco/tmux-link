@@ -403,6 +403,38 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  func testShortcutDrawerInShortViewport() throws {
+    let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 640, height: 180))
+    var sent: [String] = []
+    let drawer = ShortcutDrawer(in: viewport, accent: .systemMint) { sent.append($0) }
+    drawer.setReady(true)
+    viewport.layoutIfNeeded()
+    let panel = try XCTUnwrap(descendants(drawer).first {
+      $0.accessibilityIdentifier == "terminal.shortcuts"
+    } as? UIScrollView)
+    let reveal = try XCTUnwrap(descendants(drawer).first {
+      $0.accessibilityIdentifier == "terminal.shortcuts.open"
+    } as? UIButton)
+    let enter = try XCTUnwrap(descendants(panel).first {
+      $0.accessibilityIdentifier == "terminal.key.↵"
+    } as? UIButton)
+    XCTAssertTrue(panel.isHidden)
+    XCTAssertTrue(viewport.hitTest(CGPoint(x: 300, y: 90), with: nil) === viewport)
+    UIView.performWithoutAnimation { reveal.sendActions(for: .touchUpInside) }
+    viewport.layoutIfNeeded()
+    XCTAssertEqual(panel.frame.height, viewport.bounds.height, accuracy: 1)
+    XCTAssertGreaterThan(panel.contentSize.height, panel.bounds.height)
+    let lastRow = enter.convert(enter.bounds, to: panel)
+    panel.scrollRectToVisible(lastRow, animated: false)
+    XCTAssertTrue(panel.bounds.contains(lastRow))
+    XCTAssertTrue(viewport.hitTest(enter.convert(CGPoint(x: 20, y: 20), to: viewport),
+                                   with: nil)?.isDescendant(of: enter) == true)
+    enter.sendActions(for: .touchUpInside)
+    XCTAssertEqual(sent, ["\r"])
+    XCTAssertFalse(panel.isHidden)
+  }
+
+  @MainActor
   func testNamedSessionsAndEscapeButton() async throws {
     let config = try configuration()
     let client: ClientProfile
@@ -457,6 +489,26 @@ final class RemoteSessionTests: XCTestCase {
       let escape = try XCTUnwrap(
         descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.key.Esc" }
           as? UIButton)
+      let panel = try XCTUnwrap(descendants(screen.view).first {
+        $0.accessibilityIdentifier == "terminal.shortcuts"
+      } as? UIScrollView)
+      let reveal = try XCTUnwrap(descendants(screen.view).first {
+        $0.accessibilityIdentifier == "terminal.shortcuts.open"
+      } as? UIButton)
+      let dismiss = try XCTUnwrap(descendants(screen.view).first {
+        $0.accessibilityIdentifier == "terminal.shortcuts.close"
+      } as? UIButton)
+      XCTAssertTrue(panel.isHidden)
+      XCTAssertTrue(dismiss.isHidden)
+      @MainActor func toggle(_ button: UIButton) async throws {
+        button.sendActions(for: .touchUpInside)
+        let closing = button === dismiss
+        for _ in 0..<50 {
+          if panel.isHidden == closing && panel.layer.animationKeys()?.isEmpty != false { break }
+          try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        host.view.layoutIfNeeded()
+      }
       func waitFor(_ marker: String) async throws {
         for _ in 0..<100 {
           let value = try? await web.evaluateJavaScript(
@@ -506,6 +558,7 @@ final class RemoteSessionTests: XCTestCase {
         let item = try XCTUnwrap(navigation.topItem)
         let viewport = try XCTUnwrap(web.superview)
         let terminalFrame = viewport.convert(viewport.bounds, to: host.view)
+        let keyboardTop = screen.view.convert(screen.view.keyboardLayoutGuide.layoutFrame, to: host.view).minY
         let measurement = try await web.evaluateJavaScript("""
           (() => {
             const area = document.querySelector('#term').getBoundingClientRect();
@@ -522,13 +575,36 @@ final class RemoteSessionTests: XCTestCase {
           XCTAssertEqual(drawn.minX, host.view.safeAreaLayoutGuide.layoutFrame.minX, accuracy: pixel)
           XCTAssertEqual(drawn.maxX, host.view.safeAreaLayoutGuide.layoutFrame.maxX, accuracy: pixel)
           XCTAssertEqual(drawn.minY, terminalFrame.minY, accuracy: pixel)
-          XCTAssertEqual(drawn.maxY, escape.convert(escape.bounds, to: host.view).minY, accuracy: pixel)
+          XCTAssertEqual(drawn.maxY, keyboardTop, accuracy: pixel)
           print("Terminal grid: \(Int(grid[0])) columns × \(Int(grid[1])) rows")
         }
         XCTAssertLessThanOrEqual(
           navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY + 1)
-        XCTAssertLessThanOrEqual(
-          terminalFrame.maxY, escape.convert(escape.bounds, to: host.view).minY + 1)
+        XCTAssertEqual(terminalFrame.maxY, keyboardTop, accuracy: 1)
+        try await toggle(reveal)
+        XCTAssertFalse(panel.isHidden)
+        XCTAssertFalse(dismiss.isHidden)
+        let panelFrame = panel.convert(panel.bounds, to: host.view)
+        XCTAssertEqual(panelFrame.maxX, terminalFrame.maxX, accuracy: 1)
+        XCTAssertTrue(terminalFrame.insetBy(dx: -1, dy: -1).contains(panelFrame))
+        let keys = descendants(panel).compactMap { $0 as? UIButton }.sorted { a, b in
+          a.convert(a.bounds, to: panel).minY < b.convert(b.bounds, to: panel).minY
+        }
+        XCTAssertEqual(keys.compactMap { $0.configuration?.title },
+                       ["Esc", "PgUp", "PgDn", "Tab", "⌃C", "⌃B", "↑", "↓", "←", "→", "↵"])
+        for key in keys {
+          XCTAssertGreaterThanOrEqual(key.bounds.height, 44)
+          XCTAssertEqual(key.convert(key.bounds, to: panel).midX, panel.bounds.midX, accuracy: 1)
+        }
+        let size = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Double]
+        XCTAssertEqual(size, Array(grid.prefix(2)))
+        XCTAssertEqual(viewport.convert(viewport.bounds, to: host.view), terminalFrame)
+        try await toggle(dismiss)
+        XCTAssertTrue(panel.isHidden)
+        XCTAssertTrue(dismiss.isHidden)
+        let sizeAfterClose = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Double]
+        XCTAssertEqual(sizeAfterClose, size)
+        XCTAssertEqual(viewport.convert(viewport.bounds, to: host.view), terminalFrame)
         XCTAssertFalse(descendants(screen.view).contains {
           $0.accessibilityIdentifier == "terminal.status.details"
         }, "A compact connection indicator still occupies terminal or keyboard space")
@@ -570,6 +646,7 @@ final class RemoteSessionTests: XCTestCase {
       }
       if suffix == "-other", config.hasHistoryFixture == true {
         try await waitFor("RECENT-ROW-45")
+        try await toggle(reveal)
         for key in ["⌃B", "PgUp"] {
           let button = try XCTUnwrap(descendants(screen.view).first {
             $0.accessibilityIdentifier == "terminal.key." + key
@@ -577,6 +654,7 @@ final class RemoteSessionTests: XCTestCase {
           button.sendActions(for: .touchUpInside)
         }
         try await waitFor("PAST-ROW-100")
+        try await toggle(dismiss)
         // Mouse tracking is off. Drag up toward the latest output, then down toward older rows.
         _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -4, true)")
         try await waitFor("RECENT-ROW-45")
@@ -593,6 +671,7 @@ final class RemoteSessionTests: XCTestCase {
             + "stty \"$saved\"; printf '__BYTE_%s__\\n' \"$b\""
         )
         try await waitFor("__READY__")
+        try await toggle(reveal)
         escape.sendActions(for: .touchUpInside)
         try await waitFor("__BYTE_27__")
       }
