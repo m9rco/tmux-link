@@ -560,6 +560,51 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  func testMixedPinyinDraftEditing() async throws {
+    let saved = UserDefaults.standard.string(forKey: "terminal.typing.language")
+    defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
+    let board = TerminalTypingKeyboard()
+    var committed = ""
+    board.onText = { committed += $0 }
+    for _ in 0..<100 {
+      if (try? await board.surface.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool == true { break }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    let script = #"""
+      language = 'zh'; resetComposition();
+      const key = k => keyboard.handleButtonClicked(k);
+      const type = s => { for (const c of s) key(c); };
+      const snapshots = [];
+      type("nihao'shijie");
+      choose(options.findIndex(x => x.text === '你好'));
+      snapshots.push(spelling.textContent);
+      key('{lang}'); key('{lang}'); key('{bksp}');
+      snapshots.push(spelling.textContent);
+      choose(options.findIndex(x => x.text === '你好'));
+      type('x'); key('{bksp}'); snapshots.push(spelling.textContent);
+      choose(options.findIndex(x => x.text === '师姐'));
+      type('git'); key('{lang}'); key('{space}');
+      key('{lang}'); type('ni'); key('{lang}'); key('{enter}');
+      key('{lang}'); type('sh'); spelling.click();
+      type('nihao'); handleShortcut('\t'); snapshots.push(spelling.textContent);
+      key('{space}');
+      for (const phrase of ['qingjianchazheduandaima', 'womeiyouwenti', 'qingbangwoxiufuzhegewenti']) {
+        type(phrase); snapshots.push(options[0].text); key('{space}');
+      }
+      type('z'.repeat(160)); spelling.click();
+      return snapshots;
+      """#
+    let result = try await board.surface.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
+    XCTAssertEqual(result, ["你好shijie", "nihao'shijie", "你好shijie", "nihao",
+                            "请检查这段代码", "我没有问题", "请帮我修复这个问题"])
+    let expected = "你好师姐git nish\t你好请检查这段代码我没有问题请帮我修复这个问题" + String(repeating: "z", count: 160)
+    for _ in 0..<50 where committed.utf8.count < expected.utf8.count {
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    XCTAssertEqual(committed, expected)
+  }
+
+  @MainActor
   func testShortcutDrawerInShortViewport() throws {
     let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 640, height: 180))
     var sent: [String] = []
@@ -889,24 +934,52 @@ final class RemoteSessionTests: XCTestCase {
         try await waitFor("__BAR_1b0903__")
         try await type(
           "saved=$(stty -g); stty raw -echo; printf '__IME_%s__\\r\\n' READY; "
-            + "b=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
+            + "b=$(dd bs=1 count=13 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
             + "stty \"$saved\"; printf '__IME_%s__\\n' \"$b\""
         )
         try await waitFor("__IME_READY__")
-        let board = try XCTUnwrap((web as? TerminalWebView)?.typingKeyboard)
-        _ = try await board.surface.evaluateJavaScript("""
-          (() => {
-            const previous = language;
-            language = 'en'; resetComposition();
-            keyboard.handleButtonClicked('x');
-            language = 'zh';
-            for (const k of 'nihao') keyboard.handleButtonClicked(k);
-            document.querySelector('#candidates button').click();
-            language = previous; resetComposition();
-            return true;
-          })()
+        let terminal = try XCTUnwrap(web as? TerminalWebView)
+        let board = terminal.typingKeyboard.surface
+        let preference = UserDefaults.standard.string(forKey: "terminal.typing.language")
+        defer { UserDefaults.standard.set(preference, forKey: "terminal.typing.language") }
+        func showKeyboard() async throws {
+          _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
+          for _ in 0..<50 where terminal.typingKeyboard.isHidden {
+            try await Task.sleep(nanoseconds: 20_000_000)
+          }
+          XCTAssertFalse(terminal.typingKeyboard.isHidden)
+        }
+        try await showKeyboard()
+        _ = try await board.evaluateJavaScript("""
+          language = 'en'; resetComposition();
+          window.tapKey = k => keyboard.handleButtonClicked(k);
+          tapKey('x'); tapKey('{lang}');
+          for (const c of 'nihaoz') tapKey(c);
+          tapKey('{bksp}'); tapKey('{lang}'); true
           """)
-        try await waitFor("__IME_78e4bda0e5a5bd__")
+        bar.hideKeyboard?()
+        XCTAssertTrue(terminal.typingKeyboard.isHidden)
+        try await showKeyboard()
+        let resumed = try await board.evaluateJavaScript("spelling.textContent") as? String
+        XCTAssertEqual(resumed, "nihao")
+        let didRepeat = try await board.callAsyncJavaScript(#"""
+          tapKey('{lang}'); document.querySelector('#candidates button').click();
+          for (const c of 'git') tapKey(c);
+          tapKey('{lang}'); tapKey('{space}'); tapKey('{lang}');
+          tapKey('n'); tapKey('i');
+          const del = keyboard.getButtonElement('{bksp}');
+          const pointer = type => del.dispatchEvent(new PointerEvent(type, {
+            bubbles:true, pointerType:'touch', pointerId:1, isPrimary:true
+          }));
+          pointer('pointerdown');
+          await new Promise(done => setTimeout(done, 1000));
+          pointer('pointerup');
+          const repeated = !hasDraft();
+          pointer('pointerdown'); pointer('pointerup'); tapKey('.');
+          return repeated;
+          """#, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        XCTAssertEqual(didRepeat, true)
+        try await waitFor("__IME_78e4bda0e5a5bd676974207f2e__")
       }
     }
   }

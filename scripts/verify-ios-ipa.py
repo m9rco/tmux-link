@@ -40,7 +40,7 @@ def verify(archive):
     if any("_CodeSignature" in path.parts or path.name == "embedded.mobileprovision" for path in entries):
         raise ValueError("Unsigned IPA contains a signing resource or provisioning profile")
     keyboard = host / "assets/keyboard"
-    for name in ("index.html", "keyboard.css", "keyboard.js", "simple-keyboard.js", "pinyin.js",
+    for name in ("index.html", "keyboard.css", "keyboard.js", "decoder.js", "simple-keyboard.js", "pinyin.js",
                  "LICENSE-simple-keyboard", "LICENSE-pinyin-simp", "AUTHORS-pinyin-simp"):
         if keyboard / name not in entries:
             raise ValueError(f"IPA is missing the offline keyboard resource {name}")

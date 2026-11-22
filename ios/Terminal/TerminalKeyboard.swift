@@ -89,8 +89,6 @@ final class TerminalTypingKeyboard: UIView {
     ])
     let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets/keyboard")!
     surface.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
-    NotificationCenter.default.addObserver(self, selector: #selector(clearComposition),
-      name: UIApplication.didEnterBackgroundNotification, object: nil)
   }
 
   required init?(coder: NSCoder) { fatalError() }
@@ -102,12 +100,7 @@ final class TerminalTypingKeyboard: UIView {
     if previous?.verticalSizeClass != traitCollection.verticalSizeClass { panelHeight?.constant = preferredHeight }
   }
 
-  override func didMoveToWindow() {
-    super.didMoveToWindow()
-    if window == nil { clearComposition() }
-  }
-
-  @objc func clearComposition() {
+  func clearComposition() {
     surface.evaluateJavaScript("window.resetComposition?.()", completionHandler: nil)
   }
 

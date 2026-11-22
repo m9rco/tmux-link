@@ -203,7 +203,6 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       view.layoutIfNeeded()
     }
     if !visible {
-      web.typingKeyboard.clearComposition()
       web.evaluateJavaScript("term.blur()", completionHandler: nil)
     }
   }
@@ -573,6 +572,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     shortcuts?.setReady(false)
     web?.shortcutBar.setReady(false)
     web?.typingKeyboard.isUserInteractionEnabled = false
+    web?.typingKeyboard.clearComposition()
     if web != nil { setKeyboardVisible(false) }
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
