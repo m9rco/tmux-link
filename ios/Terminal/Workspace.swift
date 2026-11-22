@@ -525,6 +525,8 @@ struct TerminalView: View {
         TerminalController(client: client, session: session, status: status, leave: { dismiss() })
       }.padding(.top, inCutout ? -top : 0)
     }
+      // Screen's keyboardLayoutGuide is the single owner of the terminal's bottom edge.
+      .ignoresSafeArea(.keyboard, edges: .bottom)
       .background(Color(uiColor: Screen.surface).ignoresSafeArea())
       .toolbar(.hidden, for: .navigationBar)
       .statusBarHidden(true)

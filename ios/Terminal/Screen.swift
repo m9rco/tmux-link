@@ -9,6 +9,10 @@ private final class TerminalViewport: UIView {
   let web: WKWebView
   private var measuredArea = CGSize.zero
   private var grid = CGSize.zero
+  private var keyboardTransition = false
+  private var pendingLayout: DispatchWorkItem?
+  private var committedSize = CGSize.zero
+  private var pageLoaded = false
 
   init(web: WKWebView) {
     self.web = web
@@ -20,6 +24,12 @@ private final class TerminalViewport: UIView {
 
   required init?(coder: NSCoder) { fatalError() }
 
+  func didLoadPage() {
+    pageLoaded = true
+    committedSize = .zero
+    setNeedsLayout()
+  }
+
   func setMeasurement(area: CGSize, grid: CGSize) {
     guard measuredArea != area || self.grid != grid else { return }
     measuredArea = area
@@ -27,18 +37,64 @@ private final class TerminalViewport: UIView {
     setNeedsLayout()
   }
 
+  func keyboardWillChange(_ notification: Notification) {
+    guard window != nil, web.bounds.height > 0 else { return }
+    keyboardTransition = true
+    // Interactive or interrupted transitions can omit their matching did-change notification.
+    let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+    scheduleLayout(after: duration + 0.08)
+  }
+
+  func keyboardDidChange() {
+    guard keyboardTransition else { return }
+    // Let UIKeyboardLayoutGuide finish its layout pass before fitting the grid.
+    scheduleLayout(after: 0)
+  }
+
+  private func scheduleLayout(after delay: TimeInterval) {
+    pendingLayout?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      keyboardTransition = false
+      pendingLayout = nil
+      commitLayout()
+    }
+    pendingLayout = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+  }
+
   override func layoutSubviews() {
     super.layoutSubviews()
-    // The CSS viewport must keep its unscaled size when the keyboard or device rotates.
-    web.bounds = CGRect(origin: .zero, size: bounds.size)
-    web.layer.position = bounds.origin
-    guard grid.width > 0, grid.height > 0,
-      abs(measuredArea.width - bounds.width) < 1, abs(measuredArea.height - bounds.height) < 1
-    else {
-      web.transform = .identity
+    guard bounds.width > 0, bounds.height > 0 else { return }
+    if committedSize.width == bounds.width && committedSize.height != bounds.height {
+      // UIKit can lay out an intermediate height *before* posting willChangeFrame.
+      // Give the notification a display turn to take ownership of the pending resize.
+      if !keyboardTransition { scheduleLayout(after: 0.025) }
       return
     }
-    web.transform = CGAffineTransform(scaleX: bounds.width / grid.width, y: bounds.height / grid.height)
+    commitLayout()
+  }
+
+  private func commitLayout() {
+    guard bounds.width > 0, bounds.height > 0 else { return }
+    // WebKit tries to preserve the focused element's screen position when its scroll
+    // view grows. Keep that canvas full-height and resize only the clipped terminal grid.
+    let fullHeight = window.map { convert($0.safeAreaLayoutGuide.layoutFrame, from: $0).maxY } ?? bounds.height
+    let canvas = CGSize(width: bounds.width, height: max(fullHeight, bounds.height))
+    UIView.performWithoutAnimation {
+      if web.bounds.size != canvas { web.bounds = CGRect(origin: .zero, size: canvas) }
+      web.layer.position = bounds.origin
+      if pageLoaded && committedSize != bounds.size {
+        web.callAsyncJavaScript("setTerminalHeight(height)", arguments: ["height": bounds.height],
+                                in: nil, in: .page, completionHandler: nil)
+      }
+      committedSize = bounds.size
+      guard grid.width > 0, grid.height > 0,
+        abs(measuredArea.width - bounds.width) < 1, abs(measuredArea.height - bounds.height) < 1
+      else { return }
+      // Keep the previous sub-cell scale until WebKit measures the new grid.
+      web.transform = CGAffineTransform(scaleX: bounds.width / grid.width, y: bounds.height / grid.height)
+    }
   }
 }
 
@@ -159,6 +215,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
+    NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)),
+      name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(keyboardDidChange(_:)),
+      name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
     NotificationCenter.default.addObserver(
       self, selector: #selector(pauseStatus),
       name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -166,6 +226,16 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       self, selector: #selector(resumeStatus),
       name: UIApplication.didBecomeActiveNotification, object: nil)
   }
+  @objc private func keyboardWillChange(_ note: Notification) {
+    if let screen = note.object as? UIScreen, screen !== view.window?.screen { return }
+    viewport.keyboardWillChange(note)
+  }
+
+  @objc private func keyboardDidChange(_ note: Notification) {
+    if let screen = note.object as? UIScreen, screen !== view.window?.screen { return }
+    viewport.keyboardDidChange()
+  }
+
   func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
     guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
     let velocity = pan.velocity(in: web)
@@ -233,12 +303,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
 
   @objc private func scrollTerminal(_ pan: UIPanGestureRecognizer) {
     guard ready else { return }
-    let dy = pan.translation(in: web).y
+    let dy = pan.translation(in: viewport).y
     switch pan.state {
     case .began:
-      let point = pan.location(in: web)
-      scrollOrigin = CGPoint(x: point.x / max(1, web.bounds.width),
-                             y: (point.y - dy) / max(1, web.bounds.height))
+      let point = pan.location(in: viewport)
+      scrollOrigin = CGPoint(x: point.x / max(1, viewport.bounds.width),
+                             y: (point.y - dy) / max(1, viewport.bounds.height))
       lastScrollDistance = 0
       firstScrollStep = true
     case .changed, .ended: break
@@ -328,6 +398,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     guard active && !started else { return }
     started = true
+    viewport.didLoadPage()
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
       finish("本地连接失败")

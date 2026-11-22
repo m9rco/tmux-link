@@ -478,6 +478,42 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  private func verifyKeyboardLayout(_ web: WKWebView) async throws {
+    let initial = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
+    let full = try XCTUnwrap(initial)
+    let canvas = web.bounds.size
+    _ = try await web.evaluateJavaScript("""
+      window.keyboardSizes = [];
+      window.watchGrid = term.onResize(({cols, rows}) => keyboardSizes.push([cols, rows]));
+      true
+      """)
+    // Exercise the real keyboard guide and animation in the isolated fullscreen tmux fixture.
+    let responder = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+    web.superview?.addSubview(responder)
+    defer {
+      responder.removeFromSuperview()
+      web.evaluateJavaScript("watchGrid.dispose(); delete window.watchGrid; delete window.keyboardSizes",
+                             completionHandler: nil)
+    }
+    XCTAssertTrue(responder.becomeFirstResponder())
+    try await Task.sleep(nanoseconds: 950_000_000)
+    let opening = try await web.evaluateJavaScript("keyboardSizes.splice(0)") as? [[Int]]
+    let focused = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
+    let compact = try XCTUnwrap(focused)
+    XCTAssertEqual(compact.first, full.first)
+    XCTAssertLessThan(try XCTUnwrap(compact.last), try XCTUnwrap(full.last))
+    XCTAssertEqual(opening, [compact])
+    XCTAssertEqual(web.bounds.size, canvas)
+    XCTAssertTrue(responder.resignFirstResponder())
+    try await Task.sleep(nanoseconds: 950_000_000)
+    let closing = try await web.evaluateJavaScript("keyboardSizes") as? [[Int]]
+    let restored = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
+    XCTAssertEqual(closing, [full])
+    XCTAssertEqual(restored, full)
+    XCTAssertEqual(web.bounds.size, canvas)
+  }
+
+  @MainActor
   func testNamedSessionsAndEscapeButton() async throws {
     let config = try configuration()
     let client: ClientProfile
@@ -585,6 +621,7 @@ final class RemoteSessionTests: XCTestCase {
           _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -8, true)")
         }
         try await waitFor("Message 200")
+        try await verifyKeyboardLayout(web)
         continue
       }
       if suffix.isEmpty {

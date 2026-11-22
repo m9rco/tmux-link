@@ -44,8 +44,8 @@ function scrollRemote(x, y, fingerSteps, first) {
   const rect = screen.getBoundingClientRect();
   const event = {
     bubbles: true, cancelable: true, deltaMode: 1, deltaY: Math.sign(steps),
-    clientX: Math.max(rect.left, Math.min(rect.right - 1, x * innerWidth)),
-    clientY: Math.max(rect.top, Math.min(rect.bottom - 1, y * innerHeight))
+    clientX: Math.max(rect.left, Math.min(rect.right - 1, rect.left + x * rect.width)),
+    clientY: Math.max(rect.top, Math.min(rect.bottom - 1, rect.top + y * rect.height))
   };
   for (let i = 0; i < Math.min(8, Math.abs(steps)); i++) {
     screen.dispatchEvent(new WheelEvent('wheel', event));
@@ -85,6 +85,10 @@ function selectionSnapshot(x, y) {
   const row = buffer.viewportY + point.row;
   const inInput = span && row >= Math.floor(span.from / span.cols) && row <= Math.floor((span.to - 1) / span.cols);
   return {text, offset, atCursor: point.atCursor || !!inInput, selected: inputSelection ? term.getSelection() : ''};
+}
+
+function setTerminalHeight(height) {
+  document.getElementById('term').style.height = height + 'px';
 }
 
 // Load the local symbol face before xterm caches its first glyph measurements.
