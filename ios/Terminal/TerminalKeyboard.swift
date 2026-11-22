@@ -23,11 +23,100 @@ enum TerminalKey: String, CaseIterable {
   }
 }
 
-// WebKit's focused text control asks its WKWebView for this accessory.
-// Keeping the same view for the lifetime of the session preserves the IME.
+// WebKit forwards its focused text control's input views to the host web view.
 final class TerminalWebView: WKWebView {
   let shortcutBar = TerminalKeyboardBar()
+  let typingKeyboard = TerminalTypingKeyboard()
+  override var inputView: UIView? { typingKeyboard }
   override var inputAccessoryView: UIView? { shortcutBar }
+}
+
+private final class KeyboardSurface: WKWebView {
+  // A tap on a key must leave the terminal as first responder.
+  override var canBecomeFirstResponder: Bool { false }
+}
+
+private final class TypingBridge: NSObject, WKScriptMessageHandler {
+  static let languagePreference = "terminal.typing.language"
+  var onText: ((String) -> Void)?
+
+  func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+    guard message.frameInfo.isMainFrame, let body = message.body as? [String: String] else { return }
+    if let language = body["language"], ["en", "zh"].contains(language) {
+      UserDefaults.standard.set(language, forKey: Self.languagePreference)
+    } else if let text = body["text"], !text.isEmpty, text.utf8.count <= 512 {
+      onText?(text)
+    }
+  }
+}
+
+final class TerminalTypingKeyboard: UIInputView {
+  private let bridge = TypingBridge()
+  let surface: WKWebView
+  var onText: ((String) -> Void)? {
+    get { bridge.onText }
+    set { bridge.onText = newValue }
+  }
+
+  init() {
+    let config = WKWebViewConfiguration()
+    config.websiteDataStore = .nonPersistent()
+    config.userContentController.add(bridge, name: "typingKeyboard")
+    let chinese = UserDefaults.standard.string(forKey: TypingBridge.languagePreference) == "zh"
+    config.userContentController.addUserScript(WKUserScript(
+      source: chinese ? "window.initialLanguage = 'zh'" : "window.initialLanguage = 'en'",
+      injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    surface = KeyboardSurface(frame: .zero, configuration: config)
+    super.init(frame: CGRect(x: 0, y: 0, width: 375, height: 216), inputViewStyle: .keyboard)
+    allowsSelfSizing = true
+    backgroundColor = Screen.surface
+    surface.isOpaque = false
+    surface.backgroundColor = Screen.surface
+    surface.underPageBackgroundColor = Screen.surface
+    surface.scrollView.isScrollEnabled = false
+    surface.scrollView.contentInsetAdjustmentBehavior = .never
+    surface.accessibilityIdentifier = "terminal.typing"
+    surface.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(surface)
+    NSLayoutConstraint.activate([
+      surface.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
+      surface.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
+      surface.topAnchor.constraint(equalTo: topAnchor),
+      surface.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor)
+    ])
+    let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets/keyboard")!
+    surface.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
+    NotificationCenter.default.addObserver(self, selector: #selector(clearComposition),
+      name: UIApplication.didEnterBackgroundNotification, object: nil)
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  override var intrinsicContentSize: CGSize {
+    CGSize(width: UIView.noIntrinsicMetric, height: traitCollection.verticalSizeClass == .compact ? 150 : 216)
+  }
+
+  override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+    super.traitCollectionDidChange(previous)
+    if previous?.verticalSizeClass != traitCollection.verticalSizeClass { invalidateIntrinsicContentSize() }
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil { clearComposition() }
+  }
+
+  @objc func clearComposition() {
+    surface.evaluateJavaScript("window.resetComposition?.()", completionHandler: nil)
+  }
+
+  func handleShortcut(_ key: String) {
+    surface.callAsyncJavaScript("handleShortcut(key)", arguments: ["key": key], in: nil, in: .page) {
+      [weak self] result in
+      // The native shortcut row can become available before the layout has loaded.
+      if case .failure = result { self?.onText?(key) }
+    }
+  }
 }
 
 final class TerminalKeyboardBar: UIInputView {

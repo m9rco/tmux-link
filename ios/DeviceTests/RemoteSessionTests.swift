@@ -525,6 +525,41 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  func testOfflineEnglishAndPinyinKeyboard() async throws {
+    let saved = UserDefaults.standard.string(forKey: "terminal.typing.language")
+    defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
+    let board = TerminalTypingKeyboard()
+    let page = board.surface
+    var committed: [String] = []
+    board.onText = { committed.append($0) }
+    for _ in 0..<100 {
+      if (try? await page.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool == true { break }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    let script = #"""
+      language='en'; resetComposition();
+      const key = k => keyboard.handleButtonClicked(k);
+      key('a'); key('{shift}'); key('B'); key('{symbols}'); key('7'); key('{symbols}');
+      key('{lang}');
+      for (const c of 'nihaoshijie') key(c);
+      const phrase = options[0].text;
+      key('{space}');
+      for (const c of 'shijie') key(c);
+      const alternative = options.findIndex(x => x.text === '师姐');
+      choose(alternative);
+      for (const c of "xi'an") key(c);
+      const disambiguated = options[0].text;
+      key('{bksp}'); handleShortcut('\x1b');
+      key('n'); key('i'); key('{enter}'); key('{enter}'); key('{bksp}');
+      return [phrase, disambiguated, pending, keyboard.getInput()];
+      """#
+    let result = try await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
+    XCTAssertEqual(result, ["你好世界", "西安", "", ""])
+    for _ in 0..<30 where committed.count < 8 { try await Task.sleep(nanoseconds: 20_000_000) }
+    XCTAssertEqual(committed, ["a", "B", "7", "你好世界", "师姐", "你", "\r", "\u{7f}"])
+  }
+
+  @MainActor
   func testShortcutDrawerInShortViewport() throws {
     let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 640, height: 180))
     var sent: [String] = []
@@ -568,6 +603,7 @@ final class RemoteSessionTests: XCTestCase {
       """)
     // Exercise the real keyboard guide and animation in the isolated fullscreen tmux fixture.
     let responder = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+    responder.inputView = web.inputView
     responder.inputAccessoryView = web.inputAccessoryView
     web.superview?.addSubview(responder)
     defer {
@@ -858,6 +894,26 @@ final class RemoteSessionTests: XCTestCase {
           button.sendActions(for: .touchUpInside)
         }
         try await waitFor("__BAR_1b0903__")
+        try await type(
+          "saved=$(stty -g); stty raw -echo; printf '__IME_%s__\\r\\n' READY; "
+            + "b=$(dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
+            + "stty \"$saved\"; printf '__IME_%s__\\n' \"$b\""
+        )
+        try await waitFor("__IME_READY__")
+        let board = try XCTUnwrap(web.inputView as? TerminalTypingKeyboard)
+        _ = try await board.surface.evaluateJavaScript("""
+          (() => {
+            const previous = language;
+            language = 'en'; resetComposition();
+            keyboard.handleButtonClicked('x');
+            language = 'zh';
+            for (const k of 'nihao') keyboard.handleButtonClicked(k);
+            document.querySelector('#candidates button').click();
+            language = previous; resetComposition();
+            return true;
+          })()
+          """)
+        try await waitFor("__IME_78e4bda0e5a5bd__")
       }
     }
   }

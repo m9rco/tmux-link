@@ -169,6 +169,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     config.websiteDataStore = .nonPersistent()
     config.userContentController.add(self, name: "terminal")
     web = TerminalWebView(frame: .zero, configuration: config)
+    web.typingKeyboard.isUserInteractionEnabled = false
+    web.typingKeyboard.onText = { [weak self] text in self?.sendTerminalKey(text) }
     web.shortcutBar.press = { [weak self] key in self?.press(key) }
     web.shortcutBar.hideKeyboard = { [weak self] in self?.web.endEditing(true) }
     web.navigationDelegate = self
@@ -520,6 +522,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       statusBar.isHidden = navigationStatus != nil
       shortcuts.setReady(true)
       web.shortcutBar.setReady(true)
+      web.typingKeyboard.isUserInteractionEnabled = true
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
     refreshStatus()
@@ -619,6 +622,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     ready = false
     shortcuts?.setReady(false)
     web?.shortcutBar.setReady(false)
+    web?.typingKeyboard.isUserInteractionEnabled = false
+    web?.typingKeyboard.clearComposition()
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)
@@ -627,8 +632,14 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func press(_ key: String) {
     guard ready else { return }
-    web.callAsyncJavaScript("pressTerminalKey(key)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
+    if web.typingKeyboard.window != nil { web.typingKeyboard.handleShortcut(key) }
+    else { sendTerminalKey(key) }
     UISelectionFeedbackGenerator().selectionChanged()
+  }
+
+  private func sendTerminalKey(_ key: String) {
+    guard ready else { return }
+    web.callAsyncJavaScript("pressTerminalKey(key)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
   }
   override func accessibilityPerformEscape() -> Bool {
     guard let leave else { return super.accessibilityPerformEscape() }
