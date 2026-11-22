@@ -5,8 +5,10 @@ const term = new Terminal({
   cursorWidth: 2,
   fontFamily: '"Terminal Symbols", ui-monospace, Menlo, monospace',
   fontSize: 14,
-  lineHeight: 1.12,
+  lineHeight: 1,
   scrollback: 4000,
+  // FitAddon also uses this width when calculating how many columns to request.
+  overviewRuler: {width: 1},
   theme: {
     background: '#0a141a', foreground: '#dce8eb', cursor: '#79e8c9',
     selectionBackground: '#345057', black: '#16272e', green: '#7ddbb5',

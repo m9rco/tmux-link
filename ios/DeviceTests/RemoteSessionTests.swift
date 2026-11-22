@@ -528,6 +528,23 @@ final class RemoteSessionTests: XCTestCase {
           descendants(host.view).compactMap { $0 as? UINavigationBar }.first { !$0.isHidden })
         let item = try XCTUnwrap(navigation.topItem)
         let terminalFrame = web.convert(web.bounds, to: host.view)
+        let measurement = try await web.evaluateJavaScript("""
+          (() => {
+            const area = document.querySelector('#term').getBoundingClientRect();
+            const screen = document.querySelector('.xterm-screen').getBoundingClientRect();
+            return [term.cols, term.rows, screen.width / term.cols, screen.height / term.rows,
+                    area.width - screen.width, area.height - screen.height];
+          })()
+          """)
+        let grid = try XCTUnwrap(measurement as? [Double])
+        XCTAssertEqual(grid.count, 6)
+        if grid.count == 6 {
+          XCTAssertGreaterThanOrEqual(grid[4], -1)
+          XCTAssertLessThan(grid[4], grid[2] + 1.5, "A full column is lost at the right edge")
+          XCTAssertGreaterThanOrEqual(grid[5], -1)
+          XCTAssertLessThan(grid[5], grid[3] + 1, "A full row is lost at the bottom")
+          print("Terminal grid: \(Int(grid[0])) columns × \(Int(grid[1])) rows")
+        }
         XCTAssertLessThanOrEqual(
           navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY + 1)
         XCTAssertLessThanOrEqual(

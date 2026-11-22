@@ -130,17 +130,18 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     keys.translatesAutoresizingMaskIntoConstraints = false
     let controls = UIStackView(arrangedSubviews: [historyButton, scroll])
     controls.spacing = 6
+    controls.isLayoutMarginsRelativeArrangement = true
+    controls.directionalLayoutMargins = .init(top: 0, leading: 4, bottom: 0, trailing: 4)
     let stack = UIStackView(arrangedSubviews: [bar, display, controls])
     stack.axis = .vertical
-    stack.spacing = 4
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
       stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-      stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 6),
+      stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 2),
       stack.trailingAnchor.constraint(
-        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -6),
+        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -2),
       scroll.heightAnchor.constraint(equalToConstant: 44),
       keys.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
       keys.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
