@@ -1,5 +1,5 @@
 //! Size-limited control messages for outbound host pairing.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -147,9 +147,17 @@ pub fn checked(reply: Reply) -> Result<Reply> {
 #[cfg(feature = "tls")]
 pub async fn request(url: &str, message: &Request) -> Result<Reply> {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let mut stream = crate::websocket::connect(url).await?;
-        write(&mut stream, message).await?;
-        checked(read(&mut stream).await?)
+        let mut stream = crate::websocket::connect(url)
+            .await
+            .context("Center TCP/TLS/WebSocket connection failed")?;
+        write(&mut stream, message)
+            .await
+            .context("Could not send the pairing request")?;
+        checked(
+            read(&mut stream)
+                .await
+                .context("Center closed or did not complete the pairing response")?,
+        )
     })
     .await?
 }

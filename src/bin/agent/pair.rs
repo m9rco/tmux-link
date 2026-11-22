@@ -204,17 +204,20 @@ pub(super) fn command(args: &[String]) -> Result<()> {
         "local SSH host key changed; review the old pairing before enrolling again"
     );
     save(&path, &state)?;
+    eprintln!(
+        "Local SSH verified at 127.0.0.1:{ssh_port}; connecting to {center}:{port} for pairing."
+    );
     runtime()?.block_on(async {
         pairing::request(&state.url("/tmux-link/register"), &Request::Register {
             token: state.token.clone(), code: state.code.clone(), host: state.host.clone()
-        }).await?;
+        }).await.context("Unable to register this host with the center")?;
         let escape = |text: &str| utf8_percent_encode(text, NON_ALPHANUMERIC).to_string();
         println!("Open this link in Tmux Link on your enrolled iPhone, then confirm the host fingerprint (link expires in 10 minutes):");
         println!("tmuxlink://pair?center={}&port={}&id={}&code={}&name={}&user={}&pin={}", escape(center), port, state.id, state.code, escape(&state.host.name), escape(&state.host.user), escape(&state.host.pin));
         println!("SSH fingerprint: {}\nWaiting for phone approval…", state.host.pin);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(pairing::PAIR_TTL);
         loop {
-            let reply = pairing::request(&state.url("/tmux-link/register"), &Request::Status { token: state.token.clone() }).await?;
+            let reply = pairing::request(&state.url("/tmux-link/register"), &Request::Status { token: state.token.clone() }).await.context("Unable to check phone approval with the center")?;
             if reply.approved {
                 let key = pairing::public_key(&reply.phone_key.context("approved host is missing its phone key")?)?;
                 authorize(&home, &key)?;
