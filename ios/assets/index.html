@@ -1,4 +1,29 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src data:">
-<link rel="stylesheet" href="xterm.css"><style>html,body,#term{margin:0;height:100%;background:#0a141a}</style>
-</head><body><div id="term"></div><script src="xterm.js"></script><script src="addon-fit.js"></script><script src="screen.js"></script></body></html>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src data:">
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    @font-face {
+      font-family: 'Terminal Symbols';
+      src: url('terminal-symbols.woff2') format('woff2');
+      unicode-range: U+E000-F8FF;
+    }
+    html, body, #term {
+      margin: 0;
+      height: 100%;
+      background: #0a141a;
+      -webkit-text-size-adjust: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="term"></div>
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+  <script src="addon-unicode-graphemes.js"></script>
+  <script src="screen.js"></script>
+</body>
+</html>

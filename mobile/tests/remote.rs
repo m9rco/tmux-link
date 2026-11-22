@@ -9,13 +9,13 @@ use std::{
 };
 
 fn start(pin: &str, key_env: &str) -> (UnixStream, JoinHandle<Result<(), String>>) {
-    start_protocol(pin, key_env, false)
+    start_protocol(pin, key_env, None)
 }
 
 fn start_protocol(
     pin: &str,
     key_env: &str,
-    framed: bool,
+    secure_target: Option<i64>,
 ) -> (UnixStream, JoinHandle<Result<(), String>>) {
     let get = |key| std::env::var(key).unwrap();
     let key = load_secret_key(get(key_env), None).unwrap();
@@ -36,7 +36,7 @@ fn start_protocol(
     view.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let worker = thread::spawn(move || unsafe {
-        let error = if framed {
+        let error = if let Some(target) = secure_target {
             tmux_link_mobile::tl_open_secure(
                 core.into_raw_fd(),
                 host.as_ptr(),
@@ -44,7 +44,7 @@ fn start_protocol(
                 user.as_ptr(),
                 fingerprint.as_ptr(),
                 seed.as_ptr(),
-                -1,
+                target,
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
@@ -95,6 +95,16 @@ fn expect(socket: &mut UnixStream, text: &str) {
     }
 }
 
+fn read_frame(socket: &mut UnixStream) -> (u8, Vec<u8>) {
+    let mut header = [0; 5];
+    socket.read_exact(&mut header).unwrap();
+    let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+    assert!(size <= 65536);
+    let mut payload = vec![0; size];
+    socket.read_exact(&mut payload).unwrap();
+    (header[0], payload)
+}
+
 #[test]
 #[ignore = "requires a disposable Linux sshd/tmux fixture"]
 fn pinned_mobile_session() {
@@ -113,6 +123,13 @@ fn pinned_mobile_session() {
         b"export TL_RESUME=retained; printf 'input-%s\\n' passed\r",
     );
     expect(&mut view, "input-passed");
+    // Only the command's output contains the UTF-8 text, never its echo.
+    send(
+        &mut view,
+        0,
+        b"printf '\\344\\270\\255\\360\\237\\231\\202\\n'\r",
+    );
+    expect(&mut view, "中🙂");
     send(
         &mut view,
         0,
@@ -169,20 +186,15 @@ fn rejects_unknown_input_frame() {
 #[ignore = "requires a disposable Linux sshd/tmux fixture"]
 fn framed_terminal_reports_remote_round_trip_and_keeps_output_separate() {
     let pin = std::env::var("TL_TEST_PIN").unwrap();
-    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", true);
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(-1));
     let mut stages = Vec::new();
     let mut terminal = Vec::new();
     let mut measured = false;
     let deadline = Instant::now() + Duration::from_secs(20);
     while !measured || !terminal.windows(15).any(|p| p == b"Session number:") {
         assert!(Instant::now() < deadline);
-        let mut header = [0; 5];
-        view.read_exact(&mut header).unwrap();
-        let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-        assert!(size <= 65536);
-        let mut payload = vec![0; size];
-        view.read_exact(&mut payload).unwrap();
-        match header[0] {
+        let (kind, payload) = read_frame(&mut view);
+        match kind {
             0 => terminal.extend(payload),
             1 => stages.push(String::from_utf8(payload).unwrap()),
             2 => {
@@ -195,6 +207,32 @@ fn framed_terminal_reports_remote_round_trip_and_keeps_output_separate() {
         }
     }
     assert_eq!(stages, ["connecting", "ssh", "auth", "attaching", "ready"]);
+    drop(view);
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn lists_and_attaches_unicode_session_in_c_locale() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(-2));
+    let mut list = String::new();
+    view.read_to_string(&mut list).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(list.contains("zz-中文🙂"), "{list}");
+
+    // The fixture creates this pane in its second session (ID 1).
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(1));
+    let marker = "pane-左🙂右".as_bytes();
+    let mut terminal = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !terminal.windows(marker.len()).any(|p| p == marker) {
+        assert!(Instant::now() < deadline, "missing Unicode pane text");
+        let (kind, payload) = read_frame(&mut view);
+        if kind == 0 {
+            terminal.extend(payload);
+        }
+    }
     drop(view);
     worker.join().unwrap().unwrap();
 }

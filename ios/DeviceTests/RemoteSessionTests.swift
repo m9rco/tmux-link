@@ -207,6 +207,87 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  func testBundledTerminalUnicodeCellWidths() async throws {
+    final class OfflineBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+      let loaded = XCTestExpectation(description: "Bundled terminal page loaded")
+      func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded.fulfill() }
+      func userContentController(
+        _ userContentController: WKUserContentController, didReceive message: WKScriptMessage
+      ) {}
+    }
+    let bridge = OfflineBridge()
+    let configuration = WKWebViewConfiguration()
+    configuration.websiteDataStore = .nonPersistent()
+    configuration.userContentController.add(bridge, name: "terminal")
+    let web = WKWebView(frame: .zero, configuration: configuration)
+    web.navigationDelegate = bridge
+    let controller = UIViewController()
+    controller.view = web
+    controller.modalPresentationStyle = .fullScreen
+    try XCTUnwrap(rootController).present(controller, animated: false)
+    defer { controller.dismiss(animated: false) }
+    let index = try XCTUnwrap(
+      Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets"))
+    web.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
+    await fulfillment(of: [bridge.loaded], timeout: 10)
+
+    // The one-cell ASCII control calibrates the rendered width on this device.
+    // These widths, including the split ZWJ sequence, match cursor_x in tmux 3.4.
+    let glyphs = ["A", "中", "e\u{301}", "🦊", "🫠", "👩‍💻", "\u{e0b0}", "\u{f07c}"]
+    let widths = [1, 2, 1, 2, 2, 2, 1, 1]
+    let script = #"""
+      const marker = '\x1b[31m|\x1b[0m';
+      const encode = new TextEncoder();
+      const send = bytes => window.display(btoa(String.fromCharCode(...bytes)));
+      await send(encode.encode(marker));
+      const cursors = [];
+      for (const glyph of glyphs) {
+        // Exercise the native byte bridge with UTF-8 split inside every multibyte code point.
+        for (const byte of encode.encode(glyph)) await send([byte]);
+        await send(encode.encode(marker));
+        cursors.push(term.buffer.active.cursorX);
+      }
+      const symbolFaces = await document.fonts.load('14px "Terminal Symbols"', '\ue0b0\uf07c');
+      await document.fonts.ready;
+      await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const row = document.querySelector('.xterm-rows > div');
+      const positions = [...row.querySelectorAll('span')]
+        .filter(element => element.textContent === '|')
+        .map(element => element.getBoundingClientRect().left);
+      const buffer = term.buffer.active;
+      return {
+        cursors, positions, line: buffer.getLine(buffer.baseY).translateToString(true),
+        symbolFont: symbolFaces.some(face => face.status === 'loaded')
+          && getComputedStyle(row).fontFamily.includes('Terminal Symbols')
+      };
+      """#
+    let result: [String: Any] = try await withCheckedThrowingContinuation { continuation in
+      web.callAsyncJavaScript(script, arguments: ["glyphs": glyphs], in: nil, in: .page) { value in
+        continuation.resume(with: Result { try XCTUnwrap(value.get() as? [String: Any]) })
+      }
+    }
+    let cursors = try XCTUnwrap(result["cursors"] as? [Int])
+    let positions = try XCTUnwrap(result["positions"] as? [Double])
+    XCTAssertEqual(result["symbolFont"] as? Bool, true, "Prompt icons need the bundled symbol font")
+    XCTAssertEqual(result["line"] as? String, "|" + glyphs.joined(separator: "|") + "|")
+    guard cursors.count == glyphs.count else {
+      return XCTFail("Missing terminal cursor samples: \(cursors)")
+    }
+    guard positions.count == glyphs.count + 1 else {
+      return XCTFail("Expected a visible boundary around each glyph, got \(positions)")
+    }
+    let cell = (positions[1] - positions[0]) / 2
+    XCTAssertGreaterThan(cell, 0)
+    var cursor = 1
+    for (i, glyph) in glyphs.enumerated() {
+      cursor += widths[i] + 1
+      XCTAssertEqual(cursors[i], cursor, "Cursor after \(glyph)")
+      let distance = positions[i + 1] - positions[i]
+      XCTAssertEqual(distance, Double(widths[i] + 1) * cell, accuracy: 1, "Rendered \(glyph)")
+    }
+  }
+
+  @MainActor
   func testNamedSessionsAndEscapeButton() async throws {
     let config = try configuration()
     let client = ClientProfile(
@@ -298,9 +379,15 @@ final class RemoteSessionTests: XCTestCase {
         }
       }
       func type(_ command: String) async throws {
-        let _: Any? = try await web.callAsyncJavaScript(
-          "term.input(command, true); return true", arguments: ["command": command + "\r"], in: nil,
-          in: .page)
+        let sent: Bool = try await withCheckedThrowingContinuation { continuation in
+          web.callAsyncJavaScript(
+            "term.input(command, true); return true", arguments: ["command": command + "\r"],
+            in: nil, in: .page
+          ) { result in
+            continuation.resume(with: result.map { $0 as? Bool == true })
+          }
+        }
+        XCTAssertTrue(sent)
       }
       try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")
       try await waitFor("__ID_$" + String(selected.id) + "__")

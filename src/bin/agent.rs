@@ -7,6 +7,7 @@ use std::{
     process::Command,
 };
 
+// Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
     let command = command
@@ -16,7 +17,7 @@ fn attach() -> Result<()> {
     if let Some(id) = command.and_then(|c| c.strip_prefix("tmux-link-attach ")) {
         let id: u64 = id.parse()?;
         return Err(Command::new("tmux")
-            .args(["attach-session", "-t", &format!("${id}")])
+            .args(["-u", "attach-session", "-t", &format!("${id}")])
             .exec()
             .into());
     }
@@ -25,7 +26,7 @@ fn attach() -> Result<()> {
         "unsupported request"
     );
     let list = Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_id}|#{session_name}"])
+        .args(["-u", "list-sessions", "-F", "#{session_id}|#{session_name}"])
         .output()?;
     if command == Some("tmux-link-list") && !list.status.success() {
         let reason = String::from_utf8_lossy(&list.stderr);
@@ -81,7 +82,7 @@ fn attach() -> Result<()> {
     };
     let (target, _) = sessions.get(index).context("invalid session number")?;
     Err(Command::new("tmux")
-        .args(["attach-session", "-t", target])
+        .args(["-u", "attach-session", "-t", target])
         .exec()
         .into())
 }

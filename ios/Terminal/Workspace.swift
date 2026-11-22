@@ -387,7 +387,7 @@ struct TerminalView: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         if let reading = status.reading {
-          ToolbarItem(placement: .navigationBarTrailing) {
+          let item = ToolbarItem(placement: .navigationBarTrailing) {
             Button {
               var lines = [reading.phase.title]
               if reading.phase == .ready {
@@ -396,24 +396,31 @@ struct TerminalView: View {
               }
               detail = lines.joined(separator: "\n")
             } label: {
-              HStack(spacing: 5) {
+              HStack(spacing: 4) {
                 Image(
                   systemName: reading.timedOut
                     ? "exclamationmark.circle.fill"
                     : (reading.phase == .ready ? "circle.fill" : "circle")
                 )
-                .font(.system(size: 9))
+                .font(.system(size: 6))
+                .foregroundStyle(reading.phase == .ready && !reading.timedOut ? mint : .orange)
                 Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
-                  .font(.caption.weight(.semibold)).monospacedDigit().lineLimit(1)
+                  .font(.caption).monospacedDigit().lineLimit(1)
+                  .foregroundStyle(.secondary)
               }
-              .foregroundStyle(reading.phase == .ready && !reading.timedOut ? mint : .orange)
               .frame(minWidth: 44, minHeight: 44)
               .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("连接详情")
             .accessibilityValue(accessibilityValue(reading))
             .accessibilityIdentifier("terminal.status.details")
           }
+          #if compiler(>=6.2)
+            if #available(iOS 26, *) { item.sharedBackgroundVisibility(.hidden) } else { item }
+          #else
+            item
+          #endif
         }
       }
       .alert(
