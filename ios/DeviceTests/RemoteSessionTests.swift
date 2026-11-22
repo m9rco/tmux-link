@@ -16,6 +16,7 @@ final class RemoteSessionTests: XCTestCase {
     let fingerprint: String
     let sessionName: String
     let importLink: String?
+    let route: String?
   }
 
   func configuration() throws -> Connection {
@@ -109,7 +110,7 @@ final class RemoteSessionTests: XCTestCase {
         received.removeAll(keepingCapacity: true)
         continue
       }
-      if !sent && (screen.contains("\u{1b}[?1049h") || screen.contains(config.sessionName)) {
+      if !sent && (screen.contains("\u{1b}[?1049h") || (selected && screen.contains(config.sessionName))) {
         try send(command + "\r")
         sent = true
         received.removeAll(keepingCapacity: true)
@@ -407,10 +408,10 @@ final class RemoteSessionTests: XCTestCase {
       let store = ProfileStore(defaults)
       let draft = try ClientTransfer.parse(link)
       XCTAssertEqual(draft.name, "Clipboard-E2E")
-      XCTAssertEqual(draft.relayHost, config.host.lowercased())
+      XCTAssertEqual(draft.relayHost, ClientProfile(host: config.host).relayHost)
       XCTAssertEqual(draft.port, config.port)
       XCTAssertEqual(draft.user, config.user)
-      XCTAssertEqual(draft.route, "primary")
+      XCTAssertEqual(draft.route, config.route ?? "primary")
       XCTAssertEqual(draft.pin, config.fingerprint)
       XCTAssertEqual(draft.requireMTLS, true)
       XCTAssertNil(draft.importedIdentity)
@@ -424,7 +425,7 @@ final class RemoteSessionTests: XCTestCase {
     } else {
       // Device fixtures created by earlier releases can still run the session tests.
       client = ClientProfile(
-        name: "Test", host: config.host, port: config.port, route: "primary",
+        name: "Test", host: config.host, port: config.port, route: config.route ?? "primary",
         user: config.user, pin: config.fingerprint)
     }
     let sessions = try await SessionDirectory.fetch(client)
@@ -498,6 +499,9 @@ final class RemoteSessionTests: XCTestCase {
         }
         if let activity {
           XCTAssertTrue(connection.superview?.isHidden == true)
+          for _ in 0..<30 where activity.content.state.phase != .ready {
+            try await Task.sleep(nanoseconds: 100_000_000)
+          }
           XCTAssertEqual(activity.content.state.phase, .ready)
           let reading = try XCTUnwrap(status.reading)
           XCTAssertEqual(reading.phase, .ready)
@@ -527,7 +531,9 @@ final class RemoteSessionTests: XCTestCase {
       try await waitFor("__ID_$" + String(selected.id) + "__")
       if suffix.isEmpty {
         try await type(
-          "python3 -c 'import os,tty,termios; t=termios.tcgetattr(0); tty.setraw(0); print(\"__READ\"+\"Y__\",flush=True); b=os.read(0,1); termios.tcsetattr(0,termios.TCSANOW,t); print(\"__BYTE_%d__\"%b[0],flush=True)'"
+          "saved=$(stty -g); stty raw -echo; printf '__REA%s__\\r\\n' DY; "
+            + "b=$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]'); "
+            + "stty \"$saved\"; printf '__BYTE_%s__\\n' \"$b\""
         )
         try await waitFor("__READY__")
         escape.sendActions(for: .touchUpInside)
