@@ -752,6 +752,7 @@ final class RemoteSessionTests: XCTestCase {
           if let output = value as? String, output.contains(marker) { return }
           try await Task.sleep(nanoseconds: 150_000_000)
         }
+        print("Missing terminal marker", marker, "in fixture", suffix)
         throw NSError(
           domain: "TerminalTest", code: 1,
           userInfo: [NSLocalizedDescriptionKey: "Missing terminal output " + marker])
@@ -878,7 +879,8 @@ final class RemoteSessionTests: XCTestCase {
         for _ in 0..<50 where board.typingKeyboard.isHidden { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertFalse(board.typingKeyboard.isHidden)
         if selected.touchPaging == true {
-          try await type("tmux set-option prefix C-a && git status")
+          try await type("tmux set-option prefix C-a && git status && printf '__GIT_%s__\\n' READY")
+          try await waitFor("__GIT_READY__")
           try await waitFor("status-file-150")
         }
         let rowValue = try await web.evaluateJavaScript("term.rows") as? Int
