@@ -115,3 +115,7 @@ cp -R "$tmp/unpack/share/tmux-link/." "$prefix/share/tmux-link/"
 echo "Installed $role to $prefix/bin"
 echo "Deployment templates and setup guide: $prefix/share/tmux-link"
 echo "Services require user, host and key configuration before activation."
+if [ "$role" = agent ] || [ "$role" = both ]; then
+    echo "Before import-link: configure inner SSH, authorize the phone public key, connect the tunnel and register the center route."
+    echo "Setup guide: $prefix/share/tmux-link/README.md"
+fi

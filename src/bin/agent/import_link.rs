@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use std::{collections::HashMap, process::Command};
+use std::{collections::HashMap, path::Path, process::Command};
 
 const USAGE: &str = "tmux-link-agent import-link --center HOST [--route NAME] [--port PORT] [--name DISPLAY_NAME] [--user SSH_USER] [--host-key PUBLIC_KEY_FILE]";
 const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
@@ -39,7 +39,7 @@ fn valid_center(host: &str) -> bool {
 pub(super) fn print(args: &[String]) -> Result<()> {
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "{USAGE}\nPrint an iPhone import link for this tmux host. Defaults to port 443, route primary and the current user. Run as the tmux owner."
+            "{USAGE}\nPrint an iPhone import link for a configured tmux host. First configure inner SSH, the outbound tunnel, the phone public key and the center route. Defaults to port 443, route primary and the current user. Run as the tmux owner."
         );
         return Ok(());
     }
@@ -107,6 +107,13 @@ pub(super) fn print(args: &[String]) -> Result<()> {
         "/etc/tmux-link/host_ed25519.pub"
     };
     let key = options.get("--host-key").copied().unwrap_or(default_key);
+    ensure!(
+        Path::new(key).is_file(),
+        "SSH host public key is missing or inaccessible: {key}.\n\
+         Complete the host setup before generating an import link: configure inner SSH, authorize the phone public key, establish the outbound tunnel and register its route at the center.\n\
+         See the installed guide at PREFIX/share/tmux-link/README.md (default PREFIX is ~/.local for a non-root install).\n\
+         If this host already uses a configured sshd, pass --host-key /path/to/its/actual/public-host-key."
+    );
     let fingerprint = read_command("ssh-keygen", &["-E", "sha256", "-l", "-f", key])
         .with_context(|| format!("cannot fingerprint the inner sshd public host key {key}; use --host-key to specify its path"))?;
     ensure!(

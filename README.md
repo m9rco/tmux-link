@@ -57,6 +57,8 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.3/install.s
 
 在已接入中心的机器上，以 tmux 所属用户生成链接。将域名和路由替换为该机器在中心的配置。主客户端的默认路由是 `primary`。
 
+首次在新机器运行安装脚本后，先完成下方「内网 Linux」或「内网 macOS」的配对步骤，再生成链接。若 Linux 提示缺少 `/etc/tmux-link/host_ed25519.pub`，请检查专用 sshd 的初始化步骤。已有自定义 sshd 的部署可通过 `--host-key` 指定该服务实际使用的主机公钥。中心还需要登记这台机器的路由，并授权手机证书访问它。
+
 ```sh
 tmux-link-agent import-link --center center.example.com --route build --name "构建机"
 ```
