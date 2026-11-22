@@ -69,6 +69,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   static let surface = UIColor(red: 10 / 255, green: 20 / 255, blue: 26 / 255, alpha: 1)
   let client: ClientProfile
   let target: Int64
+  private let touchPaging: Bool
   private let heading: String
   private let status = UILabel()
   private let latency = UILabel()
@@ -105,6 +106,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     self.leave = leave
     self.client = client
     self.navigationStatus = navigationStatus
+    touchPaging = session?.touchPaging == true
     target = session?.id ?? -1
     heading = session?.name ?? client.name
     super.init(nibName: nil, bundle: nil)
@@ -115,6 +117,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     title = heading
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
+    let paging = touchPaging ? "agent" : target >= 0 ? "tmux" : "keys"
+    config.userContentController.addUserScript(WKUserScript(
+      source: "window.touchPaging = '\(paging)'", injectionTime: .atDocumentStart, forMainFrameOnly: true))
     config.userContentController.add(self, name: "terminal")
     web = TerminalWebView(frame: .zero, configuration: config)
     web.typingKeyboard.isUserInteractionEnabled = false
@@ -412,6 +417,13 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
             let ms = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             let observedAt = Date()
             DispatchQueue.main.async { self?.updateLatency(ms, observedAt: observedAt) }
+          } else if kind == 3 && payload.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+              guard let self, active, view.window != nil, presentedViewController == nil else { return }
+              let alert = UIAlertController(title: "暂时无法翻页", message: "会话仍已连接，请稍后再滑动一次。", preferredStyle: .alert)
+              alert.addAction(UIAlertAction(title: "好", style: .default))
+              present(alert, animated: true)
+            }
           } else if kind == 0 {
             let rendered = DispatchSemaphore(value: 0)
             let bytes = payload.base64EncodedString()
@@ -489,6 +501,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   ) {
     guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
       return
+    }
+    if ready, touchPaging, let direction = obj["page"] as? String, ["up", "down"].contains(direction) {
+      send(2, Data([direction == "up" ? 1 : 0]))
     }
     if obj["showKeyboard"] as? Bool == true, ready { setKeyboardVisible(true) }
     if let metrics = obj["layout"] as? [String: Double],

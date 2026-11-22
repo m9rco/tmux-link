@@ -870,22 +870,29 @@ final class RemoteSessionTests: XCTestCase {
         XCTAssertTrue(sent)
       }
       if suffix == "-other", config.hasHistoryFixture == true {
-        try await waitFor("RECENT-ROW-45")
-        try await toggle(reveal)
-        for key in ["⌃B", "PgUp"] {
-          let button = try XCTUnwrap(descendants(screen.view).first {
-            $0.accessibilityIdentifier == "terminal.key." + key
-          } as? UIButton)
-          button.sendActions(for: .touchUpInside)
+        try await waitFor("status-file-150")
+        // These files scrolled out before the phone attached. Drag directly
+        // from the live shell without opening the drawer or sending a prefix.
+        let board = try XCTUnwrap(web as? TerminalWebView)
+        _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
+        for _ in 0..<50 where board.typingKeyboard.isHidden { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(board.typingKeyboard.isHidden)
+        if selected.touchPaging == true {
+          try await type("tmux set-option prefix C-a && git status")
+          try await waitFor("status-file-150")
         }
-        try await waitFor("PAST-ROW-100")
-        try await toggle(dismiss)
-        // Mouse tracking is off. Drag up toward the latest output, then down toward older rows.
-        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -4, true)")
-        try await waitFor("RECENT-ROW-45")
-        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 4, true)")
-        try await waitFor("PAST-ROW-100")
-        _ = try await web.evaluateJavaScript("term.input('q', true)")
+        let rowValue = try await web.evaluateJavaScript("term.rows") as? Int
+        let rows = try XCTUnwrap(rowValue)
+        let earlier = String(format: "status-file-%03d", 150 - rows)
+        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 6, true)")
+        try await waitFor(earlier)
+        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -6, true)")
+        try await waitFor("status-file-150")
+        if selected.touchPaging != true { _ = try await web.evaluateJavaScript("term.input('q', true)") }
+        try await type("printf '__AFTER_%s__\\n' SCROLL")
+        try await waitFor("__AFTER_SCROLL__")
+        print("Verified git status scrollback with", selected.touchPaging == true ? "agent paging" : "legacy paging")
+        board.shortcutBar.hideKeyboard?()
       }
       try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")
       try await waitFor("__ID_$" + String(selected.id) + "__")

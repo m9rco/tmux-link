@@ -49,15 +49,18 @@ done
 ssh-keygen -lf "$temp/phone.pub"
 tmux new-session -d -s "$session"
 created=yes
-tmux new-session -d -s "${session}-other"
+git init -q "$temp/repo"
+git -C "$temp/repo" config pager.status false
+git -C "$temp/repo" config column.status never
+git -C "$temp/repo" config status.showUntrackedFiles all
+for n in $(seq 1 150); do touch "$temp/repo/status-file-$(printf '%03d' "$n")"; done
+tmux new-session -d -s "${session}-other" -c "$temp/repo"
 other=yes
 # Fill the pane before the iPhone attaches. These rows cannot be recovered
 # from a snapshot of frames delivered to the phone.
 tmux set-option -t "${session}-other" prefix C-b
 tmux set-option -t "${session}-other" mouse off
-# The loop runs inside the fixture pane.
-# shellcheck disable=SC2016
-tmux send-keys -t "${session}-other" 'for i in $(seq 1 100); do echo PAST-ROW-$i; done; for i in $(seq 1 45); do echo RECENT-ROW-$i; done' Enter
+tmux send-keys -t "${session}-other" 'git status' Enter
 awk 'BEGIN {for (i=1; i<=200; i++) printf "Message %03d\n", i}' > "$temp/messages.txt"
 tmux new-session -d -s "${session}-messages" /usr/bin/vim -Nu NONE -i NONE -n -R \
     -c 'set mouse=a ttymouse=sgr nowrap scrolloff=0' -c 'normal! G' "$temp/messages.txt"

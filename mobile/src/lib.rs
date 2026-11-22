@@ -1,5 +1,5 @@
 //! iOS transport. A private socket pair links UIKit input and terminal output to SSH.
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use russh::{
     ChannelMsg, client,
     keys::{
@@ -35,6 +35,7 @@ impl client::Handler for PinnedHost {
 
 type DeviceIdentity<'a> = Option<(&'a [u8], &'a [u8])>;
 
+#[derive(Clone)]
 struct Peer<'a> {
     host: &'a str,
     port: u16,
@@ -44,7 +45,10 @@ struct Peer<'a> {
     identity: DeviceIdentity<'a>,
 }
 
-async fn authenticated(peer: Peer<'_>, output: &mut Output) -> Result<client::Handle<PinnedHost>> {
+async fn authenticated(
+    peer: Peer<'_>,
+    mut output: Option<&mut Output>,
+) -> Result<client::Handle<PinnedHost>> {
     let Peer {
         host,
         port,
@@ -53,7 +57,9 @@ async fn authenticated(peer: Peer<'_>, output: &mut Output) -> Result<client::Ha
         key,
         identity,
     } = peer;
-    output.stage("connecting").await?;
+    if let Some(output) = output.as_deref_mut() {
+        output.stage("connecting").await?;
+    }
     let config = tmux_link::ssh_client_config();
     timeout(Duration::from_secs(20), async {
         let mut session = if port == 443 || host.starts_with("ws://") || host.starts_with("wss://")
@@ -67,14 +73,20 @@ async fn authenticated(peer: Peer<'_>, output: &mut Output) -> Result<client::Ha
                 Some((cert, key)) => tmux_link::websocket::connect_mtls(&url, cert, key).await?,
                 None => tmux_link::websocket::connect(&url).await?,
             };
-            output.stage("ssh").await?;
+            if let Some(output) = output.as_deref_mut() {
+                output.stage("ssh").await?;
+            }
             client::connect_stream(Arc::new(config), stream, PinnedHost(pin.into())).await?
         } else {
             ensure!(identity.is_none(), "device certificate requires WSS");
-            output.stage("ssh").await?;
+            if let Some(output) = output.as_deref_mut() {
+                output.stage("ssh").await?;
+            }
             client::connect(Arc::new(config), (host, port), PinnedHost(pin.into())).await?
         };
-        output.stage("auth").await?;
+        if let Some(output) = output.as_deref_mut() {
+            output.stage("auth").await?;
+        }
         ensure!(
             session
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
@@ -142,11 +154,35 @@ async fn heartbeat(
     }
 }
 
+// Run one bounded, allowlisted tmux operation on a second channel of the
+// authenticated SSH connection. Keep ordering with later keyboard input.
+async fn page_pane(
+    mut channel: russh::Channel<client::Msg>,
+    id: u64,
+    direction: &str,
+) -> Result<()> {
+    channel
+        .exec(true, format!("tmux-link-page {id} {direction}"))
+        .await?;
+    channel.eof().await?;
+    let mut status = None;
+    while let Some(message) = channel.wait().await {
+        match message {
+            ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+            ChannelMsg::Failure | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    ensure!(status == Some(0), "tmux page request failed");
+    Ok(())
+}
+
 async fn run(
     session: client::Handle<PinnedHost>,
     mut read: tokio::net::unix::OwnedReadHalf,
     mut output: Output,
     target: Option<u64>,
+    peer: Peer<'_>,
 ) -> Result<()> {
     output.stage("attaching").await?;
     let channel = timeout(Duration::from_secs(20), async {
@@ -164,9 +200,11 @@ async fn run(
     .await??;
     let (mut ssh_rx, ssh_tx) = channel.split();
     // Independent pumps keep Ctrl-C responsive while the phone renders a burst of output.
+    let (page_errors, mut page_error_rx) = tokio::sync::mpsc::channel(1);
     let upload = async {
         let mut kind = [0; 1];
         let mut bytes = Vec::new();
+        let mut paging_connection: Option<client::Handle<PinnedHost>> = None;
         while read.read(&mut kind).await? != 0 {
             let count = read.read_u32().await? as usize;
             ensure!(count <= 65536, "input frame too large");
@@ -180,6 +218,38 @@ async fn run(
                     let cols = read.read_u16().await?;
                     let rows = read.read_u16().await?;
                     ssh_tx.window_change(cols.into(), rows.into(), 0, 0).await?;
+                }
+                2 if count == 1 => {
+                    let id = target.context("paging requires a named session")?;
+                    let direction = match read.read_u8().await? {
+                        0 => "down",
+                        1 => "up",
+                        _ => bail!("invalid page direction"),
+                    };
+                    // MaxSessions=1 permits the PTY but disallows a second
+                    // channel. Reuse a separately authenticated connection there.
+                    let result = timeout(Duration::from_secs(5), async {
+                        let channel = if let Some(control) = &paging_connection {
+                            control.channel_open_session().await?
+                        } else {
+                            match session.channel_open_session().await {
+                                Ok(channel) => channel,
+                                Err(russh::Error::ChannelOpenFailure(_)) => {
+                                    let control = authenticated(peer.clone(), None).await?;
+                                    let channel = control.channel_open_session().await?;
+                                    paging_connection = Some(control);
+                                    channel
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        };
+                        page_pane(channel, id, direction).await
+                    })
+                    .await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        paging_connection = None;
+                        let _ = page_errors.try_send(());
+                    }
                 }
                 _ => bail!("invalid input frame"),
             }
@@ -198,6 +268,10 @@ async fn run(
                     Some(message) => message,
                     None => break,
                 },
+                Some(()) = page_error_rx.recv(), if framed => {
+                    output.frame(3, &[]).await?;
+                    continue;
+                }
                 Some(ms) = sample_rx.recv(), if framed && acknowledgments == 2 => {
                     output.frame(2, &ms.to_be_bytes()).await?;
                     continue;
@@ -348,7 +422,7 @@ unsafe fn open_inner(
                     key: PrivateKey::from(key),
                     identity,
                 };
-                let session = authenticated(peer, &mut output).await?;
+                let session = authenticated(peer.clone(), Some(&mut output)).await?;
                 if target == -2 {
                     timeout(Duration::from_secs(15), async {
                         let mut channel = session.channel_open_session().await?;
@@ -378,7 +452,7 @@ unsafe fn open_inner(
                     .await?
                 } else {
                     ensure!(target >= -1, "invalid session");
-                    run(session, read, output, u64::try_from(target).ok()).await
+                    run(session, read, output, u64::try_from(target).ok(), peer).await
                 }
             })
     })();

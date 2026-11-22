@@ -48,6 +48,7 @@ struct ClientProfile: Codable, Hashable, Identifiable {
 struct RemoteSession: Codable, Hashable, Identifiable {
   let id: Int64
   let name: String
+  var touchPaging: Bool? = nil
 }
 
 enum SessionDirectory {

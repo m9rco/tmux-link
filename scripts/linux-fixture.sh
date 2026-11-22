@@ -41,6 +41,9 @@ Host test-relay
 CONF
 su alice -c 'tmux -f /dev/null new-session -d -s tl-live'
 su alice -c 'tmux -u new-session -d -s "zz-中文🙂" "echo pane-左🙂右; exec sleep infinity"'
+su alice -c 'tmux new-session -d -s tl-scroll'
+su alice -c 'tmux set-option -t tl-scroll prefix C-a'
+su alice -c 'tmux set-option -t tl-scroll mouse off'
 agent tunnel test-relay /home/tmuxrelay/link/linux.sock 2201 >/tmp/tunnel.log 2>&1 &
 su tmuxrelay -c 'exec /usr/local/bin/center 0.0.0.0:2222 /home/tmuxrelay/link/linux.sock' >/tmp/center.log 2>&1 &
 su tmuxrelay -c 'exec /usr/local/bin/center 0.0.0.0:2223 /home/tmuxrelay/link/linux.sock --websocket' >/tmp/websocket.log 2>&1 &

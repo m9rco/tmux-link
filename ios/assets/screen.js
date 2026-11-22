@@ -43,7 +43,15 @@ function scrollRemote(x, y, fingerSteps, first) {
   resetInput();
   const steps = -fingerSteps;
   if (!['vt200', 'drag', 'any'].includes(term.modes.mouseTrackingMode)) {
-    if (first) term.input(steps < 0 ? '\x1b[5~' : '\x1b[6~', true);
+    if (!first) return;
+    if (window.touchPaging === 'agent') {
+      bridge.postMessage({page: steps < 0 ? 'up' : 'down'});
+    } else {
+      // Older agents expose only the PTY. tmux's default prefix + Page Up
+      // enters copy mode and can also page up again while already in it.
+      const up = window.touchPaging === 'tmux' ? '\x02\x1b[5~' : '\x1b[5~';
+      term.input(steps < 0 ? up : '\x1b[6~', true);
+    }
     return;
   }
   const screen = term.element.querySelector('.xterm-screen');

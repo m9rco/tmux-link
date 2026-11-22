@@ -14,6 +14,40 @@ mod import_link;
 #[path = "agent/pair.rs"]
 mod pair;
 
+// A swipe targets tmux itself. Inspect the live pane at gesture time so opening
+// a pager, switching windows, or changing the tmux prefix needs no phone update.
+fn page(request: &str) -> Result<()> {
+    let (id, direction) = request.split_once(' ').context("invalid page request")?;
+    let id: u64 = id.parse()?;
+    let older = match direction {
+        "up" => true,
+        "down" => false,
+        _ => bail!("invalid page direction"),
+    };
+    let target = format!("${id}:");
+    let key = if older { "PPage" } else { "NPage" };
+    let page = format!("send-keys -t '{target}' {key}");
+    let shell = if older {
+        // -e returns to the live shell when page-down reaches the bottom.
+        format!("if-shell -F -t '{target}' '#{{history_size}}' \"copy-mode -eu -t '{target}'\"")
+    } else {
+        String::new()
+    };
+    let status = Command::new("tmux")
+        .args([
+            "if-shell",
+            "-F",
+            "-t",
+            &target,
+            "#{||:#{pane_in_mode},#{alternate_on}}",
+            &page,
+            &shell,
+        ])
+        .status()?;
+    ensure!(status.success(), "tmux page request failed");
+    Ok(())
+}
+
 // Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
@@ -21,6 +55,9 @@ fn attach() -> Result<()> {
         .as_deref()
         .map(|v| v.to_str().context("invalid request"))
         .transpose()?;
+    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-page ")) {
+        return page(request);
+    }
     if let Some(id) = command.and_then(|c| c.strip_prefix("tmux-link-attach ")) {
         let id: u64 = id.parse()?;
         return Err(Command::new("tmux")
@@ -59,7 +96,7 @@ fn attach() -> Result<()> {
             .iter()
             .map(|(id, name)| -> Result<_> {
                 let id: u64 = id.strip_prefix('$').context("invalid tmux ID")?.parse()?;
-                Ok(serde_json::json!({"id": id, "name": name}))
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);

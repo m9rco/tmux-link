@@ -240,3 +240,36 @@ fn lists_and_attaches_unicode_session_in_c_locale() {
     }
     finish_session(view, worker);
 }
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn pages_shell_history_with_one_ssh_session_per_connection() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(2));
+    fn visible(view: &mut UnixStream, marker: &[u8]) {
+        let mut terminal = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !terminal.windows(marker.len()).any(|s| s == marker) {
+            assert!(Instant::now() < deadline, "missing {marker:?}");
+            let (kind, data) = read_frame(view);
+            assert_ne!(kind, 3, "paging failed");
+            if kind == 0 {
+                terminal.extend(data);
+            }
+        }
+    }
+    visible(&mut view, b"tl-scroll");
+    send(
+        &mut view,
+        0,
+        b"for i in $(seq 1 140); do printf 'FILE-%03d\\n' \"$i\"; done\r",
+    );
+    visible(&mut view, b"FILE-140");
+    send(&mut view, 2, &[1]);
+    visible(&mut view, b"FILE-110");
+    send(&mut view, 2, &[0]);
+    visible(&mut view, b"FILE-140");
+    send(&mut view, 0, b"printf '__SCROLL_%s__\\n' OK\r");
+    visible(&mut view, b"__SCROLL_OK__");
+    finish_session(view, worker);
+}
