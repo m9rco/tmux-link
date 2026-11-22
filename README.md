@@ -53,6 +53,18 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.3/install.s
 
 脚本自动识别 Linux / macOS 与 x86_64 / ARM64，下载失败会重试，SHA256 校验通过后安装。二进制升级使用同文件系统重命名，已运行进程继续使用原版本。安装命令使用 tmux-link-agent / tmux-link-center 命名，避免覆盖其他工具的 agent 命令。部署模板和指南安装到 `PREFIX/share/tmux-link`。自定义安装位置时修改 systemd 模板中的可执行文件路径，按下方说明完成公钥和主机配对后启用服务。
 
+## 把 Linux 或 Mac 客户端导入手机
+
+在已接入中心的机器上，以 tmux 所属用户生成链接。将域名和路由替换为该机器在中心的配置。主客户端的默认路由是 `primary`。
+
+```sh
+tmux-link-agent import-link --center center.example.com --route build --name "构建机"
+```
+
+在 iPhone 点开收到的链接，或复制整条链接后在 Tmux Link 客户端列表点「导入客户端配置」旁的粘贴按钮。核对主机和指纹后点「保存」，即可进入该机器的会话列表。在 Mac 上给命令追加 `| pbcopy` 可直接复制。已保存的客户端也可长按「复制客户端配置」。
+
+命令默认使用当前用户名和 443 端口。Linux 默认读取 `/etc/tmux-link/host_ed25519.pub`，macOS 默认读取 `/etc/ssh/ssh_host_ed25519_key.pub`。自定义部署可用 `--host-key` 指定内网 sshd 的实际公钥，并用 `--user`、`--port` 指定用户名和公网 WSS 端口。链接携带公开的连接参数和 SSH 指纹。首次接入新机器时，需先按下方部署步骤建立隧道、授权手机 SSH 公钥，并在中心给手机证书授权该路由；导入后会使用手机已有的密钥和证书。
+
 ## GitHub 构建与发布
 
 每次推送 main 或创建 PR 都运行 Rust 格式与 Clippy 检查、安装脚本测试、TCP 与 WebSocket 两种传输的真实 Linux tmux 集成测试，构建 Linux、macOS 的 x86_64 / ARM64 和未签名的 iOS 设备及模拟器 App。构建包在 Actions 页面的 Artifacts 中下载。
@@ -200,7 +212,7 @@ Mac 出站隧道在线后，用 USB 连接并解锁 iPhone，在普通用户终�
 TMUX_LINK_E2E_HOST=center.example.com scripts/test-ios-device.sh YOUR_DEVICE_ID --pair-local-mac
 ```
 
-脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过公网中心的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试配置与公钥导出仅用于开发构建，手机上的正常连接表单会在测试成功后填入已验证的参数。
+脚本构建并安装 Debug App，读取手机导出的 SSH **公钥**，以受限的 `tmux-link-agent attach` 命令授权到当前 Mac，再创建独立临时 tmux 会话。真机测试从手机 Keychain 读取自己的私钥，通过公网中心的 WSS 入口发送命令并断开重连，校验远端 shell 状态保留。测试结束会删除临时会话，并在 `target/iphone-e2e-*.xcresult` 保留结果。手机私钥始终位于本设备 Keychain。测试用本次构建的 Mac agent 生成导入链接，在独立的测试配置存储中解析并保存，再用手机本机已登记的 mTLS 证书验证会话连接。
 
 ## 个人签名自动维护
 

@@ -1,4 +1,5 @@
 import ActivityKit
+import CoreTransferable
 import Darwin
 import Foundation
 import SwiftUI
@@ -14,6 +15,7 @@ final class RemoteSessionTests: XCTestCase {
     let user: String
     let fingerprint: String
     let sessionName: String
+    let importLink: String?
   }
 
   func configuration() throws -> Connection {
@@ -195,6 +197,90 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertTrue(ProfileStore(defaults).clients.isEmpty)
   }
 
+  func testClientLinkRoundTripsPublicFieldsAndPreservesMTLSRequirement() throws {
+    let pin = "SHA256:" + Data(repeating: 0xfb, count: 32).base64EncodedString()
+      .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    let source = ClientProfile(
+      name: "杭州 & QA + #1", host: "relay.example.com", port: 8443,
+      route: "mac_2", user: "build-user", pin: pin, requireMTLS: false, importedIdentity: true)
+    let link = try ClientTransfer.link(for: source)
+    let url = try XCTUnwrap(URLComponents(string: link))
+    XCTAssertEqual(url.scheme, "tmuxlink")
+    XCTAssertEqual(url.host, "client")
+    let fields = try XCTUnwrap(url.queryItems)
+    XCTAssertEqual(
+      Set(fields.map(\.name)), ["name", "host", "port", "route", "user", "pin", "requireMTLS"])
+    XCTAssertTrue(link.contains("%2B"))
+    XCTAssertFalse(link.contains(source.id.uuidString))
+    let restored = try ClientTransfer.parse(link)
+    var expected = source
+    expected.id = restored.id
+    expected.requireMTLS = true
+    expected.importedIdentity = nil
+    XCTAssertEqual(restored, expected)
+    XCTAssertNotEqual(restored.id, source.id)
+    XCTAssertNotEqual(try ClientTransfer.parse(link).id, restored.id)
+    XCTAssertTrue(restored.valid)
+  }
+
+  func testClientPasteAcceptsSystemTextAndURLProviders() async throws {
+    let text = #"{"host":"relay.example.com","name":"剪贴板","port":8443,"requireMTLS":true}"#
+    let endpoint = try XCTUnwrap(URL(string: "wss://relay.example.com:8443/tmux-link/build"))
+    for (provider, expected) in [
+      (NSItemProvider(object: text as NSString), text),
+      (NSItemProvider(object: endpoint as NSURL), endpoint.absoluteString),
+    ] {
+      let item: PastedClientConfiguration = try await withCheckedThrowingContinuation {
+        continuation in
+        _ = provider.loadTransferable(type: PastedClientConfiguration.self) {
+          continuation.resume(with: $0)
+        }
+      }
+      XCTAssertEqual(item.text, expected)
+      let draft = try ClientTransfer.parse(item.text)
+      XCTAssertEqual(draft.relayHost, "relay.example.com")
+      XCTAssertTrue(draft.user.isEmpty)
+      XCTAssertTrue(draft.pin.isEmpty)
+      XCTAssertFalse(draft.valid)
+      if expected == text {
+        XCTAssertEqual(draft.name, "剪贴板")
+        XCTAssertEqual(draft.port, 8443)
+        XCTAssertEqual(draft.requireMTLS, true)
+      } else {
+        XCTAssertEqual(draft.endpoint, endpoint.absoluteString)
+      }
+    }
+  }
+
+  func testClientPasteRejectsCredentialFieldsAndUnsupportedAddresses() {
+    let inputs = [
+      "https://relay.example.com/", "ssh://user@relay.example.com/", "ws://relay.example.com/",
+      "wss://person:password@relay.example.com/tmux-link",
+      "tmuxlink://client?host=one.example&host=two.example",
+      "tmuxlink://client?host=one.example&privateKey=fixture",
+      #"{"host":"one.example","id":"00000000-0000-0000-0000-000000000000"}"#,
+      #"{"host":"one.example","importedIdentity":true}"#,
+      #"{"host":"one.example","privateKey":"test-only"}"#,
+      #"{"host":"one.example","pin":"SHA256:不是指纹"}"#,
+    ]
+    for input in inputs { XCTAssertThrowsError(try ClientTransfer.parse(input), input) }
+  }
+
+  func testDiscardedClientImportLeavesExistingProfileIntact() throws {
+    let suite = "dev.tmuxlink.test." + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = ProfileStore(defaults)
+    let saved = ClientProfile(name: "Original", host: "one.example")
+    store.save(saved)
+    let text = #"{"host":"one.example","name":"Imported"}"#
+    var discarded = try ClientTransfer.parse(text)
+    discarded.name = "Cancelled edit"
+    XCTAssertNotEqual(discarded.id, saved.id)
+    XCTAssertEqual(store.clients, [saved])
+    XCTAssertEqual(ProfileStore(defaults).clients, [saved])
+  }
+
   @MainActor
   func testWorkspaceIsVisible() {
     XCTAssertNotNil(rootController as? UIHostingController<Workspace>)
@@ -290,9 +376,34 @@ final class RemoteSessionTests: XCTestCase {
   @MainActor
   func testNamedSessionsAndEscapeButton() async throws {
     let config = try configuration()
-    let client = ClientProfile(
-      name: "Test", host: config.host, port: config.port, route: "primary",
-      user: config.user, pin: config.fingerprint)
+    let client: ClientProfile
+    if let link = config.importLink {
+      let suite = "dev.tmuxlink.e2e." + UUID().uuidString
+      let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+      defer { defaults.removePersistentDomain(forName: suite) }
+      let store = ProfileStore(defaults)
+      let draft = try ClientTransfer.parse(link)
+      XCTAssertEqual(draft.name, "Clipboard-E2E")
+      XCTAssertEqual(draft.relayHost, config.host.lowercased())
+      XCTAssertEqual(draft.port, config.port)
+      XCTAssertEqual(draft.user, config.user)
+      XCTAssertEqual(draft.route, "primary")
+      XCTAssertEqual(draft.pin, config.fingerprint)
+      XCTAssertEqual(draft.requireMTLS, true)
+      XCTAssertNil(draft.importedIdentity)
+      XCTAssertTrue(draft.valid)
+      XCTAssertTrue(store.clients.isEmpty)
+      store.save(draft)
+      let saved = try XCTUnwrap(ProfileStore(defaults).clients.first)
+      XCTAssertEqual(saved, draft)
+      XCTAssertNotNil(try RelayIdentity.resolve(saved))
+      client = saved
+    } else {
+      // Device fixtures created by earlier releases can still run the session tests.
+      client = ClientProfile(
+        name: "Test", host: config.host, port: config.port, route: "primary",
+        user: config.user, pin: config.fingerprint)
+    }
     let sessions = try await SessionDirectory.fetch(client)
     let root = try XCTUnwrap(rootController)
     for suffix in ["-other", ""] {
@@ -412,12 +523,5 @@ final class RemoteSessionTests: XCTestCase {
       config,
       command: "printf '__RESUME_%s__\\n' \"$TMUX_LINK_PHONE_E2E\"",
       expected: "__RESUME_retained__")
-    // Populate the normal app form only after the live transport has passed.
-    for (key, value) in [
-      "公网中心地址": config.host, "端口": String(config.port),
-      "远程用户名": config.user, "内网 SSH 主机指纹 SHA256:…": config.fingerprint,
-    ] {
-      UserDefaults.standard.set(value, forKey: key)
-    }
   }
 }

@@ -22,8 +22,8 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: Apple Development
         PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile
-        MARKETING_VERSION: "0.3.3"
-        CURRENT_PROJECT_VERSION: 7
+        MARKETING_VERSION: "0.3.4"
+        CURRENT_PROJECT_VERSION: 8
         INFOPLIST_KEY_CFBundleDisplayName: Tmux Link
         INFOPLIST_FILE: Terminal-Info.plist
         GENERATE_INFOPLIST_FILE: YES
@@ -55,8 +55,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: StatusWidget/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: Tmux Link Status
-        MARKETING_VERSION: "0.3.3"
-        CURRENT_PROJECT_VERSION: 7
+        MARKETING_VERSION: "0.3.4"
+        CURRENT_PROJECT_VERSION: 8
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         TARGETED_DEVICE_FAMILY: "1,2"

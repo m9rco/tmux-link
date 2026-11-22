@@ -1,3 +1,4 @@
+import CoreTransferable
 import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
@@ -116,13 +117,45 @@ final class EnrollmentStatus: ObservableObject {
   @Published var error: String?
 }
 
+struct PastedClientConfiguration: Transferable {
+  let text: String
+
+  static var transferRepresentation: some TransferRepresentation {
+    ProxyRepresentation(importing: { (text: String) in Self(text: text) })
+    ProxyRepresentation(importing: { (url: URL) in Self(text: url.absoluteString) })
+  }
+}
+
+final class ClientImportLinks: ObservableObject {
+  enum Request {
+    case review(ClientProfile)
+    case invalid(String)
+  }
+
+  @Published private(set) var requests: [Request] = []
+
+  func open(_ url: URL) {
+    guard url.scheme?.lowercased() == "tmuxlink" else { return }
+    do { requests.append(.review(try ClientTransfer.parse(url.absoluteString))) } catch {
+      requests.append(.invalid(error.localizedDescription))
+    }
+  }
+
+  func takeNext() -> Request? {
+    requests.isEmpty ? nil : requests.removeFirst()
+  }
+}
+
 struct Workspace: View {
   @ObservedObject var enrollment = EnrollmentStatus()
+  @ObservedObject var clientLinks = ClientImportLinks()
   @StateObject private var store = ProfileStore()
+  @State private var path: [ClientProfile] = []
   @State private var editor: ClientProfile?
+  @State private var importedID: UUID?
   @State private var message: String?
   var body: some View {
-    NavigationStack {
+    NavigationStack(path: $path) {
       clientList
         .scrollContentBackground(.hidden).background(ink).navigationTitle("Tmux Link")
         .toolbar {
@@ -135,7 +168,20 @@ struct Workspace: View {
     }
     .tint(mint).preferredColorScheme(.dark)
     .onReceive(enrollment.$error) { if let error = $0 { message = error } }
-    .sheet(item: $editor) { client in ProfileEditor(client: client, save: store.save) }
+    .task(id: clientLinks.requests.count) { reviewNextLink() }
+    .onChange(of: message) { if $0 == nil { reviewNextLink() } }
+    .sheet(
+      item: $editor,
+      onDismiss: {
+        importedID = nil
+        reviewNextLink()
+      }
+    ) { draft in
+      ProfileEditor(client: draft) { client in
+        store.save(client)
+        if client.id == importedID { path = [client] }
+      }
+    }
     .alert(
       message ?? "",
       isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })
@@ -151,18 +197,61 @@ struct Workspace: View {
               Button("删除", role: .destructive) { store.remove(client.id) }
               Button("编辑") { editor = client }.tint(.blue)
             }
-            .contextMenu { Button("编辑客户端") { editor = client } }
+            .contextMenu {
+              Button("编辑客户端") { editor = client }
+              Button("复制客户端配置") { copyConfiguration(client) }
+                .accessibilityIdentifier("clients.copy.configuration")
+            }
         }
         Button {
           editor = ClientProfile()
         } label: {
           Label("添加客户端", systemImage: "plus")
         }
+        LabeledContent("导入客户端配置") {
+          PasteButton(payloadType: PastedClientConfiguration.self, onPaste: importConfiguration)
+            .accessibilityLabel("粘贴导入客户端配置")
+            .accessibilityIdentifier("clients.import.paste")
+        }
       } header: {
         Text("客户端  ·  \(store.clients.count)").font(.caption.monospaced())
       }
       .listRowBackground(panel)
     }
+  }
+
+  private func importConfiguration(_ items: [PastedClientConfiguration]) {
+    guard items.count == 1, let item = items.first else {
+      message = "请每次粘贴一个客户端配置"
+      return
+    }
+    do {
+      review(try ClientTransfer.parse(item.text))
+    } catch {
+      message = error.localizedDescription
+    }
+  }
+
+  private func review(_ draft: ClientProfile) {
+    importedID = draft.id
+    editor = draft
+  }
+
+  private func reviewNextLink() {
+    guard editor == nil, message == nil, let request = clientLinks.takeNext() else { return }
+    switch request {
+    case .review(let draft): review(draft)
+    case .invalid(let error): message = error
+    }
+  }
+
+  private func copyConfiguration(_ client: ClientProfile) {
+    do {
+      var share = client
+      if RelayIdentity.requiresDeviceCertificate(client) { share.requireMTLS = true }
+      UIPasteboard.general.string = try ClientTransfer.link(for: share)
+      message = "客户端配置已复制"
+    } catch { message = error.localizedDescription }
   }
 
   private func copyKey() {

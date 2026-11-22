@@ -138,6 +138,11 @@ enum RelayIdentity {
     SecItemDelete(query("profile." + id.uuidString) as CFDictionary)
   }
 
+  static func requiresDeviceCertificate(_ client: ClientProfile) -> Bool {
+    client.requireMTLS == true || client.importedIdentity == true
+      || (UserDefaults.standard.stringArray(forKey: enrolledHosts) ?? []).contains(client.relayHost)
+  }
+
   static func resolve(_ client: ClientProfile) throws -> RelayCredential? {
     let host = client.relayHost
     if client.importedIdentity == true {
@@ -153,8 +158,7 @@ enum RelayIdentity {
       try validate(cert, for: key)
       return RelayCredential(host: host, certificate: cert, privateKey: key.derRepresentation)
     }
-    guard client.requireMTLS != true,
-      !(UserDefaults.standard.stringArray(forKey: enrolledHosts) ?? []).contains(host)
+    guard !requiresDeviceCertificate(client)
     else { throw RelayError("此客户端需要 mTLS 设备证书，请在客户端配置中导入") }
     return nil
   }

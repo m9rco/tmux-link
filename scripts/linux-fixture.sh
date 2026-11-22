@@ -11,6 +11,9 @@ usermod -p '*' alice
 usermod -p '*' tmuxrelay
 install -m700 -d -o tmuxrelay /home/tmuxrelay/link /home/tmuxrelay/.ssh
 ssh-keygen -q -t ed25519 -N '' -f /etc/tmux-link/host_ed25519
+link=$(agent import-link --center center.example.com --route linux --name 'Build + Linux' --user alice)
+pin=$(ssh-keygen -E sha256 -lf /etc/tmux-link/host_ed25519.pub | awk '{print $2}' | sed 's/:/%3A/g; s|/|%2F|g; s/+/%2B/g')
+test "$link" = "tmuxlink://client?host=center.example.com&port=443&route=linux&user=alice&pin=$pin&name=Build%20%2B%20Linux&requireMTLS=true"
 ssh-keygen -q -t ed25519 -N '' -f /tmp/outer
 cp /tmp/outer.pub /home/tmuxrelay/.ssh/authorized_keys
 chown tmuxrelay:tmuxrelay /home/tmuxrelay/.ssh/authorized_keys

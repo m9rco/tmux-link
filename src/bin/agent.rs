@@ -7,6 +7,9 @@ use std::{
     process::Command,
 };
 
+#[path = "agent/import_link.rs"]
+mod import_link;
+
 // Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
@@ -91,6 +94,7 @@ fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
         [op] if op == "attach" => attach(),
+        [op, options @ ..] if op == "import-link" => import_link::print(options),
         [op, host, socket, port] if op == "tunnel" => {
             ensure!(
                 !host.starts_with('-') && socket.starts_with('/') && !socket.contains(':'),
@@ -125,7 +129,7 @@ fn main() -> Result<()> {
                 .into())
         }
         _ => bail!(
-            "usage: agent attach | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT"
+            "usage: agent attach | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help"
         ),
     }
 }

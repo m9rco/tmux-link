@@ -25,6 +25,7 @@ cleanup() {
 trap cleanup EXIT
 rustup target add aarch64-apple-ios
 cargo build --locked --release -p tmux-link-mobile --target aarch64-apple-ios
+(unset CARGO_BUILD_TARGET; cargo build --release --locked -p tmux-link --bin agent --target-dir "$PWD/target")
 xcodebuild -project ios/TmuxLink.xcodeproj -scheme TmuxLink -configuration Debug \
     -destination "id=$device" -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
     -derivedDataPath target/xcode-device build-for-testing
@@ -48,7 +49,7 @@ tmux new-session -d -s "$session"
 created=yes
 tmux new-session -d -s "${session}-other"
 other=yes
-python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" <<'PY'
+python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" <<'PY'
 import fcntl
 import json
 import os
@@ -57,12 +58,12 @@ import shlex
 import subprocess
 import sys
 
-key_file, output, agent, session = sys.argv[1:]
+key_file, output, ssh_agent, session, source_agent = sys.argv[1:]
 parts = Path(key_file).read_text().strip().split()
 if len(parts) < 2 or parts[0] != "ssh-ed25519":
     raise SystemExit("Unexpected phone public key")
 key = " ".join(parts[:2])
-command = "/usr/bin/env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin " + shlex.quote(agent) + " attach"
+command = "/usr/bin/env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin " + shlex.quote(ssh_agent) + " attach"
 line = 'restrict,pty,command="' + command.replace("\\", "\\\\").replace('"', '\\"') + '" ' + key + " tmux-link-ios\n"
 folder = Path.home() / ".ssh"
 folder.mkdir(mode=0o700, exist_ok=True)
@@ -73,11 +74,19 @@ with authorized.open("a+") as handle:
     if key not in handle.read():
         handle.write("\n" + line)
     os.chmod(authorized, 0o600)
-pin = subprocess.check_output(["ssh-keygen", "-lf", "/etc/ssh/ssh_host_ed25519_key.pub"], text=True).split()[1]
+host_key = "/etc/ssh/ssh_host_ed25519_key.pub"
+center = os.environ.get("TMUX_LINK_E2E_HOST", "center.example.com")
+user = os.environ.get("USER", Path.home().name)
+pin = subprocess.check_output(["ssh-keygen", "-lf", host_key], text=True).split()[1]
+link = subprocess.check_output([
+    source_agent, "import-link", "--center", center, "--route", "primary",
+    "--user", user, "--name", "Clipboard-E2E", "--host-key", host_key,
+], text=True).strip()
+if not link.startswith("tmuxlink://client?") or len(link.splitlines()) != 1:
+    raise SystemExit("The agent did not produce a single client import link")
 Path(output).write_text(json.dumps({
-    "host": os.environ.get("TMUX_LINK_E2E_HOST", "center.example.com"), "port": 443,
-    "user": os.environ.get("USER", Path.home().name),
-    "fingerprint": pin, "sessionName": session,
+    "host": center, "port": 443, "user": user,
+    "fingerprint": pin, "sessionName": session, "importLink": link,
 }) + "\n")
 PY
 xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \
