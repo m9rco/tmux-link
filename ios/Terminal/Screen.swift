@@ -18,6 +18,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var completed = false
   private let transportBadge = UILabel()
   private let keys = UIStackView()
+  private let history = UITextView()
+  private let historyButton = UIButton(type: .system)
+  private var historyRequest: UUID?
   private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
   private var pendingBytes = 0
   private var ready = false
@@ -49,6 +52,40 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     web.scrollView.isScrollEnabled = false
     view.backgroundColor = UIColor(red: 0.04, green: 0.08, blue: 0.10, alpha: 1)
     let accent = UIColor(red: 0.47, green: 0.91, blue: 0.79, alpha: 1)
+    let display = UIView()
+    for layer in [web as UIView, history] {
+      display.addSubview(layer)
+      layer.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([
+        layer.leadingAnchor.constraint(equalTo: display.leadingAnchor),
+        layer.trailingAnchor.constraint(equalTo: display.trailingAnchor),
+        layer.topAnchor.constraint(equalTo: display.topAnchor),
+        layer.bottomAnchor.constraint(equalTo: display.bottomAnchor),
+      ])
+    }
+    history.isEditable = false
+    history.isHidden = true
+    history.backgroundColor = view.backgroundColor
+    history.textColor = UIColor(red: 0.86, green: 0.91, blue: 0.92, alpha: 1)
+    history.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    history.accessibilityIdentifier = "terminal.history.text"
+    history.accessibilityLabel = "终端历史"
+    for direction: UISwipeGestureRecognizer.Direction in [.up, .down] {
+      let swipe = UISwipeGestureRecognizer(target: self, action: #selector(showHistory))
+      swipe.direction = direction
+      web.addGestureRecognizer(swipe)
+    }
+    historyButton.setTitle("历史", for: .normal)
+    historyButton.tintColor = accent
+    historyButton.accessibilityIdentifier = "terminal.history.toggle"
+    historyButton.accessibilityLabel = "查看终端历史"
+    historyButton.addAction(UIAction { [weak self] _ in
+      guard let self else { return }
+      if history.isHidden { showHistory() } else { closeHistory() }
+    }, for: .touchUpInside)
+    historyButton.setContentHuggingPriority(.required, for: .horizontal)
+    historyButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+    historyButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
     status.font = .preferredFont(forTextStyle: .caption1)
     status.adjustsFontForContentSizeCategory = true
     status.textColor = accent
@@ -91,7 +128,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     scroll.addSubview(keys)
     keys.translatesAutoresizingMaskIntoConstraints = false
-    let stack = UIStackView(arrangedSubviews: [bar, web, scroll])
+    let controls = UIStackView(arrangedSubviews: [historyButton, scroll])
+    controls.spacing = 6
+    let stack = UIStackView(arrangedSubviews: [bar, display, controls])
     stack.axis = .vertical
     stack.spacing = 4
     view.addSubview(stack)
@@ -118,6 +157,51 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       self, selector: #selector(resumeStatus),
       name: UIApplication.didBecomeActiveNotification, object: nil)
   }
+  @objc private func showHistory() {
+    guard active, started, history.isHidden else { return }
+    let request = UUID()
+    historyRequest = request
+    web.endEditing(true)
+    web.isUserInteractionEnabled = false
+    web.accessibilityElementsHidden = true
+    history.isHidden = false
+    history.text = "正在读取历史…"
+    keys.isUserInteractionEnabled = false
+    keys.alpha = 0.45
+    historyButton.setTitle("回到实时", for: .normal)
+    historyButton.accessibilityLabel = "回到实时终端"
+    web.callAsyncJavaScript("await ready; return historySnapshot()", arguments: [:], in: nil, in: .page) {
+      [weak self] result in
+      guard let self, active, historyRequest == request else { return }
+      switch result {
+      case .success(let value):
+        let text = value as? String ?? ""
+        history.text = text.isEmpty ? "本次连接还没有输出" : text
+      case .failure:
+        history.text = "读取历史失败，请回到实时后重试"
+      }
+      history.layoutManager.ensureLayout(for: history.textContainer)
+      history.layoutIfNeeded()
+      // Open just above the live page. Further dragging uses native text scrolling.
+      let y = history.contentSize.height - history.bounds.height * 1.5
+      history.setContentOffset(CGPoint(x: 0, y: max(0, y)), animated: false)
+      UIAccessibility.post(notification: .layoutChanged, argument: history)
+    }
+  }
+
+  private func closeHistory() {
+    historyRequest = nil
+    history.isHidden = true
+    history.text = nil
+    web.isUserInteractionEnabled = true
+    web.accessibilityElementsHidden = false
+    keys.isUserInteractionEnabled = ready
+    keys.alpha = ready ? 1 : 0.45
+    historyButton.setTitle("历史", for: .normal)
+    historyButton.accessibilityLabel = "查看终端历史"
+    UIAccessibility.post(notification: .layoutChanged, argument: historyButton)
+  }
+
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     startIslandIfAvailable()
@@ -294,8 +378,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
-      keys.isUserInteractionEnabled = true
-      keys.alpha = 1
+      keys.isUserInteractionEnabled = history.isHidden
+      keys.alpha = history.isHidden ? 1 : 0.45
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
     refreshStatus()
@@ -395,7 +479,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
   }
   private func press(_ key: String) {
-    guard ready else { return }
+    guard ready, history.isHidden else { return }
     send(0, Data(key.utf8))
     UISelectionFeedbackGenerator().selectionChanged()
   }
@@ -405,7 +489,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     escape.wantsPriorityOverSystemBehavior = true
     return [escape]
   }
-  @objc private func escapeKey() { press("\u{1b}") }
+  @objc private func escapeKey() {
+    if history.isHidden { press("\u{1b}") } else { closeHistory() }
+  }
   func stop() {
     active = false
     expiry?.invalidate()

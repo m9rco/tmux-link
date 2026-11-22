@@ -16,6 +16,7 @@ const term = new Terminal({
 const fit = new FitAddon.FitAddon();
 term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
 term.loadAddon(fit);
+const historySnapshot = terminalHistory(term);
 
 const bridge = window.webkit.messageHandlers.terminal;
 term.onData(data => bridge.postMessage({data}));
