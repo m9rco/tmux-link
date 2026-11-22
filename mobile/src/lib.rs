@@ -54,10 +54,7 @@ async fn authenticated(peer: Peer<'_>, output: &mut Output) -> Result<client::Ha
         identity,
     } = peer;
     output.stage("connecting").await?;
-    let config = client::Config {
-        keepalive_interval: Some(Duration::from_secs(20)),
-        ..Default::default()
-    };
+    let config = tmux_link::ssh_client_config();
     timeout(Duration::from_secs(20), async {
         let mut session = if port == 443 || host.starts_with("ws://") || host.starts_with("wss://")
         {

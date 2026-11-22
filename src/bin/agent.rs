@@ -10,7 +10,7 @@ use std::{
 #[path = "agent/import_link.rs"]
 mod import_link;
 
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "tls", feature = "ssh-probe"))]
 #[path = "agent/pair.rs"]
 mod pair;
 
@@ -99,9 +99,9 @@ fn main() -> Result<()> {
     match args.as_slice() {
         [op] if op == "attach" => attach(),
         [op, options @ ..] if op == "import-link" => import_link::print(options),
-        #[cfg(feature = "tls")]
+        #[cfg(all(feature = "tls", feature = "ssh-probe"))]
         [op, options @ ..] if op == "pair" => pair::command(options),
-        #[cfg(feature = "tls")]
+        #[cfg(all(feature = "tls", feature = "ssh-probe"))]
         [op, state] if op == "serve-paired" => pair::serve(std::path::Path::new(state)),
         [op, host, socket, port] if op == "tunnel" => {
             ensure!(

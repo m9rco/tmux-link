@@ -3,6 +3,10 @@ use super::import_link::{read_command, valid_center};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use russh::{
+    client,
+    keys::{HashAlg, PublicKeyOrCertificate},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -12,6 +16,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tmux_link::{
@@ -58,32 +63,48 @@ fn save(path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn detect_host(port: u16, directory: &Path) -> Result<String> {
-    let keys = read_command("ssh-keyscan", &["-T", "4", "-p", &port.to_string(), "-t", "ed25519", "127.0.0.1"])
-        .context("No local SSH service found. Install/start OpenSSH, or pass --ssh-port for an existing local sshd.")?;
-    let line = keys
-        .lines()
-        .find(|line| !line.starts_with('#'))
-        .context("Local SSH did not offer an Ed25519 host key")?;
-    let mut fields = line.split_whitespace();
-    fields.next();
-    let key = pairing::public_key(&fields.collect::<Vec<_>>().join(" "))?;
-    let file = directory.join("host.pub");
-    fs::write(&file, key)?;
-    let fingerprint = read_command(
-        "ssh-keygen",
-        &[
-            "-E",
-            "sha256",
-            "-lf",
-            file.to_str().context("invalid state path")?,
-        ],
-    )?;
-    Ok(fingerprint
-        .split_whitespace()
-        .nth(1)
-        .context("missing host fingerprint")?
-        .to_owned())
+struct HostProbe(Arc<Mutex<Option<String>>>);
+
+impl client::Handler for HostProbe {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        offered: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        if let PublicKeyOrCertificate::PublicKey { key, .. } = offered {
+            *self.0.lock().unwrap() = Some(key.fingerprint(HashAlg::Sha256).to_string());
+        }
+        // Discovery ends before authentication. The phone separately checks this pin.
+        Ok(false)
+    }
+}
+
+fn detect_host(port: u16) -> Result<String> {
+    let observed = Arc::new(Mutex::new(None));
+    let outcome = runtime()?.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            client::connect(
+                Arc::new(tmux_link::ssh_client_config()),
+                ("127.0.0.1", port),
+                HostProbe(observed.clone()),
+            ),
+        )
+        .await
+    });
+    if let Some(pin) = observed.lock().unwrap().take() {
+        return Ok(pin);
+    }
+    match outcome {
+        Ok(Err(error)) => anyhow::bail!(
+            "Cannot negotiate a supported SSH host key at 127.0.0.1:{port}: {error}. Check the local sshd configuration or pass --ssh-port for its actual port."
+        ),
+        Ok(Ok(_)) => anyhow::bail!("Local SSH did not present a supported plain host key"),
+        Err(_) => anyhow::bail!(
+            "Local SSH negotiation timed out at 127.0.0.1:{port}; check the listener or pass --ssh-port"
+        ),
+    }
 }
 
 pub(super) fn command(args: &[String]) -> Result<()> {
@@ -157,7 +178,7 @@ pub(super) fn command(args: &[String]) -> Result<()> {
                     .map(|s| s.to_string())
                     .unwrap_or(read_command("hostname", &[])?),
                 user: read_command("id", &["-un"])?,
-                pin: detect_host(ssh_port, &directory)?,
+                pin: detect_host(ssh_port)?,
             };
             host.validate()?;
             let token = pairing::secret()?;
@@ -179,7 +200,7 @@ pub(super) fn command(args: &[String]) -> Result<()> {
         "saved host settings differ; reuse the original ports"
     );
     ensure!(
-        detect_host(ssh_port, &directory)? == state.host.pin,
+        detect_host(ssh_port)? == state.host.pin,
         "local SSH host key changed; review the old pairing before enrolling again"
     );
     save(&path, &state)?;
@@ -428,4 +449,112 @@ async fn connect_once(state: &State) -> Result<()> {
     .await?;
     copy_bidirectional(&mut stream, &mut local).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::net::{TcpListener, TcpStream as BlockingStream};
+
+    struct LocalSshd(std::process::Child);
+    impl Drop for LocalSshd {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn probe_matches_the_phone_on_each_openssh_host_key_type() -> Result<()> {
+        let directory = env::temp_dir().join(format!("tmuxlink-host-probe-{}", pairing::secret()?));
+        fs::create_dir(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        for (index, (kind, algorithm, supported)) in [
+            ("ed25519", "ssh-ed25519", true),
+            ("ecdsa", "ecdsa-sha2-nistp256", true),
+            ("rsa", "rsa-sha2-512,rsa-sha2-256", true),
+            ("rsa", "ssh-rsa", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = directory.join(format!("{kind}-{index}"));
+            ensure!(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-t", kind, "-N", ""])
+                    .arg("-f")
+                    .arg(&key)
+                    .status()?
+                    .success(),
+                "generate host key"
+            );
+            let expected = read_command(
+                "ssh-keygen",
+                &[
+                    "-E",
+                    "sha256",
+                    "-lf",
+                    key.with_extension("pub").to_str().unwrap(),
+                ],
+            )?
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .to_owned();
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            drop(listener);
+            let log = directory.join(format!("{kind}.log"));
+            let mut daemon = LocalSshd(
+                Command::new("/usr/sbin/sshd")
+                    .args([
+                        "-D",
+                        "-e",
+                        "-f",
+                        "/dev/null",
+                        "-o",
+                        "ListenAddress=127.0.0.1",
+                        "-o",
+                        "PasswordAuthentication=no",
+                        "-o",
+                        "KbdInteractiveAuthentication=no",
+                        "-o",
+                        "UsePAM=no",
+                        "-o",
+                        &format!("HostKeyAlgorithms={algorithm}"),
+                    ])
+                    .arg("-h")
+                    .arg(&key)
+                    .arg("-p")
+                    .arg(port.to_string())
+                    .stderr(File::create(&log)?)
+                    .stdout(Stdio::null())
+                    .spawn()?,
+            );
+            for _ in 0..100 {
+                if BlockingStream::connect(("127.0.0.1", port)).is_ok() {
+                    break;
+                }
+                if daemon.0.try_wait()?.is_some() {
+                    anyhow::bail!("sshd exited: {}", fs::read_to_string(&log)?);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let result = detect_host(port);
+            if !supported {
+                assert!(result.is_err(), "legacy SHA-1 host signature was accepted");
+                continue;
+            }
+            let actual = result.with_context(|| {
+                format!(
+                    "probe {kind}; sshd log: {}",
+                    fs::read_to_string(&log).unwrap_or_default()
+                )
+            })?;
+            assert_eq!(actual, expected, "{kind} host key on nonstandard port");
+        }
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
 }

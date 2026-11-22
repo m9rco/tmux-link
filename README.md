@@ -39,7 +39,7 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.s
 curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.sh | sh -s -- --connect center.example.com
 ```
 
-已安装客户端时，直接运行 `~/.local/bin/tmux-link-agent pair --center center.example.com`。命令会检测本机 22 端口上的 SSH 主机指纹，打印十分钟有效的配对链接并等待确认。用已登记中心设备证书的 iPhone 打开或粘贴链接，核对机器上显示的指纹，点「确认配对并连接」。客户端自动将手机公钥加入当前用户的受限 `~/.ssh/authorized_keys`，建立四条出站 WSS 备用连接，并保存用户后台服务。手机随即进入会话列表。中心自动登记机器和批准它的手机。
+已安装客户端时，直接运行 `~/.local/bin/tmux-link-agent pair --center center.example.com`。命令会检测当前 SSH 登录端口（本地运行默认 22），与手机使用同一套 SSH 协商规则取得主机指纹，支持 Ed25519、ECDSA 和 RSA-SHA2 主机密钥，打印十分钟有效的配对链接并等待确认。用已登记中心设备证书的 iPhone 打开或粘贴链接，核对机器上显示的指纹，点「确认配对并连接」。客户端自动将手机公钥加入当前用户的受限 `~/.ssh/authorized_keys`，建立四条出站 WSS 备用连接，并保存用户后台服务。手机随即进入会话列表。中心自动登记机器和批准它的手机。
 
 Linux 使用 systemd 用户服务，macOS 使用登录用户的 LaunchAgent。Linux 需要退出登录后仍在线时，由管理员运行 `sudo loginctl enable-linger 用户名`。缺少用户服务管理器时，命令会在当前终端维持连接，并输出手动恢复命令。自定义本机 SSH 端口可在 `pair` 后加 `--ssh-port 2201`。配对通过 443 出站，适用于动态内网 IP。机器的连接令牌保存在当前用户权限为 700 的 `~/.config/tmux-link/paired/` 目录中。
 
