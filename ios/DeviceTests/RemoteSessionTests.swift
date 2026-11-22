@@ -660,6 +660,13 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertFalse(terminal.typingKeyboard.isHidden)
     XCTAssertFalse(terminal.shortcutBar.isHidden)
     XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
+    let window = try XCTUnwrap(terminal.window)
+    let keys = terminal.typingKeyboard.surface
+    let keyFrame = keys.convert(keys.bounds, to: window)
+    XCTAssertLessThanOrEqual(keyFrame.maxY, window.safeAreaLayoutGuide.layoutFrame.maxY + 1)
+    let viewport = try XCTUnwrap(web.superview)
+    XCTAssertEqual(viewport.convert(viewport.bounds, to: window).maxY,
+                   terminal.shortcutBar.convert(terminal.shortcutBar.bounds, to: window).minY, accuracy: 1)
     terminal.shortcutBar.hideKeyboard?()
     try await Task.sleep(nanoseconds: 950_000_000)
     let closing = try await web.evaluateJavaScript("keyboardSizes") as? [[Int]]
@@ -794,7 +801,8 @@ final class RemoteSessionTests: XCTestCase {
         XCTAssertNotNil(descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.leave" })
         let viewport = try XCTUnwrap(web.superview)
         let terminalFrame = viewport.convert(viewport.bounds, to: host.view)
-        let keyboardTop = screen.view.convert(screen.view.keyboardLayoutGuide.layoutFrame, to: host.view).minY
+        let window = try XCTUnwrap(host.view.window)
+        let display = host.view.convert(window.bounds, from: window)
         let measurement = try await web.evaluateJavaScript("""
           (() => {
             const area = document.querySelector('#term').getBoundingClientRect();
@@ -810,15 +818,12 @@ final class RemoteSessionTests: XCTestCase {
           let pixel = 1 / host.traitCollection.displayScale
           XCTAssertEqual(drawn.minX, host.view.safeAreaLayoutGuide.layoutFrame.minX, accuracy: pixel)
           XCTAssertEqual(drawn.maxX, host.view.safeAreaLayoutGuide.layoutFrame.maxX, accuracy: pixel)
-          XCTAssertEqual(drawn.minY, terminalFrame.minY, accuracy: pixel)
-          XCTAssertEqual(drawn.maxY, keyboardTop, accuracy: pixel)
-          let topInset = try XCTUnwrap(host.view.window).safeAreaInsets.top
-          if topInset >= 44 && host.view.bounds.width < host.view.bounds.height {
-            XCTAssertEqual(terminalFrame.minY, topInset, accuracy: 1, "Title must share the cutout band")
-          }
+          XCTAssertEqual(drawn.minY, display.minY, accuracy: pixel)
+          XCTAssertEqual(drawn.maxY, display.maxY, accuracy: pixel)
           print("Terminal grid: \(Int(grid[0])) columns × \(Int(grid[1])) rows")
         }
-        XCTAssertEqual(terminalFrame.maxY, keyboardTop, accuracy: 1)
+        XCTAssertEqual(terminalFrame.minY, display.minY, accuracy: 1)
+        XCTAssertEqual(terminalFrame.maxY, display.maxY, accuracy: 1)
         try await toggle(reveal)
         XCTAssertFalse(panel.isHidden)
         XCTAssertFalse(dismiss.isHidden)

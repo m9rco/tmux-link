@@ -495,42 +495,48 @@ struct TerminalView: View {
     GeometryReader { geometry in
       let top = geometry.safeAreaInsets.top
       let inCutout = UIDevice.current.userInterfaceIdiom == .phone && top >= 44
-      VStack(spacing: 0) {
-        ZStack(alignment: .trailing) {
-          Text(session?.name ?? client.name)
-            .font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
-            .frame(maxWidth: inCutout ? geometry.size.width * 0.20 : max(0, geometry.size.width - 160),
-                   alignment: inCutout ? .leading : .center)
-            .padding(.horizontal, 12).frame(maxWidth: .infinity, alignment: inCutout ? .leading : .center)
-            .accessibilityAddTraits(.isHeader)
-          if let reading = status.reading {
-            Button {
-              var lines = [reading.phase.title]
-              if reading.phase == .ready {
-                lines.append(reading.mtls ? "mTLS · SSH" : "SSH")
-                lines.append("RTT " + reading.latencyText)
-              }
-              detail = lines.joined(separator: "\n")
-            } label: {
-              HStack(spacing: 4) {
-                Circle().fill(reading.phase == .ready && !reading.timedOut ? mint : .orange)
-                  .frame(width: 6, height: 6)
-                Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
-                  .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-              }.padding(.horizontal, 8).frame(minWidth: 44, maxHeight: .infinity)
-                .contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("连接详情")
-              .accessibilityValue(accessibilityValue(reading)).accessibilityIdentifier("terminal.status.details")
+      TerminalController(client: client, session: session, status: status, leave: { dismiss() })
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .top) {
+          ZStack(alignment: .topTrailing) {
+            Text(session?.name ?? client.name)
+              .font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+              .frame(maxWidth: inCutout ? geometry.size.width * 0.20 : max(0, geometry.size.width - 160),
+                     alignment: inCutout ? .leading : .center)
+              .padding(.horizontal, 12).frame(maxWidth: .infinity, alignment: inCutout ? .leading : .center)
+              .allowsHitTesting(false)
+              .accessibilityAddTraits(.isHeader)
+            if let reading = status.reading {
+              Button {
+                var lines = [reading.phase.title]
+                if reading.phase == .ready {
+                  lines.append(reading.mtls ? "mTLS · SSH" : "SSH")
+                  lines.append("RTT " + reading.latencyText)
+                }
+                detail = lines.joined(separator: "\n")
+              } label: {
+                HStack(spacing: 4) {
+                  Circle().fill(reading.phase == .ready && !reading.timedOut ? mint : .orange)
+                    .frame(width: 6, height: 6)
+                  Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }.padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44, alignment: .top)
+                  .contentShape(Rectangle())
+              }.buttonStyle(.plain).accessibilityLabel("连接详情")
+                .accessibilityValue(accessibilityValue(reading)).accessibilityIdentifier("terminal.status.details")
+            }
           }
-        }.frame(height: inCutout ? top : 28)
-        TerminalController(client: client, session: session, status: status, leave: { dismiss() })
-      }.padding(.top, inCutout ? -top : 0)
+          .padding(.top, 1)
+          // Inset the compact overlay past the rounded top corners.
+          .padding(.horizontal, inCutout ? top / 2 : 0)
+        }
+        .ignoresSafeArea(.container, edges: .vertical)
     }
-      // Screen's keyboardLayoutGuide is the single owner of the terminal's bottom edge.
       .ignoresSafeArea(.keyboard, edges: .bottom)
       .background(Color(uiColor: Screen.surface).ignoresSafeArea())
       .toolbar(.hidden, for: .navigationBar)
       .statusBarHidden(true)
+      .persistentSystemOverlays(.hidden)
       .alert(
         "连接状态",
         isPresented: Binding(

@@ -41,7 +41,7 @@ private final class TerminalViewport: UIView {
     let size = bounds.size
     // WebKit tries to preserve the focused element's screen position when its scroll
     // view grows. Keep that canvas full-height and resize only the clipped terminal grid.
-    let fullHeight = window.map { convert($0.safeAreaLayoutGuide.layoutFrame, from: $0).maxY } ?? bounds.height
+    let fullHeight = window.map { convert($0.bounds, from: $0).maxY } ?? bounds.height
     let canvas = CGSize(width: bounds.width, height: max(fullHeight, bounds.height))
     UIView.performWithoutAnimation {
       if web.bounds.size != canvas { web.bounds = CGRect(origin: .zero, size: canvas) }
@@ -173,8 +173,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+      stack.topAnchor.constraint(equalTo: view.topAnchor),
+      stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
       stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
     ])
@@ -570,6 +570,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func finish(_ message: String) {
     guard active, !completed else { return }
     completed = true
+    statusBar.directionalLayoutMargins.top = 5 + max(view.safeAreaInsets.top, 20)
     statusBar.isHidden = false
     navigationStatus?.update(nil)
     expiry?.invalidate()
