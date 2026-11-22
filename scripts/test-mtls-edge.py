@@ -65,9 +65,13 @@ def run(directory):
     thread.start()
     mapping = (DEPLOY / "nginx-tmux-link-map.conf").read_text().replace(
         "/etc/nginx/tmux-link/authorized-routes.map", str(acl))
+    broker_proxy = directory / "broker-proxy.conf"
+    broker_proxy.write_text((DEPLOY / "nginx-tmux-link-broker-proxy.conf").read_text().replace(
+        "127.0.0.1:7682", f"127.0.0.1:{upstream.server_port}"))
     location = (DEPLOY / "nginx-tmux-link.conf").read_text().replace(
         "/etc/nginx/tmux-link/device-ca.pem", str(directory / "ca/device-ca.pem")
-    ).replace("127.0.0.1:7682", f"127.0.0.1:{upstream.server_port}")
+    ).replace("127.0.0.1:7682", f"127.0.0.1:{upstream.server_port}"
+    ).replace("/etc/nginx/tmux-link/broker-proxy.conf", str(broker_proxy))
     nginx = os.environ.get("TMUX_LINK_TEST_NGINX", "nginx")
     config = directory / "nginx.conf"
     config.write_text(f"""
@@ -130,6 +134,13 @@ http {{
         for path in ("/tmux-link", "/tmux-link/primary", "/tmux-link/Build"):
             assert request(path, "owner") == 101
         assert upstream.paths == ["/tmux-link", "/tmux-link/primary", "/tmux-link/Build"]
+        assert request("/tmux-link/pair") == 403
+        assert request("/tmux-link/pair", "spare") == 403
+        assert request("/tmux-link/session/" + "a" * 32) == 403
+        assert request("/tmux-link/pair", "owner") == 101
+        assert request("/tmux-link/session/" + "a" * 32, "owner") == 101
+        assert request("/tmux-link/register") == 101
+        assert request("/tmux-link/tunnel") == 101
         acl.write_text("")
         proc.send_signal(signal.SIGHUP)
         for _ in range(50):
@@ -138,6 +149,8 @@ http {{
             time.sleep(0.05)
         else:
             raise AssertionError("revoked certificate kept its route access after reload")
+        assert request("/tmux-link/pair", "owner") == 403
+        assert request("/tmux-link/session/" + "a" * 32, "owner") == 403
     finally:
         proc.terminate()
         proc.wait(timeout=5)

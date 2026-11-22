@@ -129,6 +129,7 @@ struct PastedClientConfiguration: Transferable {
 final class ClientImportLinks: ObservableObject {
   enum Request {
     case review(ClientProfile)
+    case pair(HostPairing)
     case invalid(String)
   }
 
@@ -136,7 +137,10 @@ final class ClientImportLinks: ObservableObject {
 
   func open(_ url: URL) {
     guard url.scheme?.lowercased() == "tmuxlink" else { return }
-    do { requests.append(.review(try ClientTransfer.parse(url.absoluteString))) } catch {
+    do {
+      if url.host == "pair" { requests.append(.pair(try HostPairing.parse(url.absoluteString))) }
+      else { requests.append(.review(try ClientTransfer.parse(url.absoluteString))) }
+    } catch {
       requests.append(.invalid(error.localizedDescription))
     }
   }
@@ -152,6 +156,7 @@ struct Workspace: View {
   @StateObject private var store = ProfileStore()
   @State private var path: [ClientProfile] = []
   @State private var editor: ClientProfile?
+  @State private var pairing: HostPairing?
   @State private var importedID: UUID?
   @State private var message: String?
   var body: some View {
@@ -180,6 +185,12 @@ struct Workspace: View {
       ProfileEditor(client: draft) { client in
         store.save(client)
         if client.id == importedID { path = [client] }
+      }
+    }
+    .sheet(item: $pairing, onDismiss: { reviewNextLink() }) { offer in
+      HostPairingReview(pairing: offer) { client in
+        store.save(client)
+        path = [client]
       }
     }
     .alert(
@@ -226,7 +237,12 @@ struct Workspace: View {
       return
     }
     do {
-      review(try ClientTransfer.parse(item.text))
+      if let url = URL(string: item.text.trimmingCharacters(in: .whitespacesAndNewlines)),
+        url.scheme == "tmuxlink", url.host == "pair" {
+        pairing = try HostPairing.parse(url.absoluteString)
+      } else {
+        review(try ClientTransfer.parse(item.text))
+      }
     } catch {
       message = error.localizedDescription
     }
@@ -238,9 +254,10 @@ struct Workspace: View {
   }
 
   private func reviewNextLink() {
-    guard editor == nil, message == nil, let request = clientLinks.takeNext() else { return }
+    guard editor == nil, pairing == nil, message == nil, let request = clientLinks.takeNext() else { return }
     switch request {
     case .review(let draft): review(draft)
+    case .pair(let offer): pairing = offer
     case .invalid(let error): message = error
     }
   }

@@ -55,10 +55,14 @@ jobs:
           rustup default stable
           rustup target add "${{ matrix.target }}"
           echo "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin" >> "$GITHUB_PATH"
+      - name: Install musl C compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
       - name: Build Linux package
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
         run: |
           cargo build --locked --release -p tmux-link --bins --target "${{ matrix.target }}"
           mkdir -p package/bin package/share/tmux-link dist

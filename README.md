@@ -6,16 +6,13 @@
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-333333?logo=apple)
 ![iOS](https://img.shields.io/badge/iOS-16%2B-333333?logo=apple)
 
-用 iPhone 接入内网 Linux 或 macOS 上已经运行的 tmux。内网机器主动通过 SSH 反向转发注册私有 Unix socket，手机通过 `wss://center.example.com/tmux-link` 接入。文中 `center.example.com` 是示例域名，部署时请替换成自己的公网中心地址。SSH 会话在手机与内网主机之间独立加密和认证，中心转发密文。
+用 iPhone 接入内网 Linux 或 macOS 上已经运行的 tmux。内网机器通过出站 WSS 配对并保持连接，手机通过中心访问各机器。文中 `center.example.com` 是示例域名，部署时请替换成自己的公网中心地址。SSH 会话在手机与内网主机之间独立加密和认证，中心转发密文。
 
 ```text
-iPhone ── SSH over WSS ──► center.example.com:443/tmux-link
-                                      │ HTTPS → loopback center:7682
-                                      ▼
-                              私有 Unix socket
-                                      │ 内网主动建立的 SSH 隧道
-                                      ▼
-                            Linux / Mac SSH → tmux
+iPhone ── SSH over WSS ──► public center ◄── outbound WSS ── Linux / Mac
+                                                           │ localhost SSH
+                                                           ▼
+                                                          tmux
 ```
 
 首页保存多台客户端。点客户端读取该账号的会话，点名称进入终端，返回会话列表即可切换；后台的 tmux 会话继续运行。每台客户端独立配置入口、用户名与 SSH 指纹。长按客户端可编辑，左滑可删除。首次升级会载入之前保存的连接。旧版 agent 支持在会话列表中选择「打开兼容终端」。
@@ -35,6 +32,16 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.s
 ```
 
 默认只安装客户端 `tmux-link-agent`。普通用户安装到 `~/.local/bin`，root 安装到 `/usr/local/bin`。把安装目录加入 PATH，已有终端可以直接执行 `export PATH="$HOME/.local/bin:$PATH"`。
+
+连接一台新机器时，以运行 tmux 的用户执行下面的安装配对命令。机器需要已运行的 OpenSSH 服务和 tmux。
+
+```sh
+curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.sh | sh -s -- --connect center.example.com
+```
+
+已安装客户端时，直接运行 `~/.local/bin/tmux-link-agent pair --center center.example.com`。命令会检测本机 22 端口上的 SSH 主机指纹，打印十分钟有效的配对链接并等待确认。用已登记中心设备证书的 iPhone 打开或粘贴链接，核对机器上显示的指纹，点「确认配对并连接」。客户端自动将手机公钥加入当前用户的受限 `~/.ssh/authorized_keys`，建立四条出站 WSS 备用连接，并保存用户后台服务。手机随即进入会话列表。中心自动登记机器和批准它的手机。
+
+Linux 使用 systemd 用户服务，macOS 使用登录用户的 LaunchAgent。Linux 需要退出登录后仍在线时，由管理员运行 `sudo loginctl enable-linger 用户名`。缺少用户服务管理器时，命令会在当前终端维持连接，并输出手动恢复命令。自定义本机 SSH 端口可在 `pair` 后加 `--ssh-port 2201`。配对通过 443 出站，适用于动态内网 IP。机器的连接令牌保存在当前用户权限为 700 的 `~/.config/tmux-link/paired/` 目录中。
 
 公网中心安装并附带 OpenSSH、tmux 依赖（Debian/Ubuntu）时执行下方命令。
 
@@ -57,7 +64,7 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.1.3/install.s
 
 在已接入中心的机器上，以 tmux 所属用户生成链接。将域名和路由替换为该机器在中心的配置。主客户端的默认路由是 `primary`。
 
-首次在新机器运行安装脚本后，先完成下方「内网 Linux」或「内网 macOS」的配对步骤，再生成链接。若 Linux 提示缺少 `/etc/tmux-link/host_ed25519.pub`，请检查专用 sshd 的初始化步骤。已有自定义 sshd 的部署可通过 `--host-key` 指定该服务实际使用的主机公钥。中心还需要登记这台机器的路由，并授权手机证书访问它。
+首次接入优先运行上一节的 `pair` 命令完成自动配对。以下 `import-link` 命令适用于已经建立 SSH 反向隧道并登记中心路由的手动部署。
 
 ```sh
 tmux-link-agent import-link --center center.example.com --route build --name "构建机"
@@ -84,6 +91,12 @@ cargo build --release --locked -p tmux-link --bins
 iOS 客户端使用 Rust SSH 核心、UIKit、Keychain 和随 App 打包的 xterm.js 6.0.0 / addon-fit 0.11.0。Apple Silicon Mac 需要完整 Xcode 和 rustup。运行 `./scripts/build-ios.sh device` 生成未签名设备包，模拟器使用 `./scripts/build-ios.sh simulator`。要装到手机，先构建设备包，再打开 `ios/TmuxLink.xcodeproj`，在 Signing & Capabilities 选择自己的 Team 和可用的 bundle ID，选择 iPhone 后 Run。首次打开时点「复制本机 SSH 公钥」。若重新生成工程，运行 `cd ios && xcodegen generate`。
 
 ## 公网中心
+
+启用自动配对时，在下面的中心配置基础上完成这些设置。
+
+1. 将 `deploy/nginx-tmux-link-broker-proxy.conf` 安装为 `/etc/nginx/tmux-link/broker-proxy.conf`，更新 nginx 的设备授权 map 和 HTTPS location 模板。配对确认和会话入口要求当前手机证书拥有 `primary` 授权，中心进一步将每台机器绑定到批准它的证书。注册和机器隧道入口用随机令牌校验，并通过 nginx 限速。
+2. 在服务启动参数末尾添加 `--pairing-dir=/var/lib/tmux-link/paired`。用中心运行账号创建该目录，权限 700。如果启用了 `ProtectSystem=strict`，为服务添加 `ReadWritePaths=/var/lib/tmux-link/paired`。服务必须监听回环地址，由 nginx 覆盖传入的 `X-Tmux-Device` 请求头。
+3. 用 `nginx -t` 验证后重载 nginx，重启 center。中心按权限 600 持久化登记状态，重启后客户端会自动重连。需要撤销某台机器时，先停止它的用户服务，在中心停止服务并备份、移除 `hosts.json` 中该机器记录，再启动中心。手机证书撤权沿用下方授权文件和 nginx 重载流程。
 
 1. 为隧道创建专用非 root 用户 `tmuxrelay`，给它配置仅用于隧道的 SSH 公钥，作为该用户执行 `install -d -m 700 ~/link`。公网中心 SSH 的授权密钥是 **Linux 隧道公钥**。手机公钥只交给内网 Linux。
 2. 将 `deploy/center-sshd-match.conf` 追加到公网 sshd 配置末尾，用 `sshd -t` 检查后 reload。该用户可以创建远端 Unix socket，无法开启 shell 或 TCP 转发。确保其家目录为专用目录。
@@ -185,7 +198,7 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 
 - 主机指纹匹配且手机私钥通过 SSH 签名认证后才会启动 `agent attach`。手机私钥保存在仅本设备解锁时可读的 Keychain 项中。更换手机时重新授权公钥。删除 `phone.keys` 中对应行会拒绝后续登录，已连接的设备需要另行断开其 SSH 会话。
 - 中心可以看到端点、连接时间、字节量，也可中断流量。SSH 保护会话内容。手机、Linux、tmux 插件和同用户进程仍是信任边界。进入 shell 或 AI CLI 后，操作者拥有该 主机账号自身的执行权限。
-- 中心用 Tokio 双向转发，最多 32 条并发连接，未安装录屏或会话内容日志。终端按字节处理，输入和输出分别推进，输出随渲染进度施加背压。移动网络的实际延迟取决于手机、中心与 Linux 三者之间的链路。
+- 中心用 Tokio 双向转发，握手与活动请求最多 32 条并发，自动配对最多登记 128 台机器，每台保留最多四条备用通道，未安装录屏或会话内容日志。终端按字节处理，输入和输出分别推进，输出随渲染进度施加背压。移动网络的实际延迟取决于手机、中心与 Linux 三者之间的链路。
 
 ## 验证
 

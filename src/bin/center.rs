@@ -11,6 +11,9 @@ use tokio_tungstenite::tungstenite::{
     handshake::server::Request, http::Response, protocol::WebSocketConfig,
 };
 
+#[path = "center/broker.rs"]
+mod broker;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -28,7 +31,16 @@ async fn main() -> Result<()> {
         ("/tmux-link".to_owned(), default.clone()),
         ("/tmux-link/primary".to_owned(), default.clone()),
     ]);
+    let mut pairing = None;
     for mapping in args {
+        if let Some(directory) = mapping.strip_prefix("--pairing-dir=") {
+            ensure!(
+                websocket && pairing.is_none(),
+                "pairing requires WebSocket mode and one registry"
+            );
+            pairing = Some(Arc::new(broker::Broker::open(PathBuf::from(directory))?));
+            continue;
+        }
         let (name, path) = mapping
             .split_once('=')
             .context("expected NAME=/absolute/socket")?;
@@ -48,6 +60,10 @@ async fn main() -> Result<()> {
     }
     let routes = Arc::new(routes);
     let listener = TcpListener::bind(address).await?;
+    ensure!(
+        pairing.is_none() || listener.local_addr()?.ip().is_loopback(),
+        "pairing must bind to loopback behind the authenticated TLS proxy"
+    );
     let slots = Arc::new(Semaphore::new(32));
     eprintln!("tmux-link center listening on {}", listener.local_addr()?);
     loop {
@@ -57,11 +73,14 @@ async fn main() -> Result<()> {
         };
         let routes = routes.clone();
         let default = default.clone();
+        let pairing = pairing.clone();
         tokio::spawn(async move {
             let _slot = slot;
             let _ = phone.set_nodelay(true);
             if websocket {
                 let mut path = None;
+                let mut paired_path = None;
+                let mut device = String::new();
                 let config = WebSocketConfig::default()
                     .max_message_size(Some(65536))
                     .max_frame_size(Some(65536));
@@ -70,20 +89,37 @@ async fn main() -> Result<()> {
                     phone,
                     |req: &Request, response| {
                         path = routes.get(req.uri().path()).cloned();
-                        if path.is_none() {
+                        if pairing.is_some() && broker::Broker::recognizes(req.uri().path()) {
+                            paired_path = Some(req.uri().path().to_owned());
+                            device = req
+                                .headers()
+                                .get("x-tmux-device")
+                                .and_then(|v| v.to_str().ok())
+                                .filter(|v| {
+                                    !v.is_empty()
+                                        && v.len() <= 64
+                                        && v.bytes().all(|b| b.is_ascii_hexdigit())
+                                })
+                                .unwrap_or("")
+                                .to_owned();
+                        }
+                        if path.is_none() && paired_path.is_none() {
                             return Err(Response::builder().status(404).body(None).unwrap());
                         }
                         Ok(response)
                     },
                     Some(config),
                 );
-                if let Ok(Ok(ws)) = timeout(Duration::from_secs(10), upgrade).await
-                    && let Some(path) = path
-                    && let Ok(Ok(mut agent)) =
-                        timeout(Duration::from_secs(5), UnixStream::connect(path)).await
-                {
+                if let Ok(Ok(ws)) = timeout(Duration::from_secs(10), upgrade).await {
                     let mut stream = tmux_link::websocket::byte_stream(ws);
-                    let _ = copy_bidirectional(&mut stream, &mut agent).await;
+                    if let (Some(broker), Some(path)) = (pairing, paired_path) {
+                        let _ = broker.handle(&path, &device, stream).await;
+                    } else if let Some(path) = path
+                        && let Ok(Ok(mut agent)) =
+                            timeout(Duration::from_secs(5), UnixStream::connect(path)).await
+                    {
+                        let _ = copy_bidirectional(&mut stream, &mut agent).await;
+                    }
                 }
             } else if let Ok(Ok(mut agent)) =
                 timeout(Duration::from_secs(5), UnixStream::connect(default)).await

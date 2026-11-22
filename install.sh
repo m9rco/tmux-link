@@ -7,11 +7,13 @@ if [ "$(id -u)" = 0 ]; then prefix=/usr/local; else prefix="$HOME/.local"; fi
 role=agent
 from_dir=
 download_base=
+connect_center=
 usage() {
     cat <<'HELP'
 Usage: sh install.sh [--role agent|center|both] [--version v0.1.0]
                      [--prefix /usr/local] [--repo OWNER/REPO]
                      [--from-dir DIRECTORY] [--download-base-url HTTPS_URL] [--with-deps]
+                     [--connect CENTER_HOSTNAME]
 Defaults: agent role, ~/.local for users, /usr/local for root.
 Public GitHub downloads use curl without authentication.
 Private repository: set GH_TOKEN or GITHUB_TOKEN and install gh.
@@ -19,6 +21,7 @@ Private repository: set GH_TOKEN or GITHUB_TOKEN and install gh.
 --with-deps installs OpenSSH/tmux via apt-get on Debian/Ubuntu, or tmux via Homebrew on macOS.
 The installer places binaries and deployment templates under PREFIX.
 Configure the provided templates with your user, keys and center address.
+--connect starts outbound pairing after installation. Run as the tmux owner.
 HELP
 }
 deps=no
@@ -26,18 +29,23 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --help|-h) usage; exit 0 ;;
         --with-deps) deps=yes; shift ;;
-        --role|--version|--prefix|--repo|--from-dir|--download-base-url)
+        --role|--version|--prefix|--repo|--from-dir|--download-base-url|--connect)
             [ "$#" -ge 2 ] || { echo "Missing value for $1" >&2; exit 2; }
             case "$1" in
                 --role) role=$2 ;; --version) version=$2 ;; --prefix) prefix=$2 ;;
                 --repo) repo=$2 ;; --from-dir) from_dir=$2 ;;
                 --download-base-url) download_base=$2 ;;
+                --connect) connect_center=$2 ;;
             esac
             shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 case "$role" in agent|center|both) ;; *) echo "Invalid role" >&2; exit 2 ;; esac
+if [ -n "$connect_center" ]; then
+    [ "$role" != center ] || { echo "--connect requires the agent role" >&2; exit 2; }
+    case "$connect_center" in ""|*[!a-zA-Z0-9.-]*|-*|*-) echo "Invalid center hostname" >&2; exit 2 ;; esac
+fi
 case "$prefix" in /*) ;; *) echo "--prefix must be absolute" >&2; exit 2 ;; esac
 case "$(uname -s)" in Linux) platform=linux ;; Darwin) platform=macos ;;
     *) echo "Linux or macOS required" >&2; exit 1 ;; esac
@@ -114,8 +122,9 @@ done
 cp -R "$tmp/unpack/share/tmux-link/." "$prefix/share/tmux-link/"
 echo "Installed $role to $prefix/bin"
 echo "Deployment templates and setup guide: $prefix/share/tmux-link"
-echo "Services require user, host and key configuration before activation."
-if [ "$role" = agent ] || [ "$role" = both ]; then
-    echo "Before import-link: configure inner SSH, authorize the phone public key, connect the tunnel and register the center route."
-    echo "Setup guide: $prefix/share/tmux-link/README.md"
+if [ -n "$connect_center" ]; then
+    "$prefix/bin/tmux-link-agent" pair --center "$connect_center"
+else
+    echo "Connect a new host: $prefix/bin/tmux-link-agent pair --center YOUR_CENTER_HOST"
+    echo "Manual deployment guide: $prefix/share/tmux-link/README.md"
 fi

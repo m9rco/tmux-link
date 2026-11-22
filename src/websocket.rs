@@ -17,8 +17,16 @@ where
         let (mut input, mut output) = tokio::io::split(pump);
         let upload = async {
             let mut bytes = [0; 16384];
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
+            heartbeat.tick().await;
             loop {
-                let count = input.read(&mut bytes).await?;
+                let count = tokio::select! {
+                    count = input.read(&mut bytes) => count?,
+                    _ = heartbeat.tick() => {
+                        tx.send(Message::Ping(Vec::new().into())).await?;
+                        continue;
+                    }
+                };
                 if count == 0 {
                     tx.send(Message::Close(None)).await?;
                     break;
@@ -29,7 +37,9 @@ where
             Ok::<_, anyhow::Error>(())
         };
         let download = async {
-            while let Some(message) = rx.next().await {
+            while let Some(message) =
+                tokio::time::timeout(std::time::Duration::from_secs(65), rx.next()).await?
+            {
                 match message? {
                     Message::Binary(bytes) => output.write_all(&bytes).await?,
                     Message::Close(_) => break,

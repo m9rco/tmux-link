@@ -9,7 +9,7 @@ const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-fn read_command(program: &str, args: &[&str]) -> Result<String> {
+pub(super) fn read_command(program: &str, args: &[&str]) -> Result<String> {
     let result = Command::new(program)
         .args(args)
         .output()
@@ -22,7 +22,7 @@ fn read_command(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(result.stdout)?.trim().to_owned())
 }
 
-fn valid_center(host: &str) -> bool {
+pub(super) fn valid_center(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 253
         && host.split('.').all(|label| {

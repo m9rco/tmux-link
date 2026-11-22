@@ -392,7 +392,94 @@ unsafe fn open_inner(
     })
 }
 /// # Safety
-/// Pass a non-null pointer returned by tl_connect exactly once.
+/// Supply readable NUL-terminated URL, ID and JSON strings and DER buffers of the
+/// specified lengths for the duration of the call. The returned error is owned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tl_approve_pairing(
+    url: *const c_char,
+    id: *const c_char,
+    request_json: *const c_char,
+    cert: *const u8,
+    cert_len: usize,
+    key: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let result = (|| -> Result<()> {
+        ensure!(
+            !url.is_null()
+                && !id.is_null()
+                && !request_json.is_null()
+                && !cert.is_null()
+                && !key.is_null()
+                && (1..=65536).contains(&cert_len)
+                && (1..=65536).contains(&key_len),
+            "invalid pairing arguments"
+        );
+        let url = unsafe { CStr::from_ptr(url) }.to_str()?;
+        let id = unsafe { CStr::from_ptr(id) }.to_str()?;
+        ensure!(
+            id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid pairing ID"
+        );
+        let json = unsafe { CStr::from_ptr(request_json) }.to_str()?;
+        ensure!(
+            json.len() <= tmux_link::pairing::MAX_CONTROL,
+            "pairing request too large"
+        );
+        let message: tmux_link::pairing::Request = serde_json::from_str(json)?;
+        ensure!(
+            matches!(message, tmux_link::pairing::Request::Approve { .. }),
+            "expected pairing approval"
+        );
+        let cert = unsafe { std::slice::from_raw_parts(cert, cert_len) };
+        let key = unsafe { std::slice::from_raw_parts(key, key_len) };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                async fn call(
+                    url: &str,
+                    cert: &[u8],
+                    key: &[u8],
+                    message: &tmux_link::pairing::Request,
+                ) -> Result<tmux_link::pairing::Reply> {
+                    timeout(Duration::from_secs(15), async {
+                        let mut stream = tmux_link::websocket::connect_mtls(url, cert, key).await?;
+                        tmux_link::pairing::write(&mut stream, message).await?;
+                        tmux_link::pairing::checked(tmux_link::pairing::read(&mut stream).await?)
+                    })
+                    .await?
+                }
+                let reply = call(url, cert, key, &message).await?;
+                ensure!(
+                    reply.id == id && reply.approved,
+                    "unexpected pairing response"
+                );
+                for _ in 0..15 {
+                    let reply = call(
+                        url,
+                        cert,
+                        key,
+                        &tmux_link::pairing::Request::Ready { id: id.to_owned() },
+                    )
+                    .await?;
+                    if reply.ready {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                anyhow::bail!("配对已确认，等待机器建立连接；保持机器上的配对命令运行后重试")
+            })
+    })();
+    result.err().map_or(std::ptr::null_mut(), |err| {
+        CString::new(err.to_string().replace('\0', " "))
+            .unwrap()
+            .into_raw()
+    })
+}
+
+/// # Safety
+/// Pass a non-null pointer returned by tl_connect or tl_approve_pairing exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tl_free_error(p: *mut c_char) {
     drop(unsafe { CString::from_raw(p) });

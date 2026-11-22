@@ -16,7 +16,9 @@ trap cleanup EXIT
 # On arm64 builders prefer a native target when the corresponding linker is available.
 triple=${TL_LINUX_TARGET:-x86_64-unknown-linux-musl}
 rustup target add "$triple"
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --locked -p tmux-link --target "$triple"
+# This fixture uses plaintext loopback TCP/WS; avoid requiring a musl C toolchain
+# on macOS for the outbound TLS client that is not used by these two endpoints.
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --locked -p tmux-link --no-default-features --target "$triple"
 case "$triple" in x86_64-*) arch=amd64 ;; aarch64-*) arch=arm64 ;; *) exit 2 ;; esac
 docker run -d --name "$box" --platform "linux/$arch" -p 127.0.0.1::2222 -p 127.0.0.1::2223 debian:12 sleep infinity >/dev/null
 docker exec "$box" sh -ec 'apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -yqq --no-install-recommends openssh-server openssh-client tmux >/dev/null; mkdir -p /etc/tmux-link'
