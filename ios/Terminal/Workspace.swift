@@ -322,7 +322,7 @@ private struct Sessions: View {
         }
         ForEach(sessions) { session in
           NavigationLink {
-            TerminalView(client: client, session: session).navigationTitle(session.name)
+            TerminalView(client: client, session: session)
           } label: {
             Label {
               Text(session.name).font(.body.monospaced()).padding(.vertical, 7)
@@ -360,11 +360,93 @@ private struct Sessions: View {
   }
 }
 
-private struct TerminalView: UIViewControllerRepresentable {
+@MainActor
+final class TerminalNavigationStatus: ObservableObject {
+  @Published private(set) var reading: TerminalActivityState?
+
+  func update(_ reading: TerminalActivityState?) {
+    if self.reading != reading { self.reading = reading }
+  }
+}
+
+struct TerminalView: View {
   let client: ClientProfile
   let session: RemoteSession?
+  @StateObject private var status: TerminalNavigationStatus
+  @State private var detail: String?
+
+  init(client: ClientProfile, session: RemoteSession?, status: TerminalNavigationStatus? = nil) {
+    self.client = client
+    self.session = session
+    _status = StateObject(wrappedValue: status ?? TerminalNavigationStatus())
+  }
+
+  var body: some View {
+    TerminalController(client: client, session: session, status: status)
+      .navigationTitle(session?.name ?? client.name)
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        if let reading = status.reading {
+          ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
+              var lines = [reading.phase.title]
+              if reading.phase == .ready {
+                lines.append(reading.mtls ? "mTLS · SSH" : "SSH")
+                lines.append("RTT " + reading.latencyText)
+              }
+              detail = lines.joined(separator: "\n")
+            } label: {
+              HStack(spacing: 5) {
+                Image(
+                  systemName: reading.timedOut
+                    ? "exclamationmark.circle.fill"
+                    : (reading.phase == .ready ? "circle.fill" : "circle")
+                )
+                .font(.system(size: 9))
+                Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
+                  .font(.caption.weight(.semibold)).monospacedDigit().lineLimit(1)
+              }
+              .foregroundStyle(reading.phase == .ready && !reading.timedOut ? mint : .orange)
+              .frame(minWidth: 44, minHeight: 44)
+              .contentShape(Rectangle())
+            }
+            .accessibilityLabel("连接详情")
+            .accessibilityValue(accessibilityValue(reading))
+            .accessibilityIdentifier("terminal.status.details")
+          }
+        }
+      }
+      .alert(
+        "连接状态",
+        isPresented: Binding(
+          get: { detail != nil }, set: { if !$0 { detail = nil } })
+      ) {
+        Button("好") {}
+      } message: {
+        Text(detail ?? "")
+      }
+  }
+
+  private func accessibilityValue(_ reading: TerminalActivityState) -> String {
+    guard reading.phase == .ready else { return reading.phase.title }
+    let description: String
+    if reading.timedOut {
+      description = "延迟测量超时"
+    } else if let ms = reading.milliseconds {
+      description = "会话往返延迟 " + String(ms) + " 毫秒"
+    } else {
+      description = "正在测量会话往返延迟"
+    }
+    return reading.phase.title + "，" + description
+  }
+}
+
+private struct TerminalController: UIViewControllerRepresentable {
+  let client: ClientProfile
+  let session: RemoteSession?
+  let status: TerminalNavigationStatus
   func makeUIViewController(context: Context) -> Screen {
-    Screen(client: client, session: session)
+    Screen(client: client, session: session, navigationStatus: status)
   }
   func updateUIViewController(_ controller: Screen, context: Context) {}
   static func dismantleUIViewController(_ controller: Screen, coordinator: ()) { controller.stop() }

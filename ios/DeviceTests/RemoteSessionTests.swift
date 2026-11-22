@@ -216,14 +216,23 @@ final class RemoteSessionTests: XCTestCase {
     let root = try XCTUnwrap(rootController)
     for suffix in ["-other", ""] {
       let selected = try XCTUnwrap(sessions.first { $0.name == config.sessionName + suffix })
-      let screen = Screen(client: client, session: selected)
-      root.present(screen, animated: false)
-      defer {
-        screen.stop()
-        screen.dismiss(animated: false)
-      }
+      let previousActivities = Set(Activity<TerminalActivity>.activities.map(\.id))
+      let status = TerminalNavigationStatus()
+      let host = UIHostingController(rootView: NavigationStack {
+        TerminalView(client: client, session: selected, status: status)
+      })
+      host.modalPresentationStyle = .fullScreen
+      root.present(host, animated: false)
+      defer { host.dismiss(animated: false) }
       func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
-      let web = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? WKWebView }.first)
+      for _ in 0..<50 {
+        if descendants(host.view).contains(where: { $0 is WKWebView }) { break }
+        try await Task.sleep(nanoseconds: 100_000_000)
+      }
+      let web = try XCTUnwrap(descendants(host.view).compactMap { $0 as? WKWebView }.first)
+      let screen = try XCTUnwrap(
+        sequence(first: web as UIResponder, next: { $0.next }).compactMap { $0 as? Screen }.first)
+      defer { screen.stop() }
       let escape = try XCTUnwrap(
         descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.key.Esc" }
           as? UIButton)
@@ -255,20 +264,37 @@ final class RemoteSessionTests: XCTestCase {
           try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTAssertTrue(latency.text?.contains(" ms") == true, "Expected a live SSH round trip")
-        let details = try XCTUnwrap(
-          descendants(screen.view).first {
-            $0.accessibilityIdentifier == "terminal.status.details"
-          } as? UIButton)
-        if let activity = Activity<TerminalActivity>.activities.first(where: {
-          $0.activityState == .active
-        }) {
-          XCTAssertFalse(details.isHidden)
+        host.view.layoutIfNeeded()
+        let navigation = try XCTUnwrap(
+          descendants(host.view).compactMap { $0 as? UINavigationBar }.first { !$0.isHidden })
+        let item = try XCTUnwrap(navigation.topItem)
+        let terminalFrame = web.convert(web.bounds, to: host.view)
+        XCTAssertLessThanOrEqual(
+          navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY + 1)
+        XCTAssertLessThanOrEqual(
+          terminalFrame.maxY, escape.convert(escape.bounds, to: host.view).minY + 1)
+        XCTAssertFalse(descendants(screen.view).contains {
+          $0.accessibilityIdentifier == "terminal.status.details"
+        }, "A compact connection indicator still occupies terminal or keyboard space")
+        let trailing = (item.rightBarButtonItems ?? [])
+          + item.trailingItemGroups.flatMap(\.barButtonItems)
+        let activity = Activity<TerminalActivity>.activities.first {
+          !previousActivities.contains($0.id) && $0.activityState == .active
+        }
+        if let activity {
           XCTAssertTrue(connection.superview?.isHidden == true)
-          XCTAssertTrue(details.currentTitle?.contains(" ms") == true)
-          XCTAssertTrue(activity.content.state.phase == .ready)
+          XCTAssertEqual(activity.content.state.phase, .ready)
+          let reading = try XCTUnwrap(status.reading)
+          XCTAssertEqual(reading.phase, .ready)
+          XCTAssertNotNil(reading.milliseconds)
+          XCTAssertEqual("RTT " + reading.latencyText, latency.text)
+          XCTAssertFalse(trailing.isEmpty, "The measured RTT needs a trailing navigation item")
         } else {
-          XCTAssertTrue(details.isHidden)
+          XCTAssertNil(status.reading)
           XCTAssertFalse(connection.superview?.isHidden == true)
+          XCTAssertTrue(trailing.isEmpty, "The inline fallback must not duplicate its status")
+          XCTAssertLessThanOrEqual(
+            latency.convert(latency.bounds, to: host.view).maxY, terminalFrame.minY + 1)
         }
       }
       func type(_ command: String) async throws {

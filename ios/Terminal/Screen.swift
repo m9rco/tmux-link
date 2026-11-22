@@ -10,7 +10,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let status = UILabel()
   private let latency = UILabel()
   private let statusBar = UIStackView()
-  private let compactStatus = UIButton(type: .system)
+  private weak var navigationStatus: TerminalNavigationStatus?
   private var island: IslandReporting?
   private var activityState = TerminalActivityState()
   private var backgrounded = false
@@ -26,8 +26,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var started = false
   private var active = true
   private var dimensions = (UInt16(80), UInt16(24))
-  init(client: ClientProfile, session: RemoteSession?) {
+  init(
+    client: ClientProfile, session: RemoteSession?,
+    navigationStatus: TerminalNavigationStatus? = nil
+  ) {
     self.client = client
+    self.navigationStatus = navigationStatus
     target = session?.id ?? -1
     heading = session?.name ?? client.name
     super.init(nibName: nil, bundle: nil)
@@ -87,18 +91,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     scroll.addSubview(keys)
     keys.translatesAutoresizingMaskIntoConstraints = false
-    compactStatus.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-    compactStatus.accessibilityIdentifier = "terminal.status.details"
-    compactStatus.isHidden = true
-    compactStatus.setContentHuggingPriority(.required, for: .horizontal)
-    compactStatus.setContentCompressionResistancePriority(.required, for: .horizontal)
-    let minimumStatusWidth = compactStatus.widthAnchor.constraint(greaterThanOrEqualToConstant: 44)
-    minimumStatusWidth.priority = .defaultHigh
-    minimumStatusWidth.isActive = true
-    compactStatus.addAction(UIAction { [weak self] _ in self?.showStatus() }, for: .touchUpInside)
-    let controls = UIStackView(arrangedSubviews: [scroll, compactStatus])
-    controls.spacing = 6
-    let stack = UIStackView(arrangedSubviews: [bar, web, controls])
+    let stack = UIStackView(arrangedSubviews: [bar, web, scroll])
     stack.axis = .vertical
     stack.spacing = 4
     view.addSubview(stack)
@@ -134,9 +127,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     guard #available(iOS 16.1, *), island == nil, active, !completed, viewIfLoaded?.window != nil
     else { return }
     island = TerminalIsland(activityState) { [weak self] shown in
-      self?.statusBar.isHidden = shown
-      self?.compactStatus.isHidden = !shown
-      self?.renderStatus()
+      guard let self else { return }
+      statusBar.isHidden = shown && navigationStatus != nil
+      renderStatus()
     }
   }
 
@@ -162,21 +155,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         }
       }
     }
-    let text = state.phase == .ready ? state.latencyText : state.phase.title
-    let glyph = state.phase == .ready && !state.timedOut ? "●" : "◌"
-    compactStatus.setTitle(glyph + " " + text, for: .normal)
-    compactStatus.tintColor = state.phase == .ready && !state.timedOut ? .systemMint : .systemOrange
-    compactStatus.accessibilityLabel = [state.phase.title, latency.accessibilityLabel, "连接详情"]
-      .compactMap { $0 }.joined(separator: "，")
-  }
-
-  private func showStatus() {
-    guard presentedViewController == nil else { return }
-    let detail = [status.text, transportBadge.text, latency.text].compactMap { $0 }.joined(
-      separator: "\n")
-    let alert = UIAlertController(title: "连接状态", message: detail, preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "好", style: .default))
-    present(alert, animated: true)
+    navigationStatus?.update(statusBar.isHidden ? state : nil)
   }
 
   private func refreshStatus(immediately: Bool = false) {
@@ -394,6 +373,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func finish(_ message: String) {
     guard active, !completed else { return }
     completed = true
+    navigationStatus?.update(nil)
     expiry?.invalidate()
     island?.end()
     island = nil
