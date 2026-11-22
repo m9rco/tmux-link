@@ -504,22 +504,25 @@ final class RemoteSessionTests: XCTestCase {
         let navigation = try XCTUnwrap(
           descendants(host.view).compactMap { $0 as? UINavigationBar }.first { !$0.isHidden })
         let item = try XCTUnwrap(navigation.topItem)
-        let terminalFrame = web.convert(web.bounds, to: host.view)
+        let viewport = try XCTUnwrap(web.superview)
+        let terminalFrame = viewport.convert(viewport.bounds, to: host.view)
         let measurement = try await web.evaluateJavaScript("""
           (() => {
             const area = document.querySelector('#term').getBoundingClientRect();
             const screen = document.querySelector('.xterm-screen').getBoundingClientRect();
-            return [term.cols, term.rows, screen.width / term.cols, screen.height / term.rows,
-                    area.width - screen.width, area.height - screen.height];
+            return [term.cols, term.rows, screen.left - area.left, screen.top - area.top,
+                    screen.width, screen.height];
           })()
           """)
         let grid = try XCTUnwrap(measurement as? [Double])
         XCTAssertEqual(grid.count, 6)
         if grid.count == 6 {
-          XCTAssertGreaterThanOrEqual(grid[4], -1)
-          XCTAssertLessThan(grid[4], grid[2] + 1.5, "A full column is lost at the right edge")
-          XCTAssertGreaterThanOrEqual(grid[5], -1)
-          XCTAssertLessThan(grid[5], grid[3] + 1, "A full row is lost at the bottom")
+          let drawn = web.convert(CGRect(x: grid[2], y: grid[3], width: grid[4], height: grid[5]), to: host.view)
+          let pixel = 1 / host.traitCollection.displayScale
+          XCTAssertEqual(drawn.minX, host.view.safeAreaLayoutGuide.layoutFrame.minX, accuracy: pixel)
+          XCTAssertEqual(drawn.maxX, host.view.safeAreaLayoutGuide.layoutFrame.maxX, accuracy: pixel)
+          XCTAssertEqual(drawn.minY, terminalFrame.minY, accuracy: pixel)
+          XCTAssertEqual(drawn.maxY, escape.convert(escape.bounds, to: host.view).minY, accuracy: pixel)
           print("Terminal grid: \(Int(grid[0])) columns × \(Int(grid[1])) rows")
         }
         XCTAssertLessThanOrEqual(
@@ -536,6 +539,7 @@ final class RemoteSessionTests: XCTestCase {
         }
         if let activity {
           XCTAssertTrue(connection.superview?.isHidden == true)
+          XCTAssertEqual(navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY, accuracy: 1)
           for _ in 0..<30 where activity.content.state.phase != .ready {
             try await Task.sleep(nanoseconds: 100_000_000)
           }
@@ -549,8 +553,8 @@ final class RemoteSessionTests: XCTestCase {
           XCTAssertNil(status.reading)
           XCTAssertFalse(connection.superview?.isHidden == true)
           XCTAssertTrue(trailing.isEmpty, "The inline fallback must not duplicate its status")
-          XCTAssertLessThanOrEqual(
-            latency.convert(latency.bounds, to: host.view).maxY, terminalFrame.minY + 1)
+          let strip = try XCTUnwrap(latency.superview)
+          XCTAssertEqual(strip.convert(strip.bounds, to: host.view).maxY, terminalFrame.minY, accuracy: 1)
         }
       }
       func type(_ command: String) async throws {

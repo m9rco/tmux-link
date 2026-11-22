@@ -3,7 +3,47 @@ import Foundation
 import UIKit
 import WebKit
 
+// FitAddon requests whole rows and columns. Stretch just the remaining fraction
+// of a cell over the grid; UIKit maps touches through the same transform.
+private final class TerminalViewport: UIView {
+  let web: WKWebView
+  private var measuredArea = CGSize.zero
+  private var grid = CGSize.zero
+
+  init(web: WKWebView) {
+    self.web = web
+    super.init(frame: .zero)
+    clipsToBounds = true
+    web.layer.anchorPoint = .zero
+    addSubview(web)
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  func setMeasurement(area: CGSize, grid: CGSize) {
+    guard measuredArea != area || self.grid != grid else { return }
+    measuredArea = area
+    self.grid = grid
+    setNeedsLayout()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    // The CSS viewport must keep its unscaled size when the keyboard or device rotates.
+    web.bounds = CGRect(origin: .zero, size: bounds.size)
+    web.layer.position = bounds.origin
+    guard grid.width > 0, grid.height > 0,
+      abs(measuredArea.width - bounds.width) < 1, abs(measuredArea.height - bounds.height) < 1
+    else {
+      web.transform = .identity
+      return
+    }
+    web.transform = CGAffineTransform(scaleX: bounds.width / grid.width, y: bounds.height / grid.height)
+  }
+}
+
 final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
+  static let surface = UIColor(red: 10 / 255, green: 20 / 255, blue: 26 / 255, alpha: 1)
   let client: ClientProfile
   let target: Int64
   private let heading: String
@@ -25,6 +65,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var pendingBytes = 0
   private var ready = false
   private var web: WKWebView!
+  private var viewport: TerminalViewport!
   private var fd: Int32 = -1
   private var started = false
   private var active = true
@@ -49,8 +90,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     web = WKWebView(frame: .zero, configuration: config)
     web.navigationDelegate = self
     web.isOpaque = false
+    web.underPageBackgroundColor = Self.surface
+    web.scrollView.contentInsetAdjustmentBehavior = .never
     web.scrollView.isScrollEnabled = false
-    view.backgroundColor = UIColor(red: 0.04, green: 0.08, blue: 0.10, alpha: 1)
+    viewport = TerminalViewport(web: web)
+    viewport.accessibilityIdentifier = "terminal.viewport"
+    view.backgroundColor = Self.surface
     let accent = UIColor(red: 0.47, green: 0.91, blue: 0.79, alpha: 1)
     let pan = UIPanGestureRecognizer(target: self, action: #selector(scrollTerminal(_:)))
     pan.maximumNumberOfTouches = 1
@@ -99,19 +144,18 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     scroll.addSubview(keys)
     keys.translatesAutoresizingMaskIntoConstraints = false
-    let stack = UIStackView(arrangedSubviews: [bar, web!, scroll])
+    let stack = UIStackView(arrangedSubviews: [bar, viewport!, scroll])
     stack.axis = .vertical
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
       stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-      stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 2),
-      stack.trailingAnchor.constraint(
-        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -2),
+      stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
       scroll.heightAnchor.constraint(equalToConstant: 44),
-      keys.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 4),
-      keys.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -4),
+      keys.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+      keys.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
       keys.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
       keys.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
       keys.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
@@ -349,6 +393,11 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   ) {
     guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
       return
+    }
+    if let metrics = obj["layout"] as? [String: Double],
+      let w = metrics["width"], let h = metrics["height"],
+      let gw = metrics["gridWidth"], let gh = metrics["gridHeight"] {
+      viewport.setMeasurement(area: CGSize(width: w, height: h), grid: CGSize(width: gw, height: gh))
     }
     let bytes = (obj["data"] as? String).map { Data($0.utf8) }
       ?? (obj["binary"] as? String).flatMap { Data(base64Encoded: $0) }

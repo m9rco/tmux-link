@@ -489,6 +489,9 @@ struct TerminalView: View {
 
   var body: some View {
     TerminalController(client: client, session: session, status: status)
+      .background(Color(uiColor: Screen.surface).ignoresSafeArea())
+      .toolbarBackground(Color(uiColor: Screen.surface), for: .navigationBar)
+      .toolbarBackground(.visible, for: .navigationBar)
       .navigationTitle(session?.name ?? client.name)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {

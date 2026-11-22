@@ -50,9 +50,18 @@ function scrollRemote(x, y, fingerSteps, first) {
 const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
   .catch(() => [])
   .then(() => {
-    term.open(document.querySelector('#term'));
+    const area = document.querySelector('#term');
+    term.open(area);
+    const grid = area.querySelector('.xterm-screen');
     fit.fit();
-    new ResizeObserver(() => fit.fit()).observe(document.body);
+    const layout = new ResizeObserver(() => {
+      fit.fit();
+      const {width, height} = area.getBoundingClientRect();
+      const cells = grid.getBoundingClientRect();
+      bridge.postMessage({layout: {width, height, gridWidth: cells.width, gridHeight: cells.height}});
+    });
+    layout.observe(area);
+    layout.observe(grid);
   });
 
 // Transport frames may split a UTF-8 scalar. Only give xterm complete scalars
