@@ -496,6 +496,35 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
+  func testKeyboardRowAndCursorModes() async throws {
+    let (web, controller) = try await loadBundledTerminal()
+    defer { controller.dismiss(animated: false) }
+    let bar = TerminalKeyboardBar()
+    let buttons = descendants(bar).compactMap { $0 as? UIButton }
+    let shortcuts = buttons.filter { $0.accessibilityIdentifier != "terminal.keyboard.hide" }
+    XCTAssertEqual(shortcuts.compactMap { $0.title(for: .normal) }, ["Esc", "Tab", "⌃C", "⌃B", "←", "→"])
+    XCTAssertTrue(shortcuts.allSatisfy { !$0.isEnabled })
+    bar.setReady(true)
+    var keys: [String] = []
+    bar.press = { keys.append($0) }
+    for button in shortcuts { button.sendActions(for: .touchUpInside) }
+    XCTAssertEqual(keys, ["\u{1b}", "\t", "\u{03}", "\u{02}", "\u{1b}[D", "\u{1b}[C"])
+    let script = #"""
+      await ready;
+      const output = [];
+      const watch = term.onData(s => output.push(s));
+      pressTerminalKey(left);
+      await new Promise(done => term.write('\x1b[?1h', done));
+      pressTerminalKey(left);
+      watch.dispose();
+      return output;
+      """#
+    let output = try await web.callAsyncJavaScript(script, arguments: ["left": TerminalKey.left.rawValue],
+                                                   in: nil, contentWorld: .page) as? [String]
+    XCTAssertEqual(output, ["\u{1b}[D", "\u{1b}OD"])
+  }
+
+  @MainActor
   func testShortcutDrawerInShortViewport() throws {
     let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 640, height: 180))
     var sent: [String] = []
@@ -539,6 +568,7 @@ final class RemoteSessionTests: XCTestCase {
       """)
     // Exercise the real keyboard guide and animation in the isolated fullscreen tmux fixture.
     let responder = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+    responder.inputAccessoryView = web.inputAccessoryView
     web.superview?.addSubview(responder)
     defer {
       responder.removeFromSuperview()
@@ -554,6 +584,8 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertLessThan(try XCTUnwrap(compact.last), try XCTUnwrap(full.last))
     XCTAssertEqual(opening, [compact])
     XCTAssertEqual(web.bounds.size, canvas)
+    let bar = try XCTUnwrap(responder.inputAccessoryView as? TerminalKeyboardBar)
+    XCTAssertNotNil(bar.window)
     XCTAssertTrue(responder.resignFirstResponder())
     try await Task.sleep(nanoseconds: 950_000_000)
     let closing = try await web.evaluateJavaScript("keyboardSizes") as? [[Int]]
@@ -810,6 +842,22 @@ final class RemoteSessionTests: XCTestCase {
         try await toggle(reveal)
         escape.sendActions(for: .touchUpInside)
         try await waitFor("__BYTE_27__")
+        try await toggle(dismiss)
+        let bar = try XCTUnwrap(web.inputAccessoryView as? TerminalKeyboardBar)
+        try await type(
+          "saved=$(stty -g); stty raw -echo; printf '__BAR_%s__\\r\\n' READY; "
+            + "b=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
+            + "stty \"$saved\"; printf '__BAR_%s__\\n' \"$b\""
+        )
+        try await waitFor("__BAR_READY__")
+        for label in ["Esc", "Tab", "⌃C"] {
+          let button = try XCTUnwrap(descendants(bar).first {
+            $0.accessibilityIdentifier == "terminal.keyboard." + label
+          } as? UIButton)
+          XCTAssertTrue(button.isEnabled)
+          button.sendActions(for: .touchUpInside)
+        }
+        try await waitFor("__BAR_1b0903__")
       }
     }
   }

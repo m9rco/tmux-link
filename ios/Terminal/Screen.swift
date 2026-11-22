@@ -144,7 +144,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
   private var pendingBytes = 0
   private var ready = false
-  private var web: WKWebView!
+  private var web: TerminalWebView!
   private var viewport: TerminalViewport!
   private var fd: Int32 = -1
   private var started = false
@@ -168,7 +168,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
     config.userContentController.add(self, name: "terminal")
-    web = WKWebView(frame: .zero, configuration: config)
+    web = TerminalWebView(frame: .zero, configuration: config)
+    web.shortcutBar.press = { [weak self] key in self?.press(key) }
+    web.shortcutBar.hideKeyboard = { [weak self] in self?.web.endEditing(true) }
     web.navigationDelegate = self
     web.isOpaque = false
     web.underPageBackgroundColor = Self.surface
@@ -517,6 +519,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       ready = true
       statusBar.isHidden = navigationStatus != nil
       shortcuts.setReady(true)
+      web.shortcutBar.setReady(true)
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
     refreshStatus()
@@ -615,6 +618,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func disconnect() {
     ready = false
     shortcuts?.setReady(false)
+    web?.shortcutBar.setReady(false)
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)
@@ -623,7 +627,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func press(_ key: String) {
     guard ready else { return }
-    web.callAsyncJavaScript("term.input(key, true)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
+    web.callAsyncJavaScript("pressTerminalKey(key)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
     UISelectionFeedbackGenerator().selectionChanged()
   }
   override func accessibilityPerformEscape() -> Bool {

@@ -140,7 +140,8 @@ function pasteTerminal(text) {
 function terminalData(data) {
   // Mouse/focus reports from the TUI do not move the shell's edit boundary.
   if (/^\x1b\[(?:<|M|[IO]$)/.test(data)) { bridge.postMessage({data}); return; }
-  const moving = ['\x1b[D', '\x1b[C', '\x01', '\x05'].includes(data);
+  const horizontalArrow = /^\x1b(?:\[|O)[CD]$/.test(data);
+  const moving = horizontalArrow || data === '\x01' || data === '\x05';
   if (moving && !inputSelection) {
     const span = inputSpan();
     if (span) confirmedRange = {type: span.type, cols: span.cols, from: span.from, to: span.to, hash: echoHash(span.text)};
@@ -173,7 +174,7 @@ function terminalData(data) {
   } else if ((text || paste) && !inputStart) {
     markInputStart();
   }
-  if (!paste && (/[\r\n]/.test(data) || (!text && !deletion && !['\x1b[D', '\x1b[C'].includes(data)))) inputStart = null;
+  if (!paste && (/[\r\n]/.test(data) || (!text && !deletion && !horizontalArrow))) inputStart = null;
   bridge.postMessage({data});
 }
 

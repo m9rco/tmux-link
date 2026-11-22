@@ -57,18 +57,15 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
       keys.addArrangedSubview(back)
       back.heightAnchor.constraint(equalToConstant: 44).isActive = true
     }
-    for (label, key) in [
-      ("Esc", "\u{1b}"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"),
-      ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
-      ("↑", "\u{1b}[A"), ("↓", "\u{1b}[B"), ("←", "\u{1b}[D"), ("→", "\u{1b}[C"), ("↵", "\r"),
-    ] {
+    for key in TerminalKey.allCases {
+      let label = key.title
       var style = UIButton.Configuration.tinted()
       style.title = label
       style.baseForegroundColor = label == "Esc" ? .systemOrange : accent
       style.contentInsets = .init(top: 3, leading: 8, bottom: 3, trailing: 8)
       let button = UIButton(configuration: style)
       button.accessibilityIdentifier = "terminal.key." + label
-      button.addAction(UIAction { _ in press(key) }, for: .touchUpInside)
+      button.addAction(UIAction { _ in press(key.rawValue) }, for: .touchUpInside)
       keys.addArrangedSubview(button)
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true
     }

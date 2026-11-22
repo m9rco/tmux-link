@@ -30,6 +30,12 @@ term.onResize(({cols, rows}) => {
   bridge.postMessage({cols, rows});
 });
 
+function pressTerminalKey(key) {
+  // Fullscreen applications can request SS3 cursor keys (DECCKM).
+  if (term.modes.applicationCursorKeysMode && /^\x1b\[[A-D]$/.test(key)) key = '\x1bO' + key[2];
+  term.input(key, true);
+}
+
 // Use the same wheel encoder as a desktop xterm so tmux and a full-screen
 // application receive the mouse protocol they actually negotiated.
 function scrollRemote(x, y, fingerSteps, first) {
