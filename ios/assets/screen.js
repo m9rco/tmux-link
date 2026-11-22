@@ -148,6 +148,10 @@ const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
   .then(() => {
     const area = document.querySelector('#term');
     term.open(area);
+    term.textarea.inputMode = 'none';
+    term.textarea.addEventListener('click', event => {
+      if (event.detail === 0) bridge.postMessage({showKeyboard: true});
+    });
     installSelectionTouches(area);
     // OSC 133 B marks the editable input after a shell prompt when forwarded by tmux.
     term.parser.registerOscHandler(133, value => {

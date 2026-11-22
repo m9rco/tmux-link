@@ -9,8 +9,6 @@ private final class TerminalViewport: UIView {
   let web: WKWebView
   private var measuredArea = CGSize.zero
   private var grid = CGSize.zero
-  private var keyboardTransition = false
-  private var pendingLayout: DispatchWorkItem?
   private var committedSize = CGSize.zero
   private var pageLoaded = false
 
@@ -37,60 +35,10 @@ private final class TerminalViewport: UIView {
     applyGridScale()
   }
 
-  func keyboardWillChange(_ notification: Notification) {
-    guard let window, web.bounds.height > 0 else { return }
-    keyboardTransition = true
-    // Request the taller PTY while the keyboard still covers the new rows,
-    // so the remote application can paint them during the dismissal animation.
-    if let end = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
-      let frame = convert(window.convert(end, from: window.screen.coordinateSpace), from: window)
-      let fullHeight = convert(window.safeAreaLayoutGuide.layoutFrame, from: window).maxY
-      if frame.minY >= fullHeight || (frame.minX <= 1 && frame.maxX >= bounds.width - 1
-          && frame.maxY >= fullHeight) {
-        let target = min(fullHeight, frame.minY)
-        if target > committedSize.height && committedSize.width == bounds.width {
-          commitLayout(height: target)
-        }
-      }
-    }
-    // Interactive or interrupted transitions can omit their matching did-change notification.
-    let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-    scheduleLayout(after: duration + 0.08)
-  }
-
-  func keyboardDidChange() {
-    guard keyboardTransition else { return }
-    // Let UIKeyboardLayoutGuide finish its layout pass before fitting the grid.
-    scheduleLayout(after: 0)
-  }
-
-  private func scheduleLayout(after delay: TimeInterval) {
-    pendingLayout?.cancel()
-    let work = DispatchWorkItem { [weak self] in
-      guard let self else { return }
-      keyboardTransition = false
-      pendingLayout = nil
-      commitLayout()
-    }
-    pendingLayout = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-  }
-
   override func layoutSubviews() {
     super.layoutSubviews()
     guard bounds.width > 0, bounds.height > 0 else { return }
-    if committedSize.width == bounds.width && committedSize.height != bounds.height {
-      // UIKit can lay out an intermediate height *before* posting willChangeFrame.
-      // Give the notification a display turn to take ownership of the pending resize.
-      if !keyboardTransition { scheduleLayout(after: 0.025) }
-      return
-    }
-    commitLayout()
-  }
-
-  private func commitLayout(height: CGFloat? = nil) {
-    guard bounds.width > 0, bounds.height > 0 else { return }
-    let size = CGSize(width: bounds.width, height: height ?? bounds.height)
+    let size = bounds.size
     // WebKit tries to preserve the focused element's screen position when its scroll
     // view grows. Keep that canvas full-height and resize only the clipped terminal grid.
     let fullHeight = window.map { convert($0.safeAreaLayoutGuide.layoutFrame, from: $0).maxY } ?? bounds.height
@@ -172,7 +120,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     web.typingKeyboard.isUserInteractionEnabled = false
     web.typingKeyboard.onText = { [weak self] text in self?.sendTerminalKey(text) }
     web.shortcutBar.press = { [weak self] key in self?.press(key) }
-    web.shortcutBar.hideKeyboard = { [weak self] in self?.web.endEditing(true) }
+    web.shortcutBar.hideKeyboard = { [weak self] in self?.setKeyboardVisible(false) }
     web.navigationDelegate = self
     web.isOpaque = false
     web.underPageBackgroundColor = Self.surface
@@ -213,13 +161,15 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     transportBadge.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentCompressionResistancePriority(.required, for: .horizontal)
-    let stack = UIStackView(arrangedSubviews: [bar, viewport!])
+    web.shortcutBar.isHidden = true
+    web.typingKeyboard.isHidden = true
+    let stack = UIStackView(arrangedSubviews: [bar, viewport!, web.shortcutBar, web.typingKeyboard])
     stack.axis = .vertical
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+      stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
       stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
     ])
@@ -238,10 +188,6 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
-    NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)),
-      name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
-    NotificationCenter.default.addObserver(self, selector: #selector(keyboardDidChange(_:)),
-      name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
     NotificationCenter.default.addObserver(
       self, selector: #selector(pauseStatus),
       name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -249,14 +195,17 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       self, selector: #selector(resumeStatus),
       name: UIApplication.didBecomeActiveNotification, object: nil)
   }
-  @objc private func keyboardWillChange(_ note: Notification) {
-    if let screen = note.object as? UIScreen, screen !== view.window?.screen { return }
-    viewport.keyboardWillChange(note)
-  }
-
-  @objc private func keyboardDidChange(_ note: Notification) {
-    if let screen = note.object as? UIScreen, screen !== view.window?.screen { return }
-    viewport.keyboardDidChange()
+  private func setKeyboardVisible(_ visible: Bool) {
+    guard web.typingKeyboard.isHidden == visible else { return }
+    UIView.performWithoutAnimation {
+      web.shortcutBar.isHidden = !visible
+      web.typingKeyboard.isHidden = !visible
+      view.layoutIfNeeded()
+    }
+    if !visible {
+      web.typingKeyboard.clearComposition()
+      web.evaluateJavaScript("term.blur()", completionHandler: nil)
+    }
   }
 
   func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
@@ -542,6 +491,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
       return
     }
+    if obj["showKeyboard"] as? Bool == true, ready { setKeyboardVisible(true) }
     if let metrics = obj["layout"] as? [String: Double],
       let w = metrics["width"], let h = metrics["height"],
       let gw = metrics["gridWidth"], let gh = metrics["gridHeight"] {
@@ -623,7 +573,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     shortcuts?.setReady(false)
     web?.shortcutBar.setReady(false)
     web?.typingKeyboard.isUserInteractionEnabled = false
-    web?.typingKeyboard.clearComposition()
+    if web != nil { setKeyboardVisible(false) }
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)
@@ -632,7 +582,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func press(_ key: String) {
     guard ready else { return }
-    if web.typingKeyboard.window != nil { web.typingKeyboard.handleShortcut(key) }
+    if !web.typingKeyboard.isHidden { web.typingKeyboard.handleShortcut(key) }
     else { sendTerminalKey(key) }
     UISelectionFeedbackGenerator().selectionChanged()
   }

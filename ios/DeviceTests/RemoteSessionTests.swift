@@ -601,17 +601,9 @@ final class RemoteSessionTests: XCTestCase {
       window.watchGrid = term.onResize(({cols, rows}) => keyboardSizes.push([cols, rows]));
       true
       """)
-    // Exercise the real keyboard guide and animation in the isolated fullscreen tmux fixture.
-    let responder = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
-    responder.inputView = web.inputView
-    responder.inputAccessoryView = web.inputAccessoryView
-    web.superview?.addSubview(responder)
-    defer {
-      responder.removeFromSuperview()
-      web.evaluateJavaScript("watchGrid.dispose(); delete window.watchGrid; delete window.keyboardSizes",
-                             completionHandler: nil)
-    }
-    XCTAssertTrue(responder.becomeFirstResponder())
+    let terminal = try XCTUnwrap(web as? TerminalWebView)
+    defer { web.evaluateJavaScript("watchGrid.dispose()", completionHandler: nil) }
+    _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
     try await Task.sleep(nanoseconds: 950_000_000)
     let opening = try await web.evaluateJavaScript("keyboardSizes.splice(0)") as? [[Int]]
     let focused = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
@@ -620,9 +612,10 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertLessThan(try XCTUnwrap(compact.last), try XCTUnwrap(full.last))
     XCTAssertEqual(opening, [compact])
     XCTAssertEqual(web.bounds.size, canvas)
-    let bar = try XCTUnwrap(responder.inputAccessoryView as? TerminalKeyboardBar)
-    XCTAssertNotNil(bar.window)
-    XCTAssertTrue(responder.resignFirstResponder())
+    XCTAssertFalse(terminal.typingKeyboard.isHidden)
+    XCTAssertFalse(terminal.shortcutBar.isHidden)
+    XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
+    terminal.shortcutBar.hideKeyboard?()
     try await Task.sleep(nanoseconds: 950_000_000)
     let closing = try await web.evaluateJavaScript("keyboardSizes") as? [[Int]]
     let restored = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
@@ -879,7 +872,7 @@ final class RemoteSessionTests: XCTestCase {
         escape.sendActions(for: .touchUpInside)
         try await waitFor("__BYTE_27__")
         try await toggle(dismiss)
-        let bar = try XCTUnwrap(web.inputAccessoryView as? TerminalKeyboardBar)
+        let bar = try XCTUnwrap((web as? TerminalWebView)?.shortcutBar)
         try await type(
           "saved=$(stty -g); stty raw -echo; printf '__BAR_%s__\\r\\n' READY; "
             + "b=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
@@ -900,7 +893,7 @@ final class RemoteSessionTests: XCTestCase {
             + "stty \"$saved\"; printf '__IME_%s__\\n' \"$b\""
         )
         try await waitFor("__IME_READY__")
-        let board = try XCTUnwrap(web.inputView as? TerminalTypingKeyboard)
+        let board = try XCTUnwrap((web as? TerminalWebView)?.typingKeyboard)
         _ = try await board.surface.evaluateJavaScript("""
           (() => {
             const previous = language;

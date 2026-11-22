@@ -23,12 +23,12 @@ enum TerminalKey: String, CaseIterable {
   }
 }
 
-// WebKit forwards its focused text control's input views to the host web view.
+// Draw both keyboard surfaces in the session window. Remote keyboard windows
+// cannot reliably composite a child WKWebView.
 final class TerminalWebView: WKWebView {
   let shortcutBar = TerminalKeyboardBar()
   let typingKeyboard = TerminalTypingKeyboard()
-  override var inputView: UIView? { typingKeyboard }
-  override var inputAccessoryView: UIView? { shortcutBar }
+  override var inputAccessoryView: UIView? { nil }
 }
 
 private final class KeyboardSurface: WKWebView {
@@ -50,9 +50,10 @@ private final class TypingBridge: NSObject, WKScriptMessageHandler {
   }
 }
 
-final class TerminalTypingKeyboard: UIInputView {
+final class TerminalTypingKeyboard: UIView {
   private let bridge = TypingBridge()
   let surface: WKWebView
+  private var panelHeight: NSLayoutConstraint!
   var onText: ((String) -> Void)? {
     get { bridge.onText }
     set { bridge.onText = newValue }
@@ -67,8 +68,10 @@ final class TerminalTypingKeyboard: UIInputView {
       source: chinese ? "window.initialLanguage = 'zh'" : "window.initialLanguage = 'en'",
       injectionTime: .atDocumentStart, forMainFrameOnly: true))
     surface = KeyboardSurface(frame: .zero, configuration: config)
-    super.init(frame: CGRect(x: 0, y: 0, width: 375, height: 216), inputViewStyle: .keyboard)
-    allowsSelfSizing = true
+    super.init(frame: .zero)
+    panelHeight = heightAnchor.constraint(equalToConstant: preferredHeight)
+    panelHeight.priority = UILayoutPriority(999)
+    panelHeight.isActive = true
     backgroundColor = Screen.surface
     surface.isOpaque = false
     surface.backgroundColor = Screen.surface
@@ -92,13 +95,11 @@ final class TerminalTypingKeyboard: UIInputView {
 
   required init?(coder: NSCoder) { fatalError() }
 
-  override var intrinsicContentSize: CGSize {
-    CGSize(width: UIView.noIntrinsicMetric, height: traitCollection.verticalSizeClass == .compact ? 150 : 216)
-  }
+  private var preferredHeight: CGFloat { traitCollection.verticalSizeClass == .compact ? 150 : 216 }
 
   override func traitCollectionDidChange(_ previous: UITraitCollection?) {
     super.traitCollectionDidChange(previous)
-    if previous?.verticalSizeClass != traitCollection.verticalSizeClass { invalidateIntrinsicContentSize() }
+    if previous?.verticalSizeClass != traitCollection.verticalSizeClass { panelHeight?.constant = preferredHeight }
   }
 
   override func didMoveToWindow() {
@@ -119,13 +120,16 @@ final class TerminalTypingKeyboard: UIInputView {
   }
 }
 
-final class TerminalKeyboardBar: UIInputView {
+final class TerminalKeyboardBar: UIView {
   var press: ((String) -> Void)?
   var hideKeyboard: (() -> Void)?
   private var remoteButtons: [UIButton] = []
 
   init() {
-    super.init(frame: CGRect(x: 0, y: 0, width: 375, height: 44), inputViewStyle: .keyboard)
+    super.init(frame: .zero)
+    let height = heightAnchor.constraint(equalToConstant: 44)
+    height.priority = UILayoutPriority(999)
+    height.isActive = true
     overrideUserInterfaceStyle = .dark
     backgroundColor = Screen.surface
     autoresizingMask = .flexibleWidth
