@@ -18,6 +18,7 @@ STATE = BASE / "state.json"
 OS_ENV = dict(os.environ, DEVELOPER_DIR=os.environ.get("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer"))
 RUN = ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"]
 BUNDLE = "dev.tmuxlink.mobile"
+CHECK_INTERVAL = 300
 
 def run(*cmd, **kwargs):
     return subprocess.run(cmd, check=True, env=OS_ENV, **kwargs)
@@ -34,6 +35,15 @@ def refresh(device, source, force):
     if not force and previous and dt.datetime.fromisoformat(previous) > now + dt.timedelta(days=3):
         print("Installed profile valid until", previous)
         return
+    reachable = subprocess.run(
+        ["xcrun", "devicectl", "device", "info", "lockState", "--device", device, "--timeout", "10"],
+        env=OS_ENV, capture_output=True,
+    )
+    if reachable.returncode != 0:
+        if force:
+            raise RuntimeError("Cannot reach the paired iPhone via Wi-Fi or USB")
+        print("Paired iPhone unavailable; will retry at the next check")
+        return
     derived = BASE / "build"
     run("xcodebuild", "-project", source / "ios/TmuxLink.xcodeproj", "-scheme", "TmuxLink",
         "-configuration", "Release", "-destination", "generic/platform=iOS", "-derivedDataPath", derived,
@@ -44,8 +54,11 @@ def refresh(device, source, force):
     expires = profile["ExpirationDate"].replace(tzinfo=dt.timezone.utc)
     if device.lower() not in [d.lower() for d in profile.get("ProvisionedDevices", [])] or expires <= now:
         raise RuntimeError("Xcode profile is expired or does not cover this iPhone")
-    if not force and previous and expires <= dt.datetime.fromisoformat(previous):
-        raise RuntimeError("Xcode reused the current profile; retrying at the next scheduled check")
+    if previous:
+        current_expiration = dt.datetime.fromisoformat(previous)
+        if expires < current_expiration or (not force and expires == current_expiration):
+            print("Xcode did not extend the profile; will retry at the next check")
+            return
     run("xcrun", "devicectl", "device", "install", "app", "--device", device, "--timeout", "90", app)
     save_state({"device":device, "expires":expires.isoformat(), "last_install":now.isoformat()})
     print("Installed. Profile valid until", expires.isoformat())
@@ -64,8 +77,8 @@ def setup(device):
         shutil.copy2(__file__, helper)
         PLIST.parent.mkdir(parents=True, exist_ok=True)
         config = {"Label": LABEL, "ProgramArguments": ["/usr/bin/python3", str(helper), "check", device],
-                  "RunAtLoad": True, "StartInterval": 21600, "ProcessType":"Background",
-                  "EnvironmentVariables":{"DEVELOPER_DIR": OS_ENV["DEVELOPER_DIR"]},
+                  "RunAtLoad": True, "StartInterval": CHECK_INTERVAL, "ProcessType":"Background",
+                  "EnvironmentVariables":{"DEVELOPER_DIR": OS_ENV["DEVELOPER_DIR"], "PYTHONUNBUFFERED": "1"},
                   "StandardOutPath": str(BASE / "refresh.log"), "StandardErrorPath": str(BASE / "refresh.log")}
         stage = PLIST.with_suffix(".new")
         stage.write_bytes(plistlib.dumps(config))
