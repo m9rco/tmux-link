@@ -34,12 +34,25 @@ private final class TerminalViewport: UIView {
     guard measuredArea != area || self.grid != grid else { return }
     measuredArea = area
     self.grid = grid
-    setNeedsLayout()
+    applyGridScale()
   }
 
   func keyboardWillChange(_ notification: Notification) {
-    guard window != nil, web.bounds.height > 0 else { return }
+    guard let window, web.bounds.height > 0 else { return }
     keyboardTransition = true
+    // Request the taller PTY while the keyboard still covers the new rows,
+    // so the remote application can paint them during the dismissal animation.
+    if let end = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+      let frame = convert(window.convert(end, from: window.screen.coordinateSpace), from: window)
+      let fullHeight = convert(window.safeAreaLayoutGuide.layoutFrame, from: window).maxY
+      if frame.minY >= fullHeight || (frame.minX <= 1 && frame.maxX >= bounds.width - 1
+          && frame.maxY >= fullHeight) {
+        let target = min(fullHeight, frame.minY)
+        if target > committedSize.height && committedSize.width == bounds.width {
+          commitLayout(height: target)
+        }
+      }
+    }
     // Interactive or interrupted transitions can omit their matching did-change notification.
     let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
     scheduleLayout(after: duration + 0.08)
@@ -75,8 +88,9 @@ private final class TerminalViewport: UIView {
     commitLayout()
   }
 
-  private func commitLayout() {
+  private func commitLayout(height: CGFloat? = nil) {
     guard bounds.width > 0, bounds.height > 0 else { return }
+    let size = CGSize(width: bounds.width, height: height ?? bounds.height)
     // WebKit tries to preserve the focused element's screen position when its scroll
     // view grows. Keep that canvas full-height and resize only the clipped terminal grid.
     let fullHeight = window.map { convert($0.safeAreaLayoutGuide.layoutFrame, from: $0).maxY } ?? bounds.height
@@ -84,16 +98,21 @@ private final class TerminalViewport: UIView {
     UIView.performWithoutAnimation {
       if web.bounds.size != canvas { web.bounds = CGRect(origin: .zero, size: canvas) }
       web.layer.position = bounds.origin
-      if pageLoaded && committedSize != bounds.size {
-        web.callAsyncJavaScript("setTerminalHeight(height)", arguments: ["height": bounds.height],
+      if pageLoaded && committedSize != size {
+        web.callAsyncJavaScript("setTerminalHeight(height)", arguments: ["height": size.height],
                                 in: nil, in: .page, completionHandler: nil)
       }
-      committedSize = bounds.size
-      guard grid.width > 0, grid.height > 0,
-        abs(measuredArea.width - bounds.width) < 1, abs(measuredArea.height - bounds.height) < 1
-      else { return }
-      // Keep the previous sub-cell scale until WebKit measures the new grid.
-      web.transform = CGAffineTransform(scaleX: bounds.width / grid.width, y: bounds.height / grid.height)
+      committedSize = size
+      applyGridScale()
+    }
+  }
+
+  private func applyGridScale() {
+    guard grid.width > 0, grid.height > 0,
+      abs(measuredArea.width - committedSize.width) < 1, abs(measuredArea.height - committedSize.height) < 1
+    else { return }
+    UIView.performWithoutAnimation {
+      web.transform = CGAffineTransform(scaleX: committedSize.width / grid.width, y: committedSize.height / grid.height)
     }
   }
 }

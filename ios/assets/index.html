@@ -12,6 +12,16 @@
       unicode-range: U+E000-F8FF;
     }
     #term { touch-action: manipulation; }
+    .terminal-redraw {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 2;
+      max-height: 100%;
+      overflow: hidden;
+      pointer-events: none;
+      background: #0a141a;
+    }
     html, body, #term {
       margin: 0;
       height: 100%;

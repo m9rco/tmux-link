@@ -91,6 +91,51 @@ function setTerminalHeight(height) {
   document.getElementById('term').style.height = height + 'px';
 }
 
+// tmux can erase a pane with SU (scroll up the entire scrolling region),
+// then send its replacement in a later SSH packet. Keep the painted rows
+// visible across that gap. xterm still processes input and output normally.
+function guardPaneRedraw(screen) {
+  const rows = screen.querySelector('.xterm-rows');
+  let top = 0, bottom = term.rows;
+  let cover, timer, heldTop, heldBottom, minimumRows;
+  const populated = () => Array.from(rows.children).slice(heldTop, heldBottom)
+    .reduce((count, row) => count + (row.textContent.trim() ? 1 : 0), 0);
+  function uncover() {
+    cover?.remove();
+    cover = null;
+    clearTimeout(timer);
+  }
+  function resetMargins() { top = 0; bottom = term.rows; }
+  term.onResize(resetMargins);
+  term.parser.registerEscHandler({final: 'c'}, () => { resetMargins(); return false; });
+  term.parser.registerCsiHandler({final: 'r'}, ([first, last]) => {
+    const start = first || 1, end = Math.min(last || term.rows, term.rows);
+    if (start < end) { top = start - 1; bottom = end; }
+    return false;
+  });
+  term.parser.registerCsiHandler({final: 'S'}, ([amount]) => {
+    const height = bottom - top;
+    if (cover || height < 4 || amount < height - 1) return false;
+    heldTop = top;
+    heldBottom = bottom;
+    const prior = populated();
+    if (prior < 3) return false;
+    minimumRows = Math.ceil(prior / 2);
+    cover = rows.cloneNode(true);
+    cover.classList.add('terminal-redraw');
+    cover.inert = true;
+    screen.appendChild(cover);
+    // A pane that genuinely becomes empty or sparse must still be shown.
+    timer = setTimeout(uncover, 200);
+    return false;
+  });
+  term.onRender(() => {
+    if (cover && populated() >= minimumRows) uncover();
+  });
+  document.addEventListener('visibilitychange', uncover);
+  window.addEventListener('pagehide', uncover);
+}
+
 // Load the local symbol face before xterm caches its first glyph measurements.
 const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
   .catch(() => [])
@@ -105,9 +150,17 @@ const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
       return false;
     });
     const grid = area.querySelector('.xterm-screen');
-    fit.fit();
+    guardPaneRedraw(grid);
+    function fitGrid() {
+      // FitAddon's fit() explicitly clears every painted row before resize.
+      // The DOM renderer can reuse existing row elements when resized directly.
+      const size = fit.proposeDimensions();
+      if (size && Number.isFinite(size.cols) && Number.isFinite(size.rows)
+          && (term.cols !== size.cols || term.rows !== size.rows)) term.resize(size.cols, size.rows);
+    }
+    fitGrid();
     const layout = new ResizeObserver(() => {
-      fit.fit();
+      fitGrid();
       const {width, height} = area.getBoundingClientRect();
       const cells = grid.getBoundingClientRect();
       bridge.postMessage({layout: {width, height, gridWidth: cells.width, gridHeight: cells.height}});

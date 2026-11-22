@@ -322,7 +322,7 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
-  func testBundledTerminalUnicodeCellWidths() async throws {
+  private func loadBundledTerminal() async throws -> (WKWebView, UIViewController) {
     final class OfflineBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
       let loaded = XCTestExpectation(description: "Bundled terminal page loaded")
       func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded.fulfill() }
@@ -340,11 +340,61 @@ final class RemoteSessionTests: XCTestCase {
     controller.view = web
     controller.modalPresentationStyle = .fullScreen
     try XCTUnwrap(rootController).present(controller, animated: false)
-    defer { controller.dismiss(animated: false) }
     let index = try XCTUnwrap(
       Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets"))
     web.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
     await fulfillment(of: [bridge.loaded], timeout: 10)
+
+    return (web, controller)
+  }
+
+  @MainActor
+  func testSplitPaneRedrawKeepsPreviousTextVisible() async throws {
+    let (web, controller) = try await loadBundledTerminal()
+    defer { controller.dismiss(animated: false) }
+    let script = #"""
+      await ready;
+      const write = text => window.display(btoa(text));
+      const painted = () => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+      await painted();
+      const body = document.querySelector('.xterm-rows');
+      const visible = () => document.querySelector('.terminal-redraw') || body;
+      const region = Math.min(12, term.rows - 2);
+      function screenText(prefix) {
+        return Array.from({length: region}, (_, i) => '\x1b[' + (i + 1) + ';1H' + prefix + i).join('');
+      }
+      await write(screenText('OLD') + '\x1b[' + (region + 1) + ';1HSTATUS');
+      await painted();
+      // tmux scrolls the entire pane away but leaves its status line on screen.
+      // Feed the CSI itself in two packets and give WebKit time to paint the gap.
+      const erase = '\x1b[1;' + region + 'r\x1b[' + region + 'S\x1b[r';
+      await write(erase.slice(0, 2));
+      await write(erase.slice(2));
+      await painted();
+      const cleared = !body.textContent.includes('OLD') && body.textContent.includes('STATUS');
+      const retained = visible().textContent.includes('OLD0');
+      await write(screenText('NEW'));
+      await painted();
+      const replaced = visible() === body && body.textContent.includes('NEW0');
+      await write(erase);
+      await new Promise(done => setTimeout(done, 300));
+      const clearedForGood = visible() === body && !body.textContent.includes('NEW');
+      await write(screenText('NEXT'));
+      await painted();
+      await write('\x1b[1;' + region + 'r\x1b[S\x1b[r');
+      await painted();
+      const ordinaryScroll = visible() === body && !body.textContent.includes('NEXT0') && body.textContent.includes('NEXT1');
+      return [cleared, retained, replaced, clearedForGood, ordinaryScroll];
+      """#
+    let checks = try await web.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [Bool]
+    XCTAssertEqual(checks, [true, true, true, true, true],
+                   "Split repaint, eventual clear and single-line scrolling must stay distinct")
+  }
+
+  @MainActor
+  func testBundledTerminalUnicodeCellWidths() async throws {
+    let (web, controller) = try await loadBundledTerminal()
+    defer { controller.dismiss(animated: false) }
 
     // The one-cell ASCII control calibrates the rendered width on this device.
     // These widths, including the split ZWJ sequence, match cursor_x in tmux 3.4.
