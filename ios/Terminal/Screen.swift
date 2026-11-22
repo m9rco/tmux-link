@@ -3,7 +3,7 @@ import Foundation
 import UIKit
 import WebKit
 
-final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate {
+final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
   let client: ClientProfile
   let target: Int64
   private let heading: String
@@ -21,6 +21,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let history = UITextView()
   private let historyButton = UIButton(type: .system)
   private var historyRequest: UUID?
+  private var scrollOrigin = CGPoint.zero
+  private var lastScrollDistance: CGFloat = 0
+  private var firstScrollStep = true
   private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
   private var pendingBytes = 0
   private var ready = false
@@ -70,11 +73,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     history.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
     history.accessibilityIdentifier = "terminal.history.text"
     history.accessibilityLabel = "终端历史"
-    for direction: UISwipeGestureRecognizer.Direction in [.up, .down] {
-      let swipe = UISwipeGestureRecognizer(target: self, action: #selector(showHistory))
-      swipe.direction = direction
-      web.addGestureRecognizer(swipe)
-    }
+    let pan = UIPanGestureRecognizer(target: self, action: #selector(scrollTerminal(_:)))
+    pan.maximumNumberOfTouches = 1
+    pan.delegate = self
+    web.addGestureRecognizer(pan)
     historyButton.setTitle("历史", for: .normal)
     historyButton.tintColor = accent
     historyButton.accessibilityIdentifier = "terminal.history.toggle"
@@ -113,7 +115,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     keys.isUserInteractionEnabled = false
     keys.alpha = 0.45
     for (label, key) in [
-      ("Esc", "\u{1b}"), ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
+      ("Esc", "\u{1b}"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"),
+      ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
       ("↑", "\u{1b}[A"), ("↓", "\u{1b}[B"), ("←", "\u{1b}[D"), ("→", "\u{1b}[C"), ("↵", "\r"),
     ] {
       var style = UIButton.Configuration.tinted()
@@ -158,6 +161,48 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       self, selector: #selector(resumeStatus),
       name: UIApplication.didBecomeActiveNotification, object: nil)
   }
+  func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+    guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
+    let velocity = pan.velocity(in: web)
+    return abs(velocity.y) > abs(velocity.x) && history.isHidden
+  }
+
+  @objc private func scrollTerminal(_ pan: UIPanGestureRecognizer) {
+    let dy = pan.translation(in: web).y
+    switch pan.state {
+    case .began:
+      let point = pan.location(in: web)
+      scrollOrigin = CGPoint(x: point.x / max(1, web.bounds.width),
+                             y: (point.y - dy) / max(1, web.bounds.height))
+      lastScrollDistance = 0
+      firstScrollStep = true
+    case .changed, .ended: break
+    default: return
+    }
+    let steps = Int((dy - lastScrollDistance) / 20)
+    guard steps != 0 else { return }
+    lastScrollDistance += CGFloat(steps) * 20
+    guard ready else { showHistory(); return }
+    web.callAsyncJavaScript("scrollRemote(x, y, steps, first)", arguments: [
+      "x": scrollOrigin.x, "y": scrollOrigin.y, "steps": steps, "first": firstScrollStep
+    ], in: nil, in: .page, completionHandler: nil)
+    firstScrollStep = false
+  }
+
+  private func updateHistoryMenu() {
+    let live = ready && history.isHidden
+    historyButton.menu = live ? UIMenu(children: [
+      UIAction(title: "tmux 窗格历史", subtitle: "Ctrl-B，然后 Page Up") { [weak self] _ in
+        self?.openTmuxHistory()
+      },
+      UIAction(title: "退出 tmux 回看", subtitle: "发送 q") { [weak self] _ in self?.press("q") },
+      UIAction(title: "本次手机缓冲") { [weak self] _ in self?.showHistory() },
+    ]) : nil
+    historyButton.showsMenuAsPrimaryAction = live
+  }
+
+  func openTmuxHistory() { press("\u{02}\u{1b}[5~") }
+
   @objc private func showHistory() {
     guard active, started, history.isHidden else { return }
     let request = UUID()
@@ -166,6 +211,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     web.isUserInteractionEnabled = false
     web.accessibilityElementsHidden = true
     history.isHidden = false
+    updateHistoryMenu()
     history.text = "正在读取历史…"
     keys.isUserInteractionEnabled = false
     keys.alpha = 0.45
@@ -193,6 +239,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func closeHistory() {
     historyRequest = nil
     history.isHidden = true
+    updateHistoryMenu()
     history.text = nil
     web.isUserInteractionEnabled = true
     web.accessibilityElementsHidden = false
@@ -379,6 +426,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
+      updateHistoryMenu()
       keys.isUserInteractionEnabled = history.isHidden
       keys.alpha = history.isHidden ? 1 : 0.45
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
@@ -400,8 +448,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
       return
     }
-    if ready, let str = obj["data"] as? String {
-      let bytes = Data(str.utf8)
+    let bytes = (obj["data"] as? String).map { Data($0.utf8) }
+      ?? (obj["binary"] as? String).flatMap { Data(base64Encoded: $0) }
+    if ready, let bytes {
       for offset in stride(from: 0, to: bytes.count, by: 16384) {
         send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
       }
@@ -471,6 +520,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func disconnect() {
     ready = false
+    updateHistoryMenu()
     keys.isUserInteractionEnabled = false
     keys.alpha = 0.45
     if fd >= 0 {

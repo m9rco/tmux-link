@@ -16,10 +16,12 @@ test -f ios/LocalSigning.xcconfig || { echo "Configure the local signing team fi
 temp=$(mktemp -d)
 session="tmux-link-device-e2e-$$"
 other=no
+messages=no
 created=no
 cleanup() {
     if [ "$created" = yes ]; then tmux kill-session -t "=$session" 2>/dev/null || true; fi
     if [ "$other" = yes ]; then tmux kill-session -t "=${session}-other" 2>/dev/null || true; fi
+    if [ "$messages" = yes ]; then tmux kill-session -t "=${session}-messages" 2>/dev/null || true; fi
     rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -49,6 +51,18 @@ tmux new-session -d -s "$session"
 created=yes
 tmux new-session -d -s "${session}-other"
 other=yes
+# Fill the pane before the iPhone attaches. These rows cannot be recovered
+# from a snapshot of frames delivered to the phone.
+tmux set-option -t "${session}-other" prefix C-b
+tmux set-option -t "${session}-other" mouse off
+# The loop runs inside the fixture pane.
+# shellcheck disable=SC2016
+tmux send-keys -t "${session}-other" 'for i in $(seq 1 100); do echo PAST-ROW-$i; done; for i in $(seq 1 45); do echo RECENT-ROW-$i; done' Enter
+awk 'BEGIN {for (i=1; i<=200; i++) printf "Message %03d\n", i}' > "$temp/messages.txt"
+tmux new-session -d -s "${session}-messages" /usr/bin/vim -Nu NONE -i NONE -n -R \
+    -c 'set mouse=a ttymouse=sgr nowrap scrolloff=0' -c 'normal! G' "$temp/messages.txt"
+messages=yes
+tmux set-option -t "${session}-messages" mouse on
 python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" <<'PY'
 import fcntl
 import json
@@ -86,7 +100,7 @@ if not link.startswith("tmuxlink://client?") or len(link.splitlines()) != 1:
     raise SystemExit("The agent did not produce a single client import link")
 Path(output).write_text(json.dumps({
     "host": center, "port": 443, "user": user,
-    "fingerprint": pin, "sessionName": session, "importLink": link,
+    "fingerprint": pin, "sessionName": session, "importLink": link, "hasHistoryFixture": True,
 }) + "\n")
 PY
 xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \

@@ -17,6 +17,7 @@ final class RemoteSessionTests: XCTestCase {
     let sessionName: String
     let importLink: String?
     let route: String?
+    let hasHistoryFixture: Bool?
   }
 
   func configuration() throws -> Connection {
@@ -474,7 +475,8 @@ final class RemoteSessionTests: XCTestCase {
     }
     let sessions = try await SessionDirectory.fetch(client)
     let root = try XCTUnwrap(rootController)
-    for suffix in ["-other", ""] {
+    let suffixes = config.hasHistoryFixture == true ? ["-messages", "-other", ""] : ["-other", ""]
+    for suffix in suffixes {
       let selected = try XCTUnwrap(sessions.first { $0.name == config.sessionName + suffix })
       let previousActivities = Set(Activity<TerminalActivity>.activities.map(\.id))
       let status = TerminalNavigationStatus()
@@ -515,6 +517,21 @@ final class RemoteSessionTests: XCTestCase {
         descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.connection" }
           as? UILabel)
       XCTAssertEqual(connection.text, "●  已连接")
+      if suffix == "-messages" {
+        // The real fullscreen viewer was already on its last page before attach.
+        try await waitFor("Message 200")
+        let tracking = try await web.evaluateJavaScript("term.modes.mouseTrackingMode")
+        XCTAssertNotEqual(tracking as? String, "none")
+        for _ in 0..<2 {
+          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -8, true)")
+        }
+        try await waitFor("Message 140")
+        for _ in 0..<2 {
+          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 8, true)")
+        }
+        try await waitFor("Message 200")
+        continue
+      }
       if suffix.isEmpty {
         let latency = try XCTUnwrap(
           descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.latency" }
@@ -586,6 +603,17 @@ final class RemoteSessionTests: XCTestCase {
           }
         }
         XCTAssertTrue(sent)
+      }
+      if suffix == "-other", config.hasHistoryFixture == true {
+        try await waitFor("RECENT-ROW-45")
+        let before = try await web.evaluateJavaScript("historySnapshot().includes('PAST-ROW-100')")
+        XCTAssertEqual(before as? Bool, false)
+        screen.openTmuxHistory()
+        try await waitFor("PAST-ROW-100")
+        // Mouse is off in this fixture: one downward gesture sends one Page Down.
+        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 4, true)")
+        try await waitFor("RECENT-ROW-45")
+        _ = try await web.evaluateJavaScript("term.input('q', true)")
       }
       try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")
       try await waitFor("__ID_$" + String(selected.id) + "__")

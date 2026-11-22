@@ -22,7 +22,28 @@ const historySnapshot = terminalHistory(term);
 
 const bridge = window.webkit.messageHandlers.terminal;
 term.onData(data => bridge.postMessage({data}));
+// Legacy mouse reports contain raw coordinate bytes, including values above 127.
+term.onBinary(bytes => bridge.postMessage({binary: btoa(bytes)}));
 term.onResize(({cols, rows}) => bridge.postMessage({cols, rows}));
+
+// Use the same wheel encoder as a desktop xterm so tmux and a full-screen
+// application receive the mouse protocol they actually negotiated.
+function scrollRemote(x, y, steps, first) {
+  if (!['vt200', 'drag', 'any'].includes(term.modes.mouseTrackingMode)) {
+    if (first) term.input(steps < 0 ? '\x1b[5~' : '\x1b[6~', true);
+    return;
+  }
+  const screen = term.element.querySelector('.xterm-screen');
+  const rect = screen.getBoundingClientRect();
+  const event = {
+    bubbles: true, cancelable: true, deltaMode: 1, deltaY: Math.sign(steps),
+    clientX: Math.max(rect.left, Math.min(rect.right - 1, x * innerWidth)),
+    clientY: Math.max(rect.top, Math.min(rect.bottom - 1, y * innerHeight))
+  };
+  for (let i = 0; i < Math.min(8, Math.abs(steps)); i++) {
+    screen.dispatchEvent(new WheelEvent('wheel', event));
+  }
+}
 
 // Load the local symbol face before xterm caches its first glyph measurements.
 const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
