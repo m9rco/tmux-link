@@ -2,7 +2,8 @@
 use russh::keys::load_secret_key;
 use std::{
     ffi::{CStr, CString},
-    io::{Read, Write},
+    io::{self, Read, Write},
+    net::Shutdown,
     os::{fd::IntoRawFd, unix::net::UnixStream},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -70,6 +71,13 @@ fn start_protocol(
     });
     (view, worker)
 }
+fn finish_session(mut view: UnixStream, worker: JoinHandle<Result<(), String>>) {
+    // Signal EOF to the uploader while allowing the last terminal frames to drain.
+    view.shutdown(Shutdown::Write).unwrap();
+    io::copy(&mut view, &mut io::sink()).unwrap();
+    worker.join().unwrap().unwrap();
+}
+
 fn send(socket: &mut UnixStream, kind: u8, bytes: &[u8]) {
     socket.write_all(&[kind]).unwrap();
     socket
@@ -136,16 +144,14 @@ fn pinned_mobile_session() {
         b"for i in $(seq 30); do stty size; sleep .05; done\r",
     );
     expect(&mut view, "28 88"); // one row used by the tmux status bar
-    drop(view);
-    worker.join().unwrap().unwrap();
+    finish_session(view, worker);
     let (mut view, worker) = start(&pin, "TL_TEST_KEY");
     expect(&mut view, "Session number:");
     send(&mut view, 0, b"1\r");
     expect(&mut view, "tl-live");
     send(&mut view, 0, b"printf 'session-%s\\n' \"$TL_RESUME\"\r");
     expect(&mut view, "session-retained");
-    drop(view);
-    worker.join().unwrap().unwrap();
+    finish_session(view, worker);
 }
 
 #[test]
@@ -207,8 +213,7 @@ fn framed_terminal_reports_remote_round_trip_and_keeps_output_separate() {
         }
     }
     assert_eq!(stages, ["connecting", "ssh", "auth", "attaching", "ready"]);
-    drop(view);
-    worker.join().unwrap().unwrap();
+    finish_session(view, worker);
 }
 
 #[test]
@@ -233,6 +238,5 @@ fn lists_and_attaches_unicode_session_in_c_locale() {
             terminal.extend(payload);
         }
     }
-    drop(view);
-    worker.join().unwrap().unwrap();
+    finish_session(view, worker);
 }
