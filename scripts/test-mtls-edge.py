@@ -144,13 +144,13 @@ http {{
         acl.write_text("")
         proc.send_signal(signal.SIGHUP)
         for _ in range(50):
-            if request("/tmux-link", "owner") == 403:
+            if all(request(path, "owner") == 403 for path in (
+                "/tmux-link", "/tmux-link/pair", "/tmux-link/session/" + "a" * 32,
+            )):
                 break
             time.sleep(0.05)
         else:
             raise AssertionError("revoked certificate kept its route access after reload")
-        assert request("/tmux-link/pair", "owner") == 403
-        assert request("/tmux-link/session/" + "a" * 32, "owner") == 403
     finally:
         proc.terminate()
         proc.wait(timeout=5)

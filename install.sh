@@ -125,6 +125,8 @@ echo "Deployment templates and setup guide: $prefix/share/tmux-link"
 if [ -n "$connect_center" ]; then
     "$prefix/bin/tmux-link-agent" pair --center "$connect_center"
 else
-    echo "Connect a new host: $prefix/bin/tmux-link-agent pair --center YOUR_CENTER_HOST"
+    if [ "$role" = agent ] || [ "$role" = both ]; then
+        echo "Connect a new host: $prefix/bin/tmux-link-agent pair --center YOUR_CENTER_HOST"
+    fi
     echo "Manual deployment guide: $prefix/share/tmux-link/README.md"
 fi

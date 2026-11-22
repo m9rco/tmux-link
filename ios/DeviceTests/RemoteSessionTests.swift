@@ -252,6 +252,29 @@ final class RemoteSessionTests: XCTestCase {
     }
   }
 
+  func testOutboundPairingLinkKeepsTheHostFingerprint() throws {
+    var url = URLComponents()
+    url.scheme = "tmuxlink"
+    url.host = "pair"
+    url.queryItems = [
+      URLQueryItem(name: "center", value: "center.example.com"),
+      URLQueryItem(name: "port", value: "443"),
+      URLQueryItem(name: "id", value: String(repeating: "a", count: 32)),
+      URLQueryItem(name: "code", value: String(repeating: "b", count: 64)),
+      URLQueryItem(name: "name", value: "内网机器"),
+      URLQueryItem(name: "user", value: "alice"),
+      URLQueryItem(name: "pin", value: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ]
+    let offer = try HostPairing.parse(try XCTUnwrap(url.string))
+    XCTAssertEqual(offer.client.name, "内网机器")
+    XCTAssertEqual(offer.client.user, "alice")
+    XCTAssertEqual(offer.client.requireMTLS, true)
+    XCTAssertEqual(offer.client.host, "wss://center.example.com:443/tmux-link/session/" + String(repeating: "a", count: 32))
+    XCTAssertEqual(offer.approvalURL, "wss://center.example.com:443/tmux-link/pair")
+    url.queryItems?.append(URLQueryItem(name: "code", value: "duplicate"))
+    XCTAssertThrowsError(try HostPairing.parse(try XCTUnwrap(url.string)))
+  }
+
   func testClientPasteRejectsCredentialFieldsAndUnsupportedAddresses() {
     let inputs = [
       "https://relay.example.com/", "ssh://user@relay.example.com/", "ws://relay.example.com/",
