@@ -59,6 +59,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let transportBadge = UILabel()
   private var shortcuts: ShortcutDrawer!
   private let leave: (() -> Void)?
+  private weak var edgeBackSwipe: UISwipeGestureRecognizer?
   private weak var contentBackSwipe: UISwipeGestureRecognizer?
   private lazy var editMenu = UIEditMenuInteraction(delegate: self)
   private var menuSnapshot: (text: String, offset: Int, selected: String)?
@@ -145,12 +146,11 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     ])
     shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave) { [weak self] key in self?.press(key) }
     if leave != nil {
-      let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backSwipe(_:)))
-      back.edges = .left
-      viewport.addGestureRecognizer(back)
-      if let systemBack = navigationController?.interactivePopGestureRecognizer {
-        back.require(toFail: systemBack)
-      }
+      let edge = UISwipeGestureRecognizer(target: self, action: #selector(leaveSession))
+      edge.direction = .right
+      edge.delegate = self
+      web.addGestureRecognizer(edge)
+      edgeBackSwipe = edge
       let left = UISwipeGestureRecognizer(target: self, action: #selector(leaveSession))
       left.direction = .left
       left.delegate = self
@@ -174,14 +174,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
 
   func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
     // A left swipe starting at the right edge belongs exclusively to the shortcut drawer.
-    recognizer !== contentBackSwipe || touch.location(in: viewport).x < viewport.bounds.maxX - 32
+    let x = touch.location(in: viewport).x
+    if recognizer === edgeBackSwipe { return x <= 28 }
+    return recognizer !== contentBackSwipe || x < viewport.bounds.maxX - 32
   }
 
   @objc private func leaveSession() { leave?() }
-
-  @objc private func backSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
-    if gesture.state == .ended && gesture.translation(in: view).x > 64 { leave?() }
-  }
 
   @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
     guard gesture.state == .began else { return }
