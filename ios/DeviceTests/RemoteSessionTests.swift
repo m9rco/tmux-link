@@ -322,46 +322,6 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
-  func testHistorySnapshotStaysStillWhileTerminalAdvances() async throws {
-    let client = ClientProfile(name: "Offline", host: "127.0.0.1", port: 1, requireMTLS: true)
-    let screen = Screen(client: client, session: nil)
-    try XCTUnwrap(rootController).present(screen, animated: false)
-    defer {
-      screen.stop()
-      screen.dismiss(animated: false)
-    }
-    let views = descendants(screen.view)
-    let web = try XCTUnwrap(views.compactMap { $0 as? WKWebView }.first)
-    let reader = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "terminal.history.text" } as? UITextView)
-    let toggle = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "terminal.history.toggle" } as? UIButton)
-    for _ in 0..<100 {
-      if (try? await web.evaluateJavaScript("typeof historySnapshot === 'function'")) as? Bool == true { break }
-      try await Task.sleep(nanoseconds: 100_000_000)
-    }
-    let write = #"await ready; await new Promise(done => term.write(data, done)); return true"#
-    let data = "\u{1b}[?1049h\u{1b}[1;5r" + (1...2100).map { "行\($0)🦊\r\n" }.joined()
-    _ = try await web.callAsyncJavaScript(write, arguments: ["data": data], in: nil, contentWorld: .page)
-    toggle.sendActions(for: .touchUpInside)
-    for _ in 0..<50 where !reader.text.contains("行2100🦊") {
-      try await Task.sleep(nanoseconds: 100_000_000)
-    }
-    let snapshot = try XCTUnwrap(reader.text)
-    XCTAssertTrue(snapshot.contains("行101🦊"), "tmux's alternate-screen scrolling region lost a row")
-    XCTAssertFalse(snapshot.contains("行1🦊"))
-    XCTAssertTrue(snapshot.contains("行2100🦊"))
-    reader.setContentOffset(CGPoint(x: 0, y: 30), animated: false)
-    let offset = reader.contentOffset
-    _ = try await web.callAsyncJavaScript(write, arguments: ["data": "新的输出\r\n"], in: nil, contentWorld: .page)
-    XCTAssertEqual(reader.text, snapshot)
-    XCTAssertEqual(reader.contentOffset, offset)
-    toggle.sendActions(for: .touchUpInside)
-    XCTAssertTrue(reader.isHidden)
-    XCTAssertTrue(web.isUserInteractionEnabled)
-    let live = try await web.evaluateJavaScript("term.buffer.active.getLine(3).translateToString(true)")
-    XCTAssertEqual(live as? String, "新的输出")
-  }
-
-  @MainActor
   func testBundledTerminalUnicodeCellWidths() async throws {
     final class OfflineBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
       let loaded = XCTestExpectation(description: "Bundled terminal page loaded")
@@ -523,11 +483,11 @@ final class RemoteSessionTests: XCTestCase {
         let tracking = try await web.evaluateJavaScript("term.modes.mouseTrackingMode")
         XCTAssertNotEqual(tracking as? String, "none")
         for _ in 0..<2 {
-          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -8, true)")
+          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 8, true)")
         }
         try await waitFor("Message 140")
         for _ in 0..<2 {
-          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 8, true)")
+          _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -8, true)")
         }
         try await waitFor("Message 200")
         continue
@@ -606,13 +566,18 @@ final class RemoteSessionTests: XCTestCase {
       }
       if suffix == "-other", config.hasHistoryFixture == true {
         try await waitFor("RECENT-ROW-45")
-        let before = try await web.evaluateJavaScript("historySnapshot().includes('PAST-ROW-100')")
-        XCTAssertEqual(before as? Bool, false)
-        screen.openTmuxHistory()
+        for key in ["⌃B", "PgUp"] {
+          let button = try XCTUnwrap(descendants(screen.view).first {
+            $0.accessibilityIdentifier == "terminal.key." + key
+          } as? UIButton)
+          button.sendActions(for: .touchUpInside)
+        }
         try await waitFor("PAST-ROW-100")
-        // Mouse is off in this fixture: one downward gesture sends one Page Down.
-        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 4, true)")
+        // Mouse tracking is off. Drag up toward the latest output, then down toward older rows.
+        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, -4, true)")
         try await waitFor("RECENT-ROW-45")
+        _ = try await web.evaluateJavaScript("scrollRemote(0.5, 0.4, 4, true)")
+        try await waitFor("PAST-ROW-100")
         _ = try await web.evaluateJavaScript("term.input('q', true)")
       }
       try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")

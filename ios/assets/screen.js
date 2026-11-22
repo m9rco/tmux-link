@@ -18,7 +18,6 @@ const term = new Terminal({
 const fit = new FitAddon.FitAddon();
 term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
 term.loadAddon(fit);
-const historySnapshot = terminalHistory(term);
 
 const bridge = window.webkit.messageHandlers.terminal;
 term.onData(data => bridge.postMessage({data}));
@@ -28,7 +27,9 @@ term.onResize(({cols, rows}) => bridge.postMessage({cols, rows}));
 
 // Use the same wheel encoder as a desktop xterm so tmux and a full-screen
 // application receive the mouse protocol they actually negotiated.
-function scrollRemote(x, y, steps, first) {
+function scrollRemote(x, y, fingerSteps, first) {
+  // Dragging content down reveals earlier rows (wheel up or Page Up).
+  const steps = -fingerSteps;
   if (!['vt200', 'drag', 'any'].includes(term.modes.mouseTrackingMode)) {
     if (first) term.input(steps < 0 ? '\x1b[5~' : '\x1b[6~', true);
     return;
