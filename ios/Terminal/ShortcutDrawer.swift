@@ -9,7 +9,7 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
   private var isOpen = false
   private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(drag(_:)))
 
-  init(in viewport: UIView, accent: UIColor, press: @escaping (String) -> Void) {
+  init(in viewport: UIView, accent: UIColor, leave: (() -> Void)? = nil, press: @escaping (String) -> Void) {
     super.init(frame: viewport.bounds)
     autoresizingMask = [.flexibleWidth, .flexibleHeight]
     viewport.addSubview(self)
@@ -47,7 +47,16 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
     addSubview(panel)
     keys.axis = .vertical
     keys.spacing = 2
-    setReady(false)
+    if let leave {
+      let back = UIButton(type: .system)
+      back.setImage(UIImage(systemName: "chevron.backward"), for: .normal)
+      back.tintColor = accent
+      back.accessibilityLabel = "返回会话列表"
+      back.accessibilityIdentifier = "terminal.leave"
+      back.addAction(UIAction { _ in leave() }, for: .touchUpInside)
+      keys.addArrangedSubview(back)
+      back.heightAnchor.constraint(equalToConstant: 44).isActive = true
+    }
     for (label, key) in [
       ("Esc", "\u{1b}"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"),
       ("Tab", "\t"), ("⌃C", "\u{03}"), ("⌃B", "\u{02}"),
@@ -63,6 +72,7 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
       keys.addArrangedSubview(button)
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true
     }
+    setReady(false)
     panel.addSubview(keys)
     [panel, keys, reveal].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
     let fitContent = panel.heightAnchor.constraint(equalTo: panel.contentLayoutGuide.heightAnchor)
@@ -93,8 +103,9 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
   }
 
   func setReady(_ ready: Bool) {
-    keys.isUserInteractionEnabled = ready
-    keys.alpha = ready ? 1 : 0.45
+    for case let button as UIButton in keys.arrangedSubviews where button.accessibilityIdentifier != "terminal.leave" {
+      button.isEnabled = ready
+    }
   }
 
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {

@@ -42,7 +42,7 @@ private final class TerminalViewport: UIView {
   }
 }
 
-final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
+final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
   static let surface = UIColor(red: 10 / 255, green: 20 / 255, blue: 26 / 255, alpha: 1)
   let client: ClientProfile
   let target: Int64
@@ -58,6 +58,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var completed = false
   private let transportBadge = UILabel()
   private var shortcuts: ShortcutDrawer!
+  private let leave: (() -> Void)?
+  private weak var contentBackSwipe: UISwipeGestureRecognizer?
+  private lazy var editMenu = UIEditMenuInteraction(delegate: self)
+  private var menuSnapshot: (text: String, offset: Int, selected: String)?
   private var scrollOrigin = CGPoint.zero
   private var lastScrollDistance: CGFloat = 0
   private var firstScrollStep = true
@@ -72,8 +76,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var dimensions = (UInt16(80), UInt16(24))
   init(
     client: ClientProfile, session: RemoteSession?,
-    navigationStatus: TerminalNavigationStatus? = nil
+    navigationStatus: TerminalNavigationStatus? = nil, leave: (() -> Void)? = nil
   ) {
+    self.leave = leave
     self.client = client
     self.navigationStatus = navigationStatus
     target = session?.id ?? -1
@@ -96,11 +101,17 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     viewport = TerminalViewport(web: web)
     viewport.accessibilityIdentifier = "terminal.viewport"
     view.backgroundColor = Self.surface
+    statusBar.isHidden = navigationStatus != nil
     let accent = UIColor(red: 0.47, green: 0.91, blue: 0.79, alpha: 1)
     let pan = UIPanGestureRecognizer(target: self, action: #selector(scrollTerminal(_:)))
     pan.maximumNumberOfTouches = 1
     pan.delegate = self
     web.addGestureRecognizer(pan)
+    let hold = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
+    hold.minimumPressDuration = 0.45
+    web.addGestureRecognizer(hold)
+    web.addInteraction(editMenu)
+    pan.require(toFail: hold)
     status.font = .preferredFont(forTextStyle: .caption1)
     status.adjustsFontForContentSizeCategory = true
     status.textColor = accent
@@ -132,7 +143,20 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
     ])
-    shortcuts = ShortcutDrawer(in: viewport, accent: accent) { [weak self] key in self?.press(key) }
+    shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave) { [weak self] key in self?.press(key) }
+    if leave != nil {
+      let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backSwipe(_:)))
+      back.edges = .left
+      viewport.addGestureRecognizer(back)
+      if let systemBack = navigationController?.interactivePopGestureRecognizer {
+        back.require(toFail: systemBack)
+      }
+      let left = UISwipeGestureRecognizer(target: self, action: #selector(leaveSession))
+      left.direction = .left
+      left.delegate = self
+      web.addGestureRecognizer(left)
+      contentBackSwipe = left
+    }
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
     NotificationCenter.default.addObserver(
@@ -146,6 +170,67 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
     let velocity = pan.velocity(in: web)
     return ready && abs(velocity.y) > abs(velocity.x)
+  }
+
+  func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    // A left swipe starting at the right edge belongs exclusively to the shortcut drawer.
+    recognizer !== contentBackSwipe || touch.location(in: viewport).x < viewport.bounds.maxX - 32
+  }
+
+  @objc private func leaveSession() { leave?() }
+
+  @objc private func backSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+    if gesture.state == .ended && gesture.translation(in: view).x > 64 { leave?() }
+  }
+
+  @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
+    guard gesture.state == .began else { return }
+    let point = gesture.location(in: web)
+    web.callAsyncJavaScript("return selectionSnapshot(x, y)", arguments: ["x": point.x, "y": point.y],
+                            in: nil, in: .page) { [weak self] result in
+      guard let self, active, view.window != nil, presentedViewController == nil,
+            case .success(let value) = result, let snapshot = value as? [String: Any],
+            let text = snapshot["text"] as? String, let offset = snapshot["offset"] as? Int
+      else { return }
+      if snapshot["atCursor"] as? Bool == true && ready {
+        menuSnapshot = (text, offset, snapshot["selected"] as? String ?? "")
+        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+      } else { showSelection(text, offset) }
+    }
+  }
+
+  private func showSelection(_ text: String, _ offset: Int) {
+    let sheet = UINavigationController(rootViewController: TerminalTextSelection(text: text, offset: offset))
+    sheet.overrideUserInterfaceStyle = .dark
+    sheet.sheetPresentationController?.prefersGrabberVisible = true
+    present(sheet, animated: true)
+  }
+
+  func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                           suggestedActions: [UIMenuElement]) -> UIMenu? {
+    guard let snapshot = menuSnapshot else { return nil }
+    var actions: [UIMenuElement] = []
+    if !snapshot.selected.isEmpty {
+      actions.append(UIAction(title: "复制", image: UIImage(systemName: "doc.on.doc")) { _ in
+        UIPasteboard.general.string = snapshot.selected
+      })
+    }
+    actions += [
+      UIAction(title: "粘贴", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
+        guard let self, ready, let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        web.callAsyncJavaScript("pasteTerminal(text)", arguments: ["text": text], in: nil, in: .page,
+                                completionHandler: nil)
+      },
+      UIAction(title: "选取并复制", image: UIImage(systemName: "text.cursor")) { [weak self] _ in
+        self?.showSelection(snapshot.text, snapshot.offset)
+      }
+    ]
+    return UIMenu(children: actions)
+  }
+
+  func editMenuInteraction(_ interaction: UIEditMenuInteraction, willDismissMenuFor configuration: UIEditMenuConfiguration,
+                           animator: UIEditMenuInteractionAnimating) {
+    menuSnapshot = nil
   }
 
   @objc private func scrollTerminal(_ pan: UIPanGestureRecognizer) {
@@ -178,11 +263,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func startIslandIfAvailable() {
     guard #available(iOS 16.1, *), island == nil, active, !completed, viewIfLoaded?.window != nil
     else { return }
-    island = TerminalIsland(activityState) { [weak self] shown in
-      guard let self else { return }
-      statusBar.isHidden = shown && navigationStatus != nil
-      renderStatus()
-    }
+    island = TerminalIsland(activityState) { [weak self] _ in self?.renderStatus() }
   }
 
   private func renderStatus() {
@@ -207,7 +288,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         }
       }
     }
-    navigationStatus?.update(statusBar.isHidden ? state : nil)
+    navigationStatus?.update(state)
   }
 
   private func refreshStatus(immediately: Bool = false) {
@@ -346,6 +427,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
+      statusBar.isHidden = navigationStatus != nil
       shortcuts.setReady(true)
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
@@ -430,6 +512,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func finish(_ message: String) {
     guard active, !completed else { return }
     completed = true
+    statusBar.isHidden = false
     navigationStatus?.update(nil)
     expiry?.invalidate()
     island?.end()
@@ -452,8 +535,13 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func press(_ key: String) {
     guard ready else { return }
-    send(0, Data(key.utf8))
+    web.callAsyncJavaScript("term.input(key, true)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
     UISelectionFeedbackGenerator().selectionChanged()
+  }
+  override func accessibilityPerformEscape() -> Bool {
+    guard let leave else { return super.accessibilityPerformEscape() }
+    leave()
+    return true
   }
   override var keyCommands: [UIKeyCommand]? {
     let escape = UIKeyCommand(

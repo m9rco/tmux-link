@@ -435,6 +435,8 @@ private struct Sessions: View {
             } icon: {
               Image(systemName: "rectangle.split.2x1").foregroundStyle(mint)
             }
+          }.contextMenu {
+            Button("复制会话名称") { UIPasteboard.general.string = session.name }
           }
         }
       } header: {
@@ -480,6 +482,7 @@ struct TerminalView: View {
   let session: RemoteSession?
   @StateObject private var status: TerminalNavigationStatus
   @State private var detail: String?
+  @Environment(\.dismiss) private var dismiss
 
   init(client: ClientProfile, session: RemoteSession?, status: TerminalNavigationStatus? = nil) {
     self.client = client
@@ -488,15 +491,18 @@ struct TerminalView: View {
   }
 
   var body: some View {
-    TerminalController(client: client, session: session, status: status)
-      .background(Color(uiColor: Screen.surface).ignoresSafeArea())
-      .toolbarBackground(Color(uiColor: Screen.surface), for: .navigationBar)
-      .toolbarBackground(.visible, for: .navigationBar)
-      .navigationTitle(session?.name ?? client.name)
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        if let reading = status.reading {
-          let item = ToolbarItem(placement: .navigationBarTrailing) {
+    GeometryReader { geometry in
+      let top = geometry.safeAreaInsets.top
+      let inCutout = UIDevice.current.userInterfaceIdiom == .phone && top >= 44
+      VStack(spacing: 0) {
+        ZStack(alignment: .trailing) {
+          Text(session?.name ?? client.name)
+            .font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+            .frame(maxWidth: inCutout ? geometry.size.width * 0.20 : max(0, geometry.size.width - 160),
+                   alignment: inCutout ? .leading : .center)
+            .padding(.horizontal, 12).frame(maxWidth: .infinity, alignment: inCutout ? .leading : .center)
+            .accessibilityAddTraits(.isHeader)
+          if let reading = status.reading {
             Button {
               var lines = [reading.phase.title]
               if reading.phase == .ready {
@@ -506,32 +512,22 @@ struct TerminalView: View {
               detail = lines.joined(separator: "\n")
             } label: {
               HStack(spacing: 4) {
-                Image(
-                  systemName: reading.timedOut
-                    ? "exclamationmark.circle.fill"
-                    : (reading.phase == .ready ? "circle.fill" : "circle")
-                )
-                .font(.system(size: 6))
-                .foregroundStyle(reading.phase == .ready && !reading.timedOut ? mint : .orange)
+                Circle().fill(reading.phase == .ready && !reading.timedOut ? mint : .orange)
+                  .frame(width: 6, height: 6)
                 Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
-                  .font(.caption).monospacedDigit().lineLimit(1)
-                  .foregroundStyle(.secondary)
-              }
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("连接详情")
-            .accessibilityValue(accessibilityValue(reading))
-            .accessibilityIdentifier("terminal.status.details")
+                  .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+              }.padding(.horizontal, 8).frame(minWidth: 44, maxHeight: .infinity)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("连接详情")
+              .accessibilityValue(accessibilityValue(reading)).accessibilityIdentifier("terminal.status.details")
           }
-          #if compiler(>=6.2)
-            if #available(iOS 26, *) { item.sharedBackgroundVisibility(.hidden) } else { item }
-          #else
-            item
-          #endif
-        }
-      }
+        }.frame(height: inCutout ? top : 28)
+        TerminalController(client: client, session: session, status: status, leave: { dismiss() })
+      }.padding(.top, inCutout ? -top : 0)
+    }
+      .background(Color(uiColor: Screen.surface).ignoresSafeArea())
+      .toolbar(.hidden, for: .navigationBar)
+      .statusBarHidden(true)
       .alert(
         "连接状态",
         isPresented: Binding(
@@ -561,8 +557,9 @@ private struct TerminalController: UIViewControllerRepresentable {
   let client: ClientProfile
   let session: RemoteSession?
   let status: TerminalNavigationStatus
+  let leave: () -> Void
   func makeUIViewController(context: Context) -> Screen {
-    Screen(client: client, session: session, navigationStatus: status)
+    Screen(client: client, session: session, navigationStatus: status, leave: leave)
   }
   func updateUIViewController(_ controller: Screen, context: Context) {}
   static func dismantleUIViewController(_ controller: Screen, coordinator: ()) { controller.stop() }

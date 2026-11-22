@@ -400,6 +400,49 @@ final class RemoteSessionTests: XCTestCase {
       let distance = positions[i + 1] - positions[i]
       XCTAssertEqual(distance, Double(widths[i] + 1) * cell, accuracy: 1, "Rendered \(glyph)")
     }
+    let snapshotScript = #"""
+      term.reset();
+      await new Promise(done => term.write('A中👩‍💻 sample\r\n\x1b[8mhidden\x1b[0m', done));
+      const box = document.querySelector('.xterm-screen').getBoundingClientRect();
+      return selectionSnapshot(box.left + (3.5 / term.cols) * box.width, box.top + box.height / term.rows / 2);
+      """#
+    let snapshot: [String: Any] = try await withCheckedThrowingContinuation { continuation in
+      web.callAsyncJavaScript(snapshotScript, arguments: [:], in: nil, in: .page) { result in
+        continuation.resume(with: Result { try XCTUnwrap(result.get() as? [String: Any]) })
+      }
+    }
+    let frozen = try XCTUnwrap(snapshot["text"] as? String)
+    XCTAssertTrue(frozen.hasPrefix("A中👩‍💻 sample"))
+    XCTAssertFalse(frozen.contains("hidden"))
+    XCTAssertEqual(snapshot["offset"] as? Int, "A中".utf16.count)
+    XCTAssertEqual(snapshot["atCursor"] as? Bool, false)
+    var copied: String?
+    let selection = TerminalTextSelection(text: frozen, offset: try XCTUnwrap(snapshot["offset"] as? Int)) {
+      copied = $0
+    }
+    selection.loadViewIfNeeded()
+    selection.copySelection()
+    XCTAssertEqual(copied, "👩‍💻")
+    let echoScript = #"""
+      resetInput();
+      term.reset();
+      const write = s => new Promise(done => term.write(s, done));
+      await write('$ ');
+      terminalData('echo 中文');
+      await write('echo 中文\x1b7\x1b[90m old suggestion\x1b[0m\x1b8');
+      const atEnd = inputSpan().text;
+      terminalData('\x1b[D');
+      await write('\x1b[2D');
+      return [atEnd, inputSpan().text];
+      """#
+    let echoed: [String] = try await withCheckedThrowingContinuation { continuation in
+      web.callAsyncJavaScript(echoScript, arguments: [:], in: nil, in: .page) { result in
+        continuation.resume(with: Result { try XCTUnwrap(result.get() as? [String]) })
+      }
+    }
+    XCTAssertEqual(echoed, ["echo 中文", "echo 中文"])
+
+
   }
 
   @MainActor
@@ -522,7 +565,7 @@ final class RemoteSessionTests: XCTestCase {
           userInfo: [NSLocalizedDescriptionKey: "Missing terminal output " + marker])
       }
       // Wait for the actual PTY, then verify the shell belongs to the chosen tmux session.
-      for _ in 0..<100 where escape.superview?.isUserInteractionEnabled == false {
+      for _ in 0..<100 where !escape.isEnabled {
         try await Task.sleep(nanoseconds: 100_000_000)
       }
       let connection = try XCTUnwrap(
@@ -553,9 +596,8 @@ final class RemoteSessionTests: XCTestCase {
         }
         XCTAssertTrue(latency.text?.contains(" ms") == true, "Expected a live SSH round trip")
         host.view.layoutIfNeeded()
-        let navigation = try XCTUnwrap(
-          descendants(host.view).compactMap { $0 as? UINavigationBar }.first { !$0.isHidden })
-        let item = try XCTUnwrap(navigation.topItem)
+        XCTAssertFalse(descendants(host.view).contains { $0 is UINavigationBar && !$0.isHidden })
+        XCTAssertNotNil(descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.leave" })
         let viewport = try XCTUnwrap(web.superview)
         let terminalFrame = viewport.convert(viewport.bounds, to: host.view)
         let keyboardTop = screen.view.convert(screen.view.keyboardLayoutGuide.layoutFrame, to: host.view).minY
@@ -576,10 +618,12 @@ final class RemoteSessionTests: XCTestCase {
           XCTAssertEqual(drawn.maxX, host.view.safeAreaLayoutGuide.layoutFrame.maxX, accuracy: pixel)
           XCTAssertEqual(drawn.minY, terminalFrame.minY, accuracy: pixel)
           XCTAssertEqual(drawn.maxY, keyboardTop, accuracy: pixel)
+          let topInset = try XCTUnwrap(host.view.window).safeAreaInsets.top
+          if topInset >= 44 && host.view.bounds.width < host.view.bounds.height {
+            XCTAssertEqual(terminalFrame.minY, topInset, accuracy: 1, "Title must share the cutout band")
+          }
           print("Terminal grid: \(Int(grid[0])) columns × \(Int(grid[1])) rows")
         }
-        XCTAssertLessThanOrEqual(
-          navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY + 1)
         XCTAssertEqual(terminalFrame.maxY, keyboardTop, accuracy: 1)
         try await toggle(reveal)
         XCTAssertFalse(panel.isHidden)
@@ -608,29 +652,17 @@ final class RemoteSessionTests: XCTestCase {
         XCTAssertFalse(descendants(screen.view).contains {
           $0.accessibilityIdentifier == "terminal.status.details"
         }, "A compact connection indicator still occupies terminal or keyboard space")
-        let trailing = (item.rightBarButtonItems ?? [])
-          + item.trailingItemGroups.flatMap(\.barButtonItems)
-        let activity = Activity<TerminalActivity>.activities.first {
+        XCTAssertTrue(connection.superview?.isHidden == true)
+        let reading = try XCTUnwrap(status.reading)
+        XCTAssertEqual(reading.phase, .ready)
+        XCTAssertNotNil(reading.milliseconds)
+        if let activity = Activity<TerminalActivity>.activities.first(where: {
           !previousActivities.contains($0.id) && $0.activityState == .active
-        }
-        if let activity {
-          XCTAssertTrue(connection.superview?.isHidden == true)
-          XCTAssertEqual(navigation.convert(navigation.bounds, to: host.view).maxY, terminalFrame.minY, accuracy: 1)
+        }) {
           for _ in 0..<30 where activity.content.state.phase != .ready {
             try await Task.sleep(nanoseconds: 100_000_000)
           }
           XCTAssertEqual(activity.content.state.phase, .ready)
-          let reading = try XCTUnwrap(status.reading)
-          XCTAssertEqual(reading.phase, .ready)
-          XCTAssertNotNil(reading.milliseconds)
-          XCTAssertEqual("RTT " + reading.latencyText, latency.text)
-          XCTAssertFalse(trailing.isEmpty, "The measured RTT needs a trailing navigation item")
-        } else {
-          XCTAssertNil(status.reading)
-          XCTAssertFalse(connection.superview?.isHidden == true)
-          XCTAssertTrue(trailing.isEmpty, "The inline fallback must not duplicate its status")
-          let strip = try XCTUnwrap(latency.superview)
-          XCTAssertEqual(strip.convert(strip.bounds, to: host.view).maxY, terminalFrame.minY, accuracy: 1)
         }
       }
       func type(_ command: String) async throws {
@@ -665,6 +697,23 @@ final class RemoteSessionTests: XCTestCase {
       try await type("printf '__ID_%s__\\n' \"$(tmux display-message -p '#{session_id}')\"")
       try await waitFor("__ID_$" + String(selected.id) + "__")
       if suffix.isEmpty {
+        // Shell echo confirms editing takes place in the existing PTY line before Return.
+        _ = try await web.evaluateJavaScript(#"term.input('echo old draft', true); true"#)
+        try await waitFor("echo old draft")
+        let selectedInput = try await web.evaluateJavaScript("""
+          (() => {
+            const box = document.querySelector('.xterm-screen').getBoundingClientRect();
+            const b = term.buffer.active;
+            const y = box.top + (b.baseY + b.cursorY - b.viewportY + 0.5) * box.height / term.rows;
+            selectTerminalInput(box.left + 2, y);
+            return term.getSelection();
+          })()
+          """)
+        XCTAssertEqual(selectedInput as? String, "echo old draft")
+        _ = try await web.evaluateJavaScript(#"pasteTerminal("printf '__EDIT_%s__' INLINE"); true"#)
+        try await waitFor("printf '__EDIT_%s__' INLINE")
+        _ = try await web.evaluateJavaScript(#"term.input('\r', true); true"#)
+        try await waitFor("__EDIT_INLINE__")
         try await type(
           "saved=$(stty -g); stty raw -echo; printf '__REA%s__\\r\\n' DY; "
             + "b=$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d '[:space:]'); "

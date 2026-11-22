@@ -20,15 +20,21 @@ term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
 term.loadAddon(fit);
 
 const bridge = window.webkit.messageHandlers.terminal;
-term.onData(data => bridge.postMessage({data}));
+term.onData(terminalData);
 // Legacy mouse reports contain raw coordinate bytes, including values above 127.
 term.onBinary(bytes => bridge.postMessage({binary: btoa(bytes)}));
-term.onResize(({cols, rows}) => bridge.postMessage({cols, rows}));
+let lastCols = term.cols;
+term.onResize(({cols, rows}) => {
+  if (cols !== lastCols) resetInput();
+  lastCols = cols;
+  bridge.postMessage({cols, rows});
+});
 
 // Use the same wheel encoder as a desktop xterm so tmux and a full-screen
 // application receive the mouse protocol they actually negotiated.
 function scrollRemote(x, y, fingerSteps, first) {
   // Dragging content down reveals earlier rows (wheel up or Page Up).
+  resetInput();
   const steps = -fingerSteps;
   if (!['vt200', 'drag', 'any'].includes(term.modes.mouseTrackingMode)) {
     if (first) term.input(steps < 0 ? '\x1b[5~' : '\x1b[6~', true);
@@ -46,12 +52,54 @@ function scrollRemote(x, y, fingerSteps, first) {
   }
 }
 
+// Use xterm's cells for hit testing. UTF-16 offsets are for UIKit text ranges.
+function terminalPoint(x, y) {
+  const rect = term.element.querySelector('.xterm-screen').getBoundingClientRect();
+  const buffer = term.buffer.active;
+  const row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - rect.top) * term.rows / rect.height)));
+  const col = Math.max(0, Math.min(term.cols - 1, Math.floor((x - rect.left) * term.cols / rect.width)));
+  return {row, col, atCursor: buffer.viewportY + row === buffer.baseY + buffer.cursorY};
+}
+
+function selectionSnapshot(x, y) {
+  const buffer = term.buffer.active;
+  const point = terminalPoint(x, y);
+  let text = '', offset = 0;
+  for (let row = 0; row < term.rows; row++) {
+    const line = buffer.getLine(buffer.viewportY + row);
+    const softWrap = row + 1 < term.rows && buffer.getLine(buffer.viewportY + row + 1)?.isWrapped;
+    let value = '', columnOffset = 0;
+    for (let col = 0; line && col < term.cols;) {
+      const cell = line.getCell(col);
+      const width = Math.max(1, cell.getWidth());
+      if (col <= point.col) columnOffset = value.length;
+      value += cell.isInvisible() ? ' '.repeat(width) : (cell.getChars() || ' ');
+      col += width;
+    }
+    if (!softWrap) value = value.trimEnd();
+    if (row === point.row) offset = text.length + Math.min(columnOffset, value.length);
+    text += value;
+    if (!softWrap && row + 1 < term.rows) text += '\n';
+  }
+  const span = inputSelection || inputSpan();
+  const row = buffer.viewportY + point.row;
+  const inInput = span && row >= Math.floor(span.from / span.cols) && row <= Math.floor((span.to - 1) / span.cols);
+  return {text, offset, atCursor: point.atCursor || !!inInput, selected: inputSelection ? term.getSelection() : ''};
+}
+
 // Load the local symbol face before xterm caches its first glyph measurements.
 const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
   .catch(() => [])
   .then(() => {
     const area = document.querySelector('#term');
     term.open(area);
+    installSelectionTouches(area);
+    // OSC 133 B marks the editable input after a shell prompt when forwarded by tmux.
+    term.parser.registerOscHandler(133, value => {
+      if (value === 'B' || value.startsWith('B;')) markInputStart(true);
+      else if (/^[ACD](;|$)/.test(value)) resetInput();
+      return false;
+    });
     const grid = area.querySelector('.xterm-screen');
     fit.fit();
     const layout = new ResizeObserver(() => {
