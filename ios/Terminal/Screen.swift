@@ -4,11 +4,12 @@ import UIKit
 import WebKit
 
 final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelegate {
-  let host: String, user: String, pin: String
-  let port: UInt16
+  let client: ClientProfile
   let target: Int64
   private let heading: String
   private let status = UILabel()
+  private let latency = UILabel()
+  private let transportBadge = UILabel()
   private let keys = UIStackView()
   private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
   private var pendingBytes = 0
@@ -19,10 +20,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var active = true
   private var dimensions = (UInt16(80), UInt16(24))
   init(client: ClientProfile, session: RemoteSession?) {
-    host = client.endpoint
-    port = client.port
-    user = client.user
-    pin = client.pin
+    self.client = client
     target = session?.id ?? -1
     heading = session?.name ?? client.name
     super.init(nibName: nil, bundle: nil)
@@ -40,10 +38,26 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     web.scrollView.isScrollEnabled = false
     view.backgroundColor = UIColor(red: 0.04, green: 0.08, blue: 0.10, alpha: 1)
     let accent = UIColor(red: 0.47, green: 0.91, blue: 0.79, alpha: 1)
-    status.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+    status.font = .preferredFont(forTextStyle: .caption1)
+    status.adjustsFontForContentSizeCategory = true
     status.textColor = accent
     status.numberOfLines = 2
-    status.text = "  ◌  正在连接 · " + heading
+    status.accessibilityIdentifier = "terminal.connection"
+    status.text = "◌  正在连接"
+    latency.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    latency.textColor = .secondaryLabel
+    latency.accessibilityIdentifier = "terminal.latency"
+    transportBadge.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+    transportBadge.textColor = .secondaryLabel
+    let bar = UIStackView(arrangedSubviews: [status, transportBadge, latency])
+    bar.alignment = .center
+    bar.spacing = 10
+    bar.isLayoutMarginsRelativeArrangement = true
+    bar.directionalLayoutMargins = .init(top: 5, leading: 7, bottom: 5, trailing: 7)
+    status.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    transportBadge.setContentHuggingPriority(.required, for: .horizontal)
+    latency.setContentHuggingPriority(.required, for: .horizontal)
+    latency.setContentCompressionResistancePriority(.required, for: .horizontal)
     let scroll = UIScrollView()
     scroll.showsHorizontalScrollIndicator = false
     keys.spacing = 5
@@ -65,7 +79,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     scroll.addSubview(keys)
     keys.translatesAutoresizingMaskIntoConstraints = false
-    let stack = UIStackView(arrangedSubviews: [status, web, scroll])
+    let stack = UIStackView(arrangedSubviews: [bar, web, scroll])
     stack.axis = .vertical
     stack.spacing = 4
     view.addSubview(stack)
@@ -113,63 +127,111 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       finish("本地连接失败")
       return
     }
-    let seed: Data
-    do { seed = try Identity.load().rawRepresentation } catch {
+    let connection: TerminalTransport
+    do { connection = try TerminalTransport(client) } catch {
       close(reader)
       close(worker)
       finish(error.localizedDescription)
       return
     }
     resize()
-    DispatchQueue.global(qos: .userInitiated).async {
-      [host, port, user, pin, seed, target, weak self] in
-      let error = seed.withUnsafeBytes { buffer in
-        tl_open(
-          worker, host, port, user, pin, buffer.bindMemory(to: UInt8.self).baseAddress!, target)
-      }
-      let message = error.map { String(cString: $0) } ?? "会话已断开"
-      if let error { tl_free_error(error) }
-      DispatchQueue.main.async { self?.finish(message) }
+    let hasIdentity = connection.identity != nil
+    let result = Task.detached(priority: .userInitiated) { [target] in
+      connection.run(worker, target: target)
     }
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      defer { close(reader) }
-      var buffer = [UInt8](repeating: 0, count: 32768)
-      while true {
-        let count = read(reader, &buffer, 32768)
-        if count < 0 && errno == EINTR { continue }
-        guard count > 0 else { break }
-        let bytes = Data(buffer.prefix(count)).base64EncodedString()
-        let rendered = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async { [weak self] in
-          guard let self, active else {
-            rendered.signal()
-            return
+      let stream = FileHandle(fileDescriptor: reader, closeOnDealloc: true)
+      do {
+        while let (kind, payload) = try Self.readFrame(from: stream) {
+          if kind == 1 {
+            let stage = String(decoding: payload, as: UTF8.self)
+            DispatchQueue.main.async {
+              self?.stage(stage, hasIdentity: hasIdentity)
+            }
+          } else if kind == 2 {
+            guard payload.count == 4 else { throw RelayError("延迟数据格式错误") }
+            let ms = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            DispatchQueue.main.async { self?.updateLatency(ms) }
+          } else if kind == 0 {
+            let rendered = DispatchSemaphore(value: 0)
+            let bytes = payload.base64EncodedString()
+            DispatchQueue.main.async { [weak self] in
+              guard let self, active else {
+                rendered.signal()
+                return
+              }
+              web.callAsyncJavaScript(
+                "await window.display(bytes)", arguments: ["bytes": bytes], in: nil, in: .page
+              ) { _ in rendered.signal() }
+            }
+            if rendered.wait(timeout: .now() + 30) == .timedOut {
+              throw RelayError("终端显示超时，请重新连接")
+            }
+          } else {
+            throw RelayError("终端数据格式错误")
           }
-          if !ready && fd >= 0 {
-            ready = true
-            keys.isUserInteractionEnabled = true
-            keys.alpha = 1
-            status.text = "  ●  " + heading + "  /  " + user
-          }
-          web.callAsyncJavaScript(
-            "await window.display(bytes)", arguments: ["bytes": bytes], in: nil, in: .page
-          ) { _ in rendered.signal() }
         }
-        if rendered.wait(timeout: .now() + 30) == .timedOut {
-          DispatchQueue.main.async { self?.finish("终端显示超时，请重新连接") }
-          break
+        Task { @MainActor [weak self] in
+          let error = await result.value
+          self?.finish(error ?? "会话已断开")
         }
+      } catch {
+        DispatchQueue.main.async { self?.finish(error.localizedDescription) }
       }
-      DispatchQueue.main.async { self?.disconnect() }
     }
   }
+
+  nonisolated static func readFrame(from stream: FileHandle) throws -> (UInt8, Data)? {
+    func bytes(_ count: Int, allowEOF: Bool = false) throws -> Data? {
+      var data = Data()
+      while data.count < count {
+        guard let next = try stream.read(upToCount: count - data.count), !next.isEmpty else {
+          if allowEOF && data.isEmpty { return nil }
+          throw RelayError("终端数据提前结束")
+        }
+        data.append(next)
+      }
+      return data
+    }
+    guard let header = try bytes(5, allowEOF: true) else { return nil }
+    let size = header.dropFirst().reduce(0) { ($0 << 8) | Int($1) }
+    guard size <= 65536, let payload = try bytes(size) else { throw RelayError("终端数据过长") }
+    return (header[0], payload)
+  }
+
+  private func stage(_ stage: String, hasIdentity: Bool) {
+    guard active, fd >= 0 else { return }
+    switch stage {
+    case "connecting": status.text = "◌  连接中转"
+    case "ssh": status.text = "◌  校验 SSH 主机"
+    case "auth": status.text = "◌  验证 SSH 身份"
+    case "attaching": status.text = "◌  接入 tmux"
+    case "ready":
+      ready = true
+      keys.isUserInteractionEnabled = true
+      keys.alpha = 1
+      status.text = "●  已连接"
+      transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
+      latency.text = "RTT —"
+      latency.accessibilityLabel = "正在测量会话往返延迟"
+    default: break
+    }
+  }
+
+  private func updateLatency(_ ms: UInt32) {
+    guard active, ready else { return }
+    latency.text = ms == .max ? "RTT 超时" : "RTT \(ms) ms"
+    latency.textColor = ms == .max ? .systemOrange : .secondaryLabel
+    latency.accessibilityLabel = ms == .max ? "会话延迟测量超时" : "会话往返延迟 \(ms) 毫秒"
+  }
+
   func userContentController(
     _ controller: WKUserContentController, didReceive message: WKScriptMessage
   ) {
     guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
       return
     }
-    if let str = obj["data"] as? String {
+    if ready, let str = obj["data"] as? String {
       let bytes = Data(str.utf8)
       for offset in stride(from: 0, to: bytes.count, by: 16384) {
         send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
@@ -225,7 +287,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
   }
   private func finish(_ message: String) {
-    status.text = "  " + message
+    guard active else { return }
+    status.textColor = .systemOrange
+    status.text = "○  " + message
+    latency.text = nil
+    latency.accessibilityLabel = nil
+    transportBadge.text = nil
     disconnect()
   }
   private func disconnect() {

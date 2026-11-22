@@ -34,6 +34,16 @@ final class App: UIResponder, UIApplicationDelegate {
 
 final class Scene: UIResponder, UIWindowSceneDelegate {
   var window: UIWindow?
+  private let enrollment = EnrollmentStatus()
+
+  func sceneWillEnterForeground(_ scene: UIScene) {
+    do {
+      try RelayIdentity.processEnrollment()
+      enrollment.error = nil
+    } catch {
+      enrollment.error = "设备证书注册失败：" + error.localizedDescription
+    }
+  }
 
   func scene(
     _ scene: UIScene, willConnectTo session: UISceneSession,
@@ -41,7 +51,7 @@ final class Scene: UIResponder, UIWindowSceneDelegate {
   ) {
     guard let windowScene = scene as? UIWindowScene else { return }
     let window = UIWindow(windowScene: windowScene)
-    window.rootViewController = UIHostingController(rootView: Workspace())
+    window.rootViewController = UIHostingController(rootView: Workspace(enrollment: enrollment))
     window.makeKeyAndVisible()
     self.window = window
   }

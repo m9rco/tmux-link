@@ -1,5 +1,6 @@
 import Darwin
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ClientProfile: Codable, Hashable, Identifiable {
   var id = UUID()
@@ -9,6 +10,13 @@ struct ClientProfile: Codable, Hashable, Identifiable {
   var route = ""
   var user = ""
   var pin = ""
+  var requireMTLS: Bool?
+  var importedIdentity: Bool?
+
+  var relayHost: String {
+    if host.contains("://") { return URLComponents(string: host)?.host?.lowercased() ?? "" }
+    return host.lowercased()
+  }
 
   var endpoint: String {
     guard !route.isEmpty else { return host }
@@ -44,7 +52,7 @@ struct RemoteSession: Codable, Hashable, Identifiable {
 enum SessionDirectory {
   static func fetch(_ client: ClientProfile) async throws -> [RemoteSession] {
     try await Task.detached(priority: .userInitiated) {
-      let seed = try Identity.load().rawRepresentation
+      let connection = try TerminalTransport(client)
       var pair: [Int32] = [-1, -1]
       guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -52,14 +60,7 @@ enum SessionDirectory {
       let reader = FileHandle(fileDescriptor: pair[0], closeOnDealloc: true)
       let worker = pair[1]
       let transport = Task.detached { () -> String? in
-        let error = seed.withUnsafeBytes {
-          tl_open(
-            worker, client.endpoint, client.port, client.user, client.pin,
-            $0.bindMemory(to: UInt8.self).baseAddress!, -2)
-        }
-        guard let error else { return nil }
-        defer { tl_free_error(error) }
-        return String(cString: error)
+        connection.run(worker, target: -2)
       }
       let data = try reader.readToEnd() ?? Data()
       if let message = await transport.value {
@@ -101,6 +102,7 @@ final class ProfileStore: ObservableObject {
     persist()
   }
   func remove(_ id: UUID) {
+    RelayIdentity.remove(id)
     clients.removeAll { $0.id == id }
     persist()
   }
@@ -110,7 +112,12 @@ private let mint = Color(red: 0.47, green: 0.91, blue: 0.79)
 private let ink = Color(red: 0.045, green: 0.08, blue: 0.10)
 private let panel = Color(red: 0.08, green: 0.13, blue: 0.15)
 
+final class EnrollmentStatus: ObservableObject {
+  @Published var error: String?
+}
+
 struct Workspace: View {
+  @ObservedObject var enrollment = EnrollmentStatus()
   @StateObject private var store = ProfileStore()
   @State private var editor: ClientProfile?
   @State private var message: String?
@@ -127,6 +134,7 @@ struct Workspace: View {
         .navigationDestination(for: ClientProfile.self) { Sessions(client: $0) }
     }
     .tint(mint).preferredColorScheme(.dark)
+    .onReceive(enrollment.$error) { if let error = $0 { message = error } }
     .sheet(item: $editor) { client in ProfileEditor(client: client, save: store.save) }
     .alert(
       message ?? "",
@@ -185,6 +193,11 @@ private struct ClientRow: View {
 private struct ProfileEditor: View {
   @Environment(\.dismiss) var dismiss
   @State var client: ClientProfile
+  @State private var pickingCertificate = false
+  @State private var certificateFile: Data?
+  @State private var passphrase = ""
+  @State private var imported: RelayCredential?
+  @State private var certificateError: String?
   @State private var port: String
   let save: (ClientProfile) -> Void
   init(client: ClientProfile, save: @escaping (ClientProfile) -> Void) {
@@ -204,6 +217,22 @@ private struct ProfileEditor: View {
           TextField("端口", text: $port).keyboardType(.numberPad)
           TextField("客户端路由（默认留空）", text: $client.route)
         }
+        Section("设备认证") {
+          Toggle(
+            "要求 mTLS",
+            isOn: Binding(
+              get: { client.requireMTLS == true },
+              set: { client.requireMTLS = $0 }))
+          Button(client.importedIdentity == true ? "更换客户端证书" : "导入客户端证书 (.p12)") {
+            pickingCertificate = true
+          }
+          if client.importedIdentity == true {
+            Button("移除导入的证书", role: .destructive) {
+              client.importedIdentity = nil
+              imported = nil
+            }
+          }
+        }
         Section("内网 SSH 主机指纹") {
           TextField("SHA256:…", text: $client.pin, axis: .vertical).font(.body.monospaced())
         }
@@ -215,12 +244,62 @@ private struct ProfileEditor: View {
             Button("保存") {
               guard let value = UInt16(port) else { return }
               client.port = value
-              save(client)
-              dismiss()
+              do {
+                if let imported {
+                  guard imported.host == client.relayHost else {
+                    throw RelayError("服务器地址已更改，请重新导入证书")
+                  }
+                  try RelayIdentity.save(imported, for: client.id)
+                } else if client.importedIdentity != true {
+                  RelayIdentity.remove(client.id)
+                }
+                save(client)
+                dismiss()
+              } catch { certificateError = error.localizedDescription }
             }.disabled(!client.valid || (UInt16(port) ?? 0) == 0)
           }
         }
     }.preferredColorScheme(.dark).tint(mint)
+      .fileImporter(
+        isPresented: $pickingCertificate,
+        allowedContentTypes: [
+          UTType(filenameExtension: "p12") ?? .data,
+          UTType(filenameExtension: "pfx") ?? .data,
+        ]
+      ) { result in
+        do {
+          let url = try result.get()
+          let scoped = url.startAccessingSecurityScopedResource()
+          defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+          certificateFile = try RelayIdentity.limitedFile(url)
+        } catch { certificateError = error.localizedDescription }
+      }
+      .alert("证书密码", isPresented: Binding(get: { certificateFile != nil }, set: { _ in })) {
+        SecureField("PKCS#12 密码", text: $passphrase)
+        Button("取消", role: .cancel) {
+          certificateFile = nil
+          passphrase = ""
+        }
+        Button("导入") {
+          defer {
+            certificateFile = nil
+            passphrase = ""
+          }
+          guard let file = certificateFile else { return }
+          do {
+            imported = try RelayCredential.importPKCS12(
+              file, password: passphrase, host: client.relayHost)
+            client.importedIdentity = true
+            client.requireMTLS = true
+          } catch { certificateError = error.localizedDescription }
+        }
+      }
+      .alert(
+        certificateError ?? "",
+        isPresented: Binding(
+          get: { certificateError != nil },
+          set: { if !$0 { certificateError = nil } })
+      ) { Button("好") {} }
   }
 }
 

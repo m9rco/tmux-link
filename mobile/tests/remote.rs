@@ -9,6 +9,14 @@ use std::{
 };
 
 fn start(pin: &str, key_env: &str) -> (UnixStream, JoinHandle<Result<(), String>>) {
+    start_protocol(pin, key_env, false)
+}
+
+fn start_protocol(
+    pin: &str,
+    key_env: &str,
+    framed: bool,
+) -> (UnixStream, JoinHandle<Result<(), String>>) {
     let get = |key| std::env::var(key).unwrap();
     let key = load_secret_key(get(key_env), None).unwrap();
     let seed = key
@@ -28,14 +36,30 @@ fn start(pin: &str, key_env: &str) -> (UnixStream, JoinHandle<Result<(), String>
     view.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let worker = thread::spawn(move || unsafe {
-        let error = tmux_link_mobile::tl_connect(
-            core.into_raw_fd(),
-            host.as_ptr(),
-            port,
-            user.as_ptr(),
-            fingerprint.as_ptr(),
-            seed.as_ptr(),
-        );
+        let error = if framed {
+            tmux_link_mobile::tl_open_secure(
+                core.into_raw_fd(),
+                host.as_ptr(),
+                port,
+                user.as_ptr(),
+                fingerprint.as_ptr(),
+                seed.as_ptr(),
+                -1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        } else {
+            tmux_link_mobile::tl_connect(
+                core.into_raw_fd(),
+                host.as_ptr(),
+                port,
+                user.as_ptr(),
+                fingerprint.as_ptr(),
+                seed.as_ptr(),
+            )
+        };
         if error.is_null() {
             Ok(())
         } else {
@@ -139,4 +163,38 @@ fn rejects_unknown_input_frame() {
     expect(&mut view, "Session number:");
     send(&mut view, 9, &[]);
     assert_eq!(worker.join().unwrap().unwrap_err(), "invalid input frame");
+}
+
+#[test]
+#[ignore = "requires a disposable Linux sshd/tmux fixture"]
+fn framed_terminal_reports_remote_round_trip_and_keeps_output_separate() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", true);
+    let mut stages = Vec::new();
+    let mut terminal = Vec::new();
+    let mut measured = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !measured || !terminal.windows(15).any(|p| p == b"Session number:") {
+        assert!(Instant::now() < deadline);
+        let mut header = [0; 5];
+        view.read_exact(&mut header).unwrap();
+        let size = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        assert!(size <= 65536);
+        let mut payload = vec![0; size];
+        view.read_exact(&mut payload).unwrap();
+        match header[0] {
+            0 => terminal.extend(payload),
+            1 => stages.push(String::from_utf8(payload).unwrap()),
+            2 => {
+                assert_eq!(stages.last().unwrap(), "ready");
+                let ms = u32::from_be_bytes(payload.try_into().unwrap());
+                assert!(ms < 8000);
+                measured = true;
+            }
+            kind => panic!("unknown output kind {kind}"),
+        }
+    }
+    assert_eq!(stages, ["connecting", "ssh", "auth", "attaching", "ready"]);
+    drop(view);
+    worker.join().unwrap().unwrap();
 }

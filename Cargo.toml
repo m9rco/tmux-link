@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "tmux-link"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -13,7 +13,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 
 [features]
-tls = ["tokio-tungstenite/rustls-tls-webpki-roots", "dep:rustls"]
+tls = ["tokio-tungstenite/rustls-tls-webpki-roots", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies.futures-util]
 version = "0.3"
@@ -27,3 +27,11 @@ version = "0.23"
 default-features = false
 features = ["ring", "std", "tls12"]
 optional = true
+
+[dependencies.webpki-roots]
+version = "1"
+optional = true
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

@@ -33,13 +33,27 @@ impl client::Handler for PinnedHost {
     }
 }
 
-async fn authenticated(
-    host: &str,
+type DeviceIdentity<'a> = Option<(&'a [u8], &'a [u8])>;
+
+struct Peer<'a> {
+    host: &'a str,
     port: u16,
-    user: &str,
-    pin: &str,
+    user: &'a str,
+    pin: &'a str,
     key: PrivateKey,
-) -> Result<client::Handle<PinnedHost>> {
+    identity: DeviceIdentity<'a>,
+}
+
+async fn authenticated(peer: Peer<'_>, output: &mut Output) -> Result<client::Handle<PinnedHost>> {
+    let Peer {
+        host,
+        port,
+        user,
+        pin,
+        key,
+        identity,
+    } = peer;
+    output.stage("connecting").await?;
     let config = client::Config {
         keepalive_interval: Some(Duration::from_secs(20)),
         ..Default::default()
@@ -52,11 +66,18 @@ async fn authenticated(
             } else {
                 format!("wss://{host}/tmux-link")
             };
-            let stream = tmux_link::websocket::connect(&url).await?;
+            let stream = match identity {
+                Some((cert, key)) => tmux_link::websocket::connect_mtls(&url, cert, key).await?,
+                None => tmux_link::websocket::connect(&url).await?,
+            };
+            output.stage("ssh").await?;
             client::connect_stream(Arc::new(config), stream, PinnedHost(pin.into())).await?
         } else {
+            ensure!(identity.is_none(), "device certificate requires WSS");
+            output.stage("ssh").await?;
             client::connect(Arc::new(config), (host, port), PinnedHost(pin.into())).await?
         };
+        output.stage("auth").await?;
         ensure!(
             session
                 .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), None))
@@ -69,12 +90,68 @@ async fn authenticated(
     .await?
 }
 
+struct Output {
+    writer: tokio::net::unix::OwnedWriteHalf,
+    framed: bool,
+}
+
+impl Output {
+    async fn frame(&mut self, kind: u8, bytes: &[u8]) -> Result<()> {
+        self.writer.write_u8(kind).await?;
+        self.writer.write_u32(bytes.len().try_into()?).await?;
+        self.writer.write_all(bytes).await?;
+        Ok(())
+    }
+
+    async fn data(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.framed {
+            for chunk in bytes.chunks(65536) {
+                self.frame(0, chunk).await?;
+            }
+        } else {
+            self.writer.write_all(bytes).await?;
+        }
+        Ok(())
+    }
+
+    async fn stage(&mut self, name: &str) -> Result<()> {
+        if self.framed {
+            self.frame(1, name.as_bytes()).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn heartbeat(
+    session: &client::Handle<PinnedHost>,
+    samples: tokio::sync::mpsc::Sender<u32>,
+) -> Result<()> {
+    loop {
+        let start = tokio::time::Instant::now();
+        let ping = session.send_ping();
+        tokio::pin!(ping);
+        match timeout(Duration::from_secs(8), &mut ping).await {
+            Ok(result) => result?,
+            Err(_) => {
+                samples.send(u32::MAX).await?;
+                // Keep at most one outstanding SSH global request.
+                ping.await?;
+            }
+        }
+        ensure!(!session.is_closed(), "SSH connection closed");
+        let ms = start.elapsed().as_millis().min((u32::MAX - 1) as u128) as u32;
+        samples.send(ms).await?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 async fn run(
     session: client::Handle<PinnedHost>,
-    socket: UnixStream,
+    mut read: tokio::net::unix::OwnedReadHalf,
+    mut output: Output,
     target: Option<u64>,
 ) -> Result<()> {
-    let (mut read, mut write) = socket.into_split();
+    output.stage("attaching").await?;
     let channel = timeout(Duration::from_secs(20), async {
         let channel = session.channel_open_session().await?;
         channel
@@ -112,13 +189,37 @@ async fn run(
         }
         Ok::<(), anyhow::Error>(())
     };
+    let framed = output.framed;
+    let (samples, mut sample_rx) = tokio::sync::mpsc::channel::<u32>(1);
     let download = async {
-        while let Some(message) = ssh_rx.wait().await {
+        let mut acknowledgments = 0;
+        let ack_deadline = tokio::time::sleep(Duration::from_secs(20));
+        tokio::pin!(ack_deadline);
+        loop {
+            let message = tokio::select! {
+                message = ssh_rx.wait() => match message {
+                    Some(message) => message,
+                    None => break,
+                },
+                Some(ms) = sample_rx.recv(), if framed && acknowledgments == 2 => {
+                    output.frame(2, &ms.to_be_bytes()).await?;
+                    continue;
+                }
+                _ = &mut ack_deadline, if framed && acknowledgments < 2 => {
+                    bail!("remote PTY or command acknowledgment timed out");
+                }
+            };
             match message {
                 ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                    write.write_all(&data).await?
+                    output.data(&data).await?
                 }
                 ChannelMsg::Close | ChannelMsg::Eof => break,
+                ChannelMsg::Success if framed && acknowledgments < 2 => {
+                    acknowledgments += 1;
+                    if acknowledgments == 2 {
+                        output.stage("ready").await?;
+                    }
+                }
                 ChannelMsg::Failure => bail!("remote PTY or shell request failed"),
                 _ => {}
             }
@@ -128,6 +229,7 @@ async fn run(
     let result = tokio::select! {
         result = upload => result,
         result = download => result,
+        result = heartbeat(&session, samples), if framed => result,
     };
     // Close even when input validation failed, with a bounded shutdown wait.
     let disconnected = timeout(
@@ -168,8 +270,65 @@ pub unsafe extern "C" fn tl_open(
     seed: *const u8,
     target: i64,
 ) -> *mut c_char {
+    unsafe { open_inner(fd, host, port, user, pin, seed, target, None) }
+}
+
+/// # Safety
+/// Same fd, strings and seed requirements as tl_open. Supply readable buffers
+/// of the specified lengths for the DER leaf and DER PKCS#8 key, or two NULL/0 pairs.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_open_secure(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    target: i64,
+    cert_der: *const u8,
+    cert_len: usize,
+    key_pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
+    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials) }
+}
+
+type CredentialBuffers = (*const u8, usize, *const u8, usize);
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn open_inner(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    target: i64,
+    credentials: Option<CredentialBuffers>,
+) -> *mut c_char {
     let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     let result = (|| -> Result<()> {
+        let identity = match credentials {
+            None => None,
+            Some((cert, 0, key, 0)) if cert.is_null() && key.is_null() => None,
+            Some((cert, cert_len, key, key_len)) => {
+                ensure!(
+                    !cert.is_null()
+                        && !key.is_null()
+                        && (1..=65536).contains(&cert_len)
+                        && (1..=65536).contains(&key_len),
+                    "invalid device identity"
+                );
+                Some(unsafe {
+                    (
+                        std::slice::from_raw_parts(cert, cert_len),
+                        std::slice::from_raw_parts(key, key_len),
+                    )
+                })
+            }
+        };
         let host = unsafe { CStr::from_ptr(host) }.to_str()?;
         let user = unsafe { CStr::from_ptr(user) }.to_str()?;
         let pin = unsafe { CStr::from_ptr(pin) }.to_str()?;
@@ -179,8 +338,20 @@ pub unsafe extern "C" fn tl_open(
             .enable_all()
             .build()?
             .block_on(async {
-                let mut socket = UnixStream::from_std(socket)?;
-                let session = authenticated(host, port, user, pin, PrivateKey::from(key)).await?;
+                let (read, writer) = UnixStream::from_std(socket)?.into_split();
+                let mut output = Output {
+                    writer,
+                    framed: credentials.is_some() && target != -2,
+                };
+                let peer = Peer {
+                    host,
+                    port,
+                    user,
+                    pin,
+                    key: PrivateKey::from(key),
+                    identity,
+                };
+                let session = authenticated(peer, &mut output).await?;
                 if target == -2 {
                     timeout(Duration::from_secs(15), async {
                         let mut channel = session.channel_open_session().await?;
@@ -192,7 +363,7 @@ pub unsafe extern "C" fn tl_open(
                                 ChannelMsg::Data { data } => {
                                     size += data.len();
                                     ensure!(size <= 1024 * 1024, "session list too large");
-                                    socket.write_all(&data).await?;
+                                    output.data(&data).await?;
                                 }
                                 ChannelMsg::ExitStatus { exit_status } => {
                                     status = Some(exit_status)
@@ -210,7 +381,7 @@ pub unsafe extern "C" fn tl_open(
                     .await?
                 } else {
                     ensure!(target >= -1, "invalid session");
-                    run(session, socket, u64::try_from(target).ok()).await
+                    run(session, read, output, u64::try_from(target).ok()).await
                 }
             })
     })();

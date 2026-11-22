@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0C35831EC31CF34E63DB8469 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */; };
+		21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04BA079F6170AF2C112D38A /* RelayIdentity.swift */; };
 		36108C60DDC87A82EA5C84C5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 40A95C15D89DCB37F1EEA411 /* assets */; };
 		3AFC72BEC961024B8910C016 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578B5E364A900CEF7B36DD35 /* Workspace.swift */; };
 		4ADD034A26E0AFD1BCFD3512 /* RemoteSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */; };
@@ -37,6 +38,7 @@
 		7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionTests.swift; sourceTree = "<group>"; };
 		9449273D3949245A2F2A8160 /* Screen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Screen.swift; sourceTree = "<group>"; };
 		A730322DA49828E6EF160404 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
+		D04BA079F6170AF2C112D38A /* RelayIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayIdentity.swift; sourceTree = "<group>"; };
 		D4AC8B585736A80747E1EDD3 /* TmuxLink.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TmuxLink.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -74,6 +76,7 @@
 				3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */,
 				4AA2EEF93695DF540A0B4342 /* Bridge.h */,
 				5E17E7A33DF530425EC38227 /* Identity.swift */,
+				D04BA079F6170AF2C112D38A /* RelayIdentity.swift */,
 				9449273D3949245A2F2A8160 /* Screen.swift */,
 				578B5E364A900CEF7B36DD35 /* Workspace.swift */,
 			);
@@ -194,6 +197,7 @@
 			files = (
 				9CA37C6DE7B824104910B340 /* App.swift in Sources */,
 				C24030632CB36AF220E8422F /* Identity.swift in Sources */,
+				21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */,
 				7F53244DB259EB35AFE53034 /* Screen.swift in Sources */,
 				3AFC72BEC961024B8910C016 /* Workspace.swift in Sources */,
 			);
@@ -217,7 +221,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
@@ -229,7 +233,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.3.0;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -292,7 +296,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to the configured tmux server on your network.";
@@ -304,7 +308,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.3.0;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;

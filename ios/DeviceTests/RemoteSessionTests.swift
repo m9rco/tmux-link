@@ -31,26 +31,23 @@ final class RemoteSessionTests: XCTestCase {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
     let view = pair[0]
+    let stream = FileHandle(fileDescriptor: view, closeOnDealloc: false)
     let worker = pair[1]
     var timeout = timeval(tv_sec: 30, tv_usec: 0)
     setsockopt(view, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     var one: Int32 = 1
     setsockopt(view, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-    let seed = try Identity.load().rawRepresentation
+    let client = ClientProfile(
+      name: "E2E", host: config.host, port: config.port, user: config.user, pin: config.fingerprint)
+    let connection = try TerminalTransport(client)
     let finished = expectation(description: "SSH transport closed")
     let lock = NSLock()
     var transportError: String?
     DispatchQueue.global(qos: .userInitiated).async {
-      let error = seed.withUnsafeBytes { bytes in
-        tl_connect(
-          worker, config.host, config.port, config.user, config.fingerprint,
-          bytes.bindMemory(to: UInt8.self).baseAddress!)
-      }
-      if let error {
+      if let error = connection.run(worker, target: -1) {
         lock.lock()
-        transportError = String(cString: error)
+        transportError = error
         lock.unlock()
-        tl_free_error(error)
       }
       finished.fulfill()
     }
@@ -83,21 +80,15 @@ final class RemoteSessionTests: XCTestCase {
     }
 
     var received = Data()
-    var buffer = [UInt8](repeating: 0, count: 16384)
     var sent = false
     var selected = false
     let deadline = Date().addingTimeInterval(45)
     while Date() < deadline {
-      let count = read(view, &buffer, buffer.count)
-      if count < 0 && errno == EINTR { continue }
-      guard count > 0 else {
-        throw NSError(
-          domain: "TmuxLinkE2E", code: 1,
-          userInfo: [
-            NSLocalizedDescriptionKey: "Terminal closed or timed out before the expected output."
-          ])
+      guard let (kind, payload) = try Screen.readFrame(from: stream) else {
+        throw RelayError("Terminal closed before expected output")
       }
-      received.append(buffer, count: count)
+      guard kind == 0 else { continue }
+      received.append(payload)
       guard received.count < 1_048_576 else {
         throw NSError(domain: "TmuxLinkE2E", code: 2)
       }
@@ -124,6 +115,37 @@ final class RemoteSessionTests: XCTestCase {
       if sent && screen.contains(expected) { return }
     }
     XCTFail("Expected remote output did not arrive.")
+  }
+
+  func testRequiredCertificateAndProfileBinding() throws {
+    var client = ClientProfile(
+      name: "Test", host: "example.invalid", user: "tester", pin: "SHA256:test")
+    client.requireMTLS = true
+    XCTAssertThrowsError(try RelayIdentity.resolve(client))
+    client.importedIdentity = true
+    let expected = RelayCredential(
+      host: "example.invalid", certificate: Data([42]), privateKey: Data([7]))
+    try RelayIdentity.save(expected, for: client.id)
+    defer { RelayIdentity.remove(client.id) }
+    XCTAssertEqual(try RelayIdentity.resolve(client)?.certificate, expected.certificate)
+    client.host = "wss://other.invalid/tmux-link"
+    XCTAssertThrowsError(try RelayIdentity.resolve(client))
+  }
+
+  func testStatusFramesRejectTruncationAndOversize() throws {
+    let pipe = Pipe()
+    let stream = pipe.fileHandleForReading
+    try pipe.fileHandleForWriting.write(
+      contentsOf: Data([2, 0, 0, 0, 4, 0, 0, 0, 37, 0, 1, 0, 1, 0]))
+    try pipe.fileHandleForWriting.close()
+    let (kind, bytes) = try XCTUnwrap(Screen.readFrame(from: stream))
+    XCTAssertEqual(kind, 2)
+    XCTAssertEqual(bytes, Data([0, 0, 0, 37]))
+    XCTAssertThrowsError(try Screen.readFrame(from: stream))
+    let truncated = Pipe()
+    try truncated.fileHandleForWriting.write(contentsOf: Data([0, 0, 0, 0, 4, 1]))
+    try truncated.fileHandleForWriting.close()
+    XCTAssertThrowsError(try Screen.readFrame(from: truncated.fileHandleForReading))
   }
 
   func testSavedClientsMigrateAndStayIndependent() throws {
@@ -193,6 +215,19 @@ final class RemoteSessionTests: XCTestCase {
       // Wait for the actual PTY, then verify the shell belongs to the chosen tmux session.
       for _ in 0..<100 where escape.superview?.isUserInteractionEnabled == false {
         try await Task.sleep(nanoseconds: 100_000_000)
+      }
+      let connection = try XCTUnwrap(
+        descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.connection" }
+          as? UILabel)
+      XCTAssertEqual(connection.text, "●  已连接")
+      if suffix.isEmpty {
+        let latency = try XCTUnwrap(
+          descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.latency" }
+            as? UILabel)
+        for _ in 0..<100 where latency.text?.contains(" ms") != true {
+          try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(latency.text?.contains(" ms") == true, "Expected a live SSH round trip")
       }
       func type(_ command: String) async throws {
         let _: Any? = try await web.callAsyncJavaScript(

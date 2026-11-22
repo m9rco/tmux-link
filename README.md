@@ -20,6 +20,8 @@ iPhone ── SSH over WSS ──► center.example.com:443/tmux-link
 
 首页保存多台客户端。点客户端读取该账号的会话，点名称进入终端，返回会话列表即可切换；后台的 tmux 会话继续运行。每台客户端独立配置入口、用户名与 SSH 指纹。长按客户端可编辑，左滑可删除。首次升级会载入之前保存的连接。旧版 agent 支持在会话列表中选择「打开兼容终端」。
 
+终端状态栏显示连接阶段、传输保护和 RTT。RTT 来自当前 SSH 会话上发到内网主机的探测，覆盖手机、中心和目标主机之间的往返。收到首个样本前显示占位符，探测超时或连接中断时更新状态。
+
 终端底部的快捷键栏可以横向滑动，包含 Esc、Tab、Ctrl-C、Ctrl-B、四个方向键和回车。Esc 在收到首屏后启用，发送单字节 0x1B；在 vim 插入模式中可以直接回到普通模式。横竖屏或键盘高度变化会调整远端 PTY。
 
 ## 一键安装
@@ -69,7 +71,37 @@ iOS 客户端使用 Rust SSH 核心、UIKit、Keychain 和随 App 打包的 xter
 
 1. 为隧道创建专用非 root 用户 `tmuxrelay`，给它配置仅用于隧道的 SSH 公钥，作为该用户执行 `install -d -m 700 ~/link`。公网中心 SSH 的授权密钥是 **Linux 隧道公钥**。手机公钥只交给内网 Linux。
 2. 将 `deploy/center-sshd-match.conf` 追加到公网 sshd 配置末尾，用 `sshd -t` 检查后 reload。该用户可以创建远端 Unix socket，无法开启 shell 或 TCP 转发。确保其家目录为专用目录。
-3. 将 `deploy/tmux-link-center.service` 安装到 `/etc/systemd/system/`，执行 `systemctl daemon-reload && systemctl enable --now tmux-link-center`。示例使用127.0.0.1:7682 接收 WebSocket，已有 SSH 端口接收内网隧道。在域名的 HTTPS server 块中 include `deploy/nginx-tmux-link.conf`，运行 `nginx -t` 后 reload。公网手机入口使用 443，内网隧道使用 22。
+3. 将 `deploy/tmux-link-center.service` 安装到 `/etc/systemd/system/`，执行 `systemctl daemon-reload && systemctl enable --now tmux-link-center`。示例使用 `127.0.0.1:7682` 接收 WebSocket，已有 SSH 端口接收内网隧道。按下一节配置 nginx 的设备认证。公网手机入口使用 443，内网隧道使用 22。
+
+### 设备证书和路由授权
+
+HTTPS 入口在 WebSocket 升级前验证设备证书。首次打开 App 后，通过已配对并受信任的 iPhone 获取 `Documents/tmux-link-device-public.pem`。这是手机生成的 P-256 公钥，用于 mTLS，与 tmux 主机上的 SSH 公钥分别授权。下例在管理 Mac 上运行，使用 Python 3 和 OpenSSL 3 或更高版本。
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+DEVICE_UDID=你的设备标识
+CA_DIR="$HOME/.tmux-link-device-ca"
+DEVICE_DIR=$(mktemp -d)
+python3 deploy/device-cert.py init "$CA_DIR"  # 每个管理域首次执行一次
+xcrun devicectl device copy from --device "$DEVICE_UDID" --domain-type appDataContainer \
+  --domain-identifier dev.tmuxlink.mobile --source Documents/tmux-link-device-public.pem \
+  --destination "$DEVICE_DIR/device.pub"
+python3 deploy/device-cert.py issue "$CA_DIR" phone "$DEVICE_DIR/device.pub" "$DEVICE_DIR/device.cer"
+python3 deploy/device-cert.py grants "$DEVICE_DIR/device.cer" primary > "$DEVICE_DIR/phone.map"
+python3 -c 'import base64,json,sys; print(json.dumps({"host":sys.argv[1],"certificate":base64.b64encode(open(sys.argv[2],"rb").read()).decode()}))' \
+  center.example.com "$DEVICE_DIR/device.cer" > "$DEVICE_DIR/enrollment.json"
+xcrun devicectl device copy to --device "$DEVICE_UDID" --domain-type appDataContainer \
+  --domain-identifier dev.tmuxlink.mobile --source "$DEVICE_DIR/enrollment.json" \
+  --destination Documents/tmux-link-enrollment.json
+```
+
+将示例域名替换为手机配置的中心域名，重新打开 App 导入证书。设备证书有效期为一年，期满前可为同一手机公钥重新签发。先加入新证书的路由授权，验证连接后移除旧证书的授权。Personal Team 的 App 续签与设备证书续期各自进行。
+
+在中心创建 `/etc/nginx/tmux-link/`，复制 **公开 CA 证书** 到该目录下的 `device-ca.pem`；管理 Mac 保管 `device-ca.key`，可做加密离线备份。将每台手机的 `phone.map` 条目合并进 `/etc/nginx/tmux-link/authorized-routes.map`。上例授权 `primary`，涵盖 `/tmux-link` 与 `/tmux-link/primary`；需要访问第二台机器时，可在 `grants` 命令末尾追加其路由名。
+
+把 `deploy/nginx-tmux-link-map.conf` 安装到 nginx 的 `http` 配置上下文（通常为 `/etc/nginx/conf.d/tmux-link-mtls-map.conf`），再将 `deploy/nginx-tmux-link.conf` 放入中心域名的 HTTPS `server` 块，替换已有的终端 location。执行 `nginx -t` 和 `systemctl reload nginx`。该虚拟主机会在 TLS 握手中请求客户端证书，终端路由要求证书和授权同时有效，同域的其他 HTTP 服务仍可接受无证书连接。公网仅暴露受保护的 WSS 入口；Rust center 的后端端口绑定在回环地址。
+
+丢失手机时，从授权文件移除该证书序列号的全部条目并校验、重载 nginx。撤权针对新连接，已升级的 WebSocket 可以继续运行。要立即断开现有的所有终端连接，执行 `systemctl restart tmux-link-center`；内网 tmux 会话继续运行，其余授权设备可以重连。也应撤销内网主机上该手机的 SSH 公钥。首次将旧公网入口切换为 mTLS 时同样可用这一操作结束切换前的连接。
 
 ## 内网 Linux
 
@@ -145,6 +177,7 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 |---|---|
 | 安装脚本 | 离线安装、角色选择、校验失败拒绝写入 |
 | HTTPS 下载集成 | 临时 TLS 服务执行真实 `curl &#124; sh`，验证默认客户端安装、升级和损坏包拒绝 |
+| mTLS 入口集成 | 临时 nginx 验证无证书、外部 CA、未授权设备和错路由被拒，授权设备升级 WebSocket，撤权后新连接被拒 |
 | tmux 集成 | 真实 Linux / OpenSSH 隧道，验证错误指纹、未授权密钥、分片输入、尺寸调整和断线重连 |
 | 输入协议 | 超大帧和未知帧被拒绝并断开连接 |
 | 发布包 | x86_64 和 ARM64 构建包安装后执行实际二进制 |
