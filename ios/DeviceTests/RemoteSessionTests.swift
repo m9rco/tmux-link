@@ -661,6 +661,16 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertFalse(terminal.shortcutBar.isHidden)
     XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
     let window = try XCTUnwrap(terminal.window)
+    if IslandHardware.supportedDevice && window.bounds.width < window.bounds.height {
+      let top = window.safeAreaInsets.top
+      // In portrait, the status button takes taps beside the island while typing.
+      // The cell immediately below the status area still belongs to the terminal.
+      let x = window.bounds.midX + 87
+      let statusHit = try XCTUnwrap(window.hitTest(CGPoint(x: x, y: top / 2), with: nil))
+      let terminalHit = try XCTUnwrap(window.hitTest(CGPoint(x: x, y: top + 8), with: nil))
+      XCTAssertFalse(statusHit.isDescendant(of: web))
+      XCTAssertTrue(terminalHit.isDescendant(of: web))
+    }
     let keys = terminal.typingKeyboard.surface
     let keyFrame = keys.convert(keys.bounds, to: window)
     let pixel = 1 / window.screen.scale
