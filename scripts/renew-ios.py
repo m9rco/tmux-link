@@ -18,6 +18,7 @@ STATE = BASE / "state.json"
 OS_ENV = dict(os.environ, DEVELOPER_DIR=os.environ.get("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer"))
 RUN = ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"]
 BUNDLE = "dev.tmuxlink.mobile"
+WIDGET_BUNDLE = BUNDLE + ".status"
 CHECK_INTERVAL = 300
 
 def run(*cmd, **kwargs):
@@ -27,6 +28,45 @@ def save_state(value):
     staged = STATE.with_suffix(".new")
     staged.write_text(json.dumps(value, indent=2) + "\n")
     os.replace(staged, STATE)
+
+def signed_expiration(app, device, now, require_widget):
+    run("codesign", "--verify", "--deep", "--strict", app)
+    team = None
+    expirations = {}
+    for bundle in [app, *sorted((app / "PlugIns").glob("*.appex"))]:
+        bundle_id = plistlib.loads((bundle / "Info.plist").read_bytes())["CFBundleIdentifier"]
+        if bundle == app and bundle_id != BUNDLE:
+            raise RuntimeError(f"Unexpected application identifier: {bundle_id}")
+        if bundle != app and not bundle_id.startswith(BUNDLE + "."):
+            raise RuntimeError(f"Unexpected extension identifier: {bundle_id}")
+        if bundle_id in expirations:
+            raise RuntimeError(f"Duplicate bundle identifier: {bundle_id}")
+        profile = plistlib.loads(run("security", "cms", "-D", "-i", bundle / "embedded.mobileprovision",
+                                     capture_output=True).stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "signer"
+            signature = run("codesign", "-d", "--entitlements", "-", "--xml",
+                            f"--extract-certificates={prefix}", bundle, capture_output=True)
+            entitlements = plistlib.loads(signature.stdout)
+            if (Path(tmp) / "signer0").read_bytes() not in profile["DeveloperCertificates"]:
+                raise RuntimeError(f"Signing certificate not authorized by profile: {bundle_id}")
+        signing_team = entitlements["com.apple.developer.team-identifier"]
+        if signing_team not in profile["TeamIdentifier"] or (team is not None and team != signing_team):
+            raise RuntimeError(f"Signing team mismatch: {bundle_id}")
+        team = signing_team
+        app_id = entitlements["application-identifier"]
+        allowed_ids = {prefix + "." + bundle_id for prefix in profile["ApplicationIdentifierPrefix"]}
+        pattern = profile["Entitlements"]["application-identifier"]
+        profile_matches = app_id == pattern or (pattern.endswith("*") and app_id.startswith(pattern[:-1]))
+        if app_id not in allowed_ids or not profile_matches:
+            raise RuntimeError(f"Profile does not authorize the signed application identifier: {bundle_id}")
+        expires = profile["ExpirationDate"].replace(tzinfo=dt.timezone.utc)
+        if expires <= now or device.lower() not in [d.lower() for d in profile.get("ProvisionedDevices", [])]:
+            raise RuntimeError(f"Expired profile or iPhone not covered: {bundle_id}")
+        expirations[bundle_id] = expires
+    if require_widget and WIDGET_BUNDLE not in expirations:
+        raise RuntimeError("Signed build is missing the terminal status widget")
+    return min(expirations.values())
 
 def refresh(device, source, force):
     now = dt.datetime.now(dt.timezone.utc)
@@ -45,22 +85,20 @@ def refresh(device, source, force):
         print("Paired iPhone unavailable; will retry at the next check")
         return
     derived = BASE / "build"
-    run("xcodebuild", "-project", source / "ios/TmuxLink.xcodeproj", "-scheme", "TmuxLink",
+    project = source / "ios/TmuxLink.xcodeproj"
+    run("xcodebuild", "-project", project, "-scheme", "TmuxLink",
         "-configuration", "Release", "-destination", "generic/platform=iOS", "-derivedDataPath", derived,
         "-allowProvisioningUpdates", "build", timeout=600)
     app = derived / "Build/Products/Release-iphoneos/TmuxLink.app"
-    run("codesign", "--verify", "--deep", "--strict", app)
-    profile = plistlib.loads(run("security", "cms", "-D", "-i", app / "embedded.mobileprovision", capture_output=True).stdout)
-    expires = profile["ExpirationDate"].replace(tzinfo=dt.timezone.utc)
-    if device.lower() not in [d.lower() for d in profile.get("ProvisionedDevices", [])] or expires <= now:
-        raise RuntimeError("Xcode profile is expired or does not cover this iPhone")
-    if previous:
-        current_expiration = dt.datetime.fromisoformat(previous)
-        if expires < current_expiration or (not force and expires == current_expiration):
-            print("Xcode did not extend the profile; will retry at the next check")
-            return
+    # Old pinned snapshots predate the widget and remain valid for their own builds.
+    require_widget = WIDGET_BUNDLE in (project / "project.pbxproj").read_text()
+    expires = signed_expiration(app, device, now, require_widget)
+    if not force and previous and expires <= dt.datetime.fromisoformat(previous):
+        print("Xcode did not extend the profile; will retry at the next check")
+        return
     run("xcrun", "devicectl", "device", "install", "app", "--device", device, "--timeout", "90", app)
-    save_state({"device":device, "expires":expires.isoformat(), "last_install":now.isoformat()})
+    state.update(device=device, expires=expires.isoformat(), last_install=now.isoformat())
+    save_state(state)
     print("Installed. Profile valid until", expires.isoformat())
 
 def setup(device):

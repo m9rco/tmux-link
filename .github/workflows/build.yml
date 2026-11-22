@@ -150,6 +150,8 @@ jobs:
           (cd target/ipa && zip -qry ../../dist/TmuxLink.ipa Payload)
           ditto -c -k --keepParent target/xcode/Build/Products/Release-iphoneos/TmuxLink.app dist/tmux-link-ios-unsigned.zip
           ditto -c -k --keepParent target/xcode/Build/Products/Release-iphonesimulator/TmuxLink.app dist/tmux-link-ios-simulator-arm64.zip
+      - name: Verify release IPA contents
+        run: python3 scripts/verify-ios-ipa.py dist/TmuxLink.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: ios

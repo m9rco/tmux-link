@@ -20,7 +20,7 @@ iPhone ── SSH over WSS ──► center.example.com:443/tmux-link
 
 首页保存多台客户端。点客户端读取该账号的会话，点名称进入终端，返回会话列表即可切换；后台的 tmux 会话继续运行。每台客户端独立配置入口、用户名与 SSH 指纹。长按客户端可编辑，左滑可删除。首次升级会载入之前保存的连接。旧版 agent 支持在会话列表中选择「打开兼容终端」。
 
-终端状态栏显示连接阶段、传输保护和 RTT。RTT 来自当前 SSH 会话上发到内网主机的探测，覆盖手机、中心和目标主机之间的往返。收到首个样本前显示占位符，探测超时或连接中断时更新状态。
+在支持灵动岛并允许实时活动的 iPhone 上，打开终端后，连接状态和往返延迟（RTT）会交给系统实时活动显示。长按灵动岛可展开查看，前台终端在原有快捷键栏中显示延迟，点按可查看连接详情。没有灵动岛或关闭实时活动时，状态显示在终端内。RTT 来自手机通过当前 SSH 会话发往内网主机的探测；手机尚未收到样本、探测超时、状态过期和会话断开各有对应提示。锁屏与灵动岛只展示连接信息，主机名、会话名和终端内容留在 App 内。
 
 终端底部的快捷键栏可以横向滑动，包含 Esc、Tab、Ctrl-C、Ctrl-B、四个方向键和回车。Esc 在收到首屏后启用，发送单字节 0x1B；在 vim 插入模式中可以直接回到普通模式。横竖屏或键盘高度变化会调整远端 PTY。
 
@@ -181,7 +181,7 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 | tmux 集成 | 真实 Linux / OpenSSH 隧道，验证错误指纹、未授权密钥、分片输入、尺寸调整和断线重连 |
 | 输入协议 | 超大帧和未知帧被拒绝并断开连接 |
 | 发布包 | x86_64 和 ARM64 构建包安装后执行实际二进制 |
-| iOS | 设备与 ARM64 模拟器的未签名 App 构建 |
+| iOS | 设备与 ARM64 模拟器构建，检查设备 IPA 内嵌的实时活动扩展及其版本 |
 
 输入缓冲区在同一连接中复用，减少连续按键和粘贴时的重复分配。SSH 即使遇到输入协议错误也会发起断开，关闭等待上限为 5 秒。
 
@@ -209,6 +209,6 @@ scripts/renew-ios.py install YOUR_DEVICE_UDID
 scripts/renew-ios.py status
 ```
 
-安装命令会保存当前 iOS 源码和已编译的 Rust 库快照，签名并覆盖安装 Release 版，保留原 Bundle ID 和 Keychain。首次用 USB 在 Xcode 配对后，保持 Mac 已登录且未休眠。iPhone 与 Mac 接入能互相访问的同一局域网时，Xcode 可通过 Wi-Fi 安装。launchd 每五分钟检查一次，到期前三天开始探测已配对的 iPhone，连通后请求 Xcode 更新描述文件。如果设备离线或 Apple 暂未延长有效期，任务会在下次检查时重试。只有安装成功才记录新有效期。更新项目后重新运行安装命令以替换快照。日志在 `~/Library/Application Support/TmuxLink/Renewal/refresh.log`。运行 `scripts/renew-ios.py uninstall` 可停用任务。
+安装命令会保存当前 iOS 源码和已编译的 Rust 库快照，签名并覆盖安装 Release 版，保留原 Bundle ID 和 Keychain。首次用 USB 在 Xcode 配对后，保持 Mac 已登录且未休眠。iPhone 与 Mac 接入能互相访问的同一局域网时，Xcode 可通过 Wi-Fi 安装。launchd 每五分钟检查一次，按主 App 和实时活动扩展两份描述文件中较早的到期时间，提前三天开始探测已配对的 iPhone，连通后请求 Xcode 更新描述文件。如果设备离线或 Apple 暂未延长有效期，任务会在下次检查时重试。只有安装成功才记录新有效期。更新项目后重新运行安装命令以替换快照。日志在 `~/Library/Application Support/TmuxLink/Renewal/refresh.log`。运行 `scripts/renew-ios.py uninstall` 可停用任务。
 
 使用手机端 SideStore 时，从 Release 下载 `TmuxLink.ipa`，按 [SideStore 官方安装指南](https://docs.sidestore.io/docs/installation/install.html) 配置，在 My Apps 导入 IPA 并刷新。SideStore 刷新需要 Wi-Fi 和 LocalDevVPN。建议同一安装只选一种签名管理方式。免费个人团队描述文件的有效期为七天，见 [Apple 开发者账户说明](https://developer.apple.com/help/account/basics/about-your-developer-account/)。

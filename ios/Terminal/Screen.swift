@@ -9,6 +9,13 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let heading: String
   private let status = UILabel()
   private let latency = UILabel()
+  private let statusBar = UIStackView()
+  private let compactStatus = UIButton(type: .system)
+  private var island: IslandReporting?
+  private var activityState = TerminalActivityState()
+  private var backgrounded = false
+  private var expiry: Timer?
+  private var completed = false
   private let transportBadge = UILabel()
   private let keys = UIStackView()
   private let input = DispatchQueue(label: "dev.tmuxlink.terminal-input")
@@ -49,7 +56,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     latency.accessibilityIdentifier = "terminal.latency"
     transportBadge.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
     transportBadge.textColor = .secondaryLabel
-    let bar = UIStackView(arrangedSubviews: [status, transportBadge, latency])
+    let bar = statusBar
+    [status, transportBadge, latency].forEach(bar.addArrangedSubview)
     bar.alignment = .center
     bar.spacing = 10
     bar.isLayoutMarginsRelativeArrangement = true
@@ -79,7 +87,18 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     scroll.addSubview(keys)
     keys.translatesAutoresizingMaskIntoConstraints = false
-    let stack = UIStackView(arrangedSubviews: [bar, web, scroll])
+    compactStatus.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+    compactStatus.accessibilityIdentifier = "terminal.status.details"
+    compactStatus.isHidden = true
+    compactStatus.setContentHuggingPriority(.required, for: .horizontal)
+    compactStatus.setContentCompressionResistancePriority(.required, for: .horizontal)
+    let minimumStatusWidth = compactStatus.widthAnchor.constraint(greaterThanOrEqualToConstant: 44)
+    minimumStatusWidth.priority = .defaultHigh
+    minimumStatusWidth.isActive = true
+    compactStatus.addAction(UIAction { [weak self] _ in self?.showStatus() }, for: .touchUpInside)
+    let controls = UIStackView(arrangedSubviews: [scroll, compactStatus])
+    controls.spacing = 6
+    let stack = UIStackView(arrangedSubviews: [bar, web, controls])
     stack.axis = .vertical
     stack.spacing = 4
     view.addSubview(stack)
@@ -99,7 +118,94 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     ])
     let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
     web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(pauseStatus),
+      name: UIApplication.didEnterBackgroundNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(resumeStatus),
+      name: UIApplication.didBecomeActiveNotification, object: nil)
   }
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    startIslandIfAvailable()
+  }
+
+  private func startIslandIfAvailable() {
+    guard #available(iOS 16.1, *), island == nil, active, !completed, viewIfLoaded?.window != nil
+    else { return }
+    island = TerminalIsland(activityState) { [weak self] shown in
+      self?.statusBar.isHidden = shown
+      self?.compactStatus.isHidden = !shown
+      self?.renderStatus()
+    }
+  }
+
+  private func renderStatus() {
+    guard active, !completed else { return }
+    let state = activityState.display(at: Date())
+    if state.phase == .paused {
+      status.text = "◌  等待更新"
+      latency.text = "RTT —"
+      latency.accessibilityLabel = "等待新的延迟测量"
+      latency.textColor = .secondaryLabel
+    } else {
+      status.text = (state.phase == .ready ? "●  " : "◌  ") + state.phase.title
+      if state.phase == .ready {
+        latency.text = "RTT " + state.latencyText
+        latency.textColor = state.timedOut ? .systemOrange : .secondaryLabel
+        if state.timedOut {
+          latency.accessibilityLabel = "会话延迟测量超时"
+        } else if let ms = state.milliseconds {
+          latency.accessibilityLabel = "会话往返延迟 " + String(ms) + " 毫秒"
+        } else {
+          latency.accessibilityLabel = "正在测量会话往返延迟"
+        }
+      }
+    }
+    let text = state.phase == .ready ? state.latencyText : state.phase.title
+    let glyph = state.phase == .ready && !state.timedOut ? "●" : "◌"
+    compactStatus.setTitle(glyph + " " + text, for: .normal)
+    compactStatus.tintColor = state.phase == .ready && !state.timedOut ? .systemMint : .systemOrange
+    compactStatus.accessibilityLabel = [state.phase.title, latency.accessibilityLabel, "连接详情"]
+      .compactMap { $0 }.joined(separator: "，")
+  }
+
+  private func showStatus() {
+    guard presentedViewController == nil else { return }
+    let detail = [status.text, transportBadge.text, latency.text].compactMap { $0 }.joined(
+      separator: "\n")
+    let alert = UIAlertController(title: "连接状态", message: detail, preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: "好", style: .default))
+    present(alert, animated: true)
+  }
+
+  private func refreshStatus(immediately: Bool = false) {
+    renderStatus()
+    expiry?.invalidate()
+    let remaining = activityState.staleDate.timeIntervalSinceNow
+    if remaining > 0 && !backgrounded {
+      expiry = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
+        self?.renderStatus()
+      }
+    }
+    if #unavailable(iOS 16.2) { activityState.historical = backgrounded }
+    island?.publish(activityState, immediately: immediately || backgrounded)
+  }
+
+  @objc private func pauseStatus() {
+    guard active, !completed else { return }
+    backgrounded = true
+    // Flush any coalesced reading with its original deadline before suspension.
+    refreshStatus(immediately: true)
+  }
+
+  @objc private func resumeStatus() {
+    guard active, !completed else { return }
+    backgrounded = false
+    refreshStatus(immediately: true)
+    startIslandIfAvailable()
+  }
+
   func webView(
     _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
@@ -145,13 +251,15 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         while let (kind, payload) = try Self.readFrame(from: stream) {
           if kind == 1 {
             let stage = String(decoding: payload, as: UTF8.self)
+            let observedAt = Date()
             DispatchQueue.main.async {
-              self?.stage(stage, hasIdentity: hasIdentity)
+              self?.stage(stage, hasIdentity: hasIdentity, observedAt: observedAt)
             }
           } else if kind == 2 {
             guard payload.count == 4 else { throw RelayError("延迟数据格式错误") }
             let ms = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            DispatchQueue.main.async { self?.updateLatency(ms) }
+            let observedAt = Date()
+            DispatchQueue.main.async { self?.updateLatency(ms, observedAt: observedAt) }
           } else if kind == 0 {
             let rendered = DispatchSemaphore(value: 0)
             let bytes = payload.base64EncodedString()
@@ -199,30 +307,27 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     return (header[0], payload)
   }
 
-  private func stage(_ stage: String, hasIdentity: Bool) {
+  private func stage(_ stage: String, hasIdentity: Bool, observedAt: Date) {
     guard active, fd >= 0 else { return }
-    switch stage {
-    case "connecting": status.text = "◌  连接中转"
-    case "ssh": status.text = "◌  校验 SSH 主机"
-    case "auth": status.text = "◌  验证 SSH 身份"
-    case "attaching": status.text = "◌  接入 tmux"
-    case "ready":
+    guard let phase = TerminalActivityState.Phase(rawValue: stage) else { return }
+    activityState.phase = phase
+    activityState.mtls = hasIdentity
+    activityState.observedAt = observedAt
+    if phase == .ready {
       ready = true
       keys.isUserInteractionEnabled = true
       keys.alpha = 1
-      status.text = "●  已连接"
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
-      latency.text = "RTT —"
-      latency.accessibilityLabel = "正在测量会话往返延迟"
-    default: break
     }
+    refreshStatus()
   }
 
-  private func updateLatency(_ ms: UInt32) {
+  private func updateLatency(_ ms: UInt32, observedAt: Date) {
     guard active, ready else { return }
-    latency.text = ms == .max ? "RTT 超时" : "RTT \(ms) ms"
-    latency.textColor = ms == .max ? .systemOrange : .secondaryLabel
-    latency.accessibilityLabel = ms == .max ? "会话延迟测量超时" : "会话往返延迟 \(ms) 毫秒"
+    activityState.observedAt = observedAt
+    activityState.milliseconds = ms == .max ? nil : ms
+    activityState.timedOut = ms == .max
+    refreshStatus()
   }
 
   func userContentController(
@@ -287,7 +392,11 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
   }
   private func finish(_ message: String) {
-    guard active else { return }
+    guard active, !completed else { return }
+    completed = true
+    expiry?.invalidate()
+    island?.end()
+    island = nil
     status.textColor = .systemOrange
     status.text = "○  " + message
     latency.text = nil
@@ -319,6 +428,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   @objc private func escapeKey() { press("\u{1b}") }
   func stop() {
     active = false
+    expiry?.invalidate()
+    island?.end()
+    island = nil
+    NotificationCenter.default.removeObserver(self)
     disconnect()
     web?.configuration.userContentController.removeScriptMessageHandler(forName: "terminal")
   }

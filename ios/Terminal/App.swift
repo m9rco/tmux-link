@@ -7,6 +7,7 @@ final class App: UIResponder, UIApplicationDelegate {
     _ app: UIApplication,
     didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    if #available(iOS 16.1, *) { TerminalIsland.clearPreviousLaunch() }
     #if DEBUG
       // Development pairing exports only the public key; the private seed stays in Keychain.
       do {

@@ -1,3 +1,4 @@
+import ActivityKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -117,6 +118,32 @@ final class RemoteSessionTests: XCTestCase {
     XCTFail("Expected remote output did not arrive.")
   }
 
+  func testIslandRoutingAndPrivateActivityPayload() throws {
+    for model in ["iPhone15,2", "iPhone18,1", "iPhone19,2"] {
+      XCTAssertTrue(IslandHardware.supported(model))
+    }
+    for model in ["iPhone14,7", "iPhone17,5", "iPad14,3", "unknown"] {
+      XCTAssertFalse(IslandHardware.supported(model))
+    }
+    let measured = Date(timeIntervalSince1970: 123456)
+    let online = TerminalActivityState(
+      phase: .ready, mtls: true, milliseconds: 24, observedAt: measured)
+    let object = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode(online)) as? [String: Any])
+    XCTAssertEqual(
+      Set(object.keys),
+      Set(["phase", "mtls", "milliseconds", "timedOut", "observedAt", "historical"]))
+    XCTAssertEqual(online.latencyText, "24 ms")
+    XCTAssertEqual(online.display(at: measured.addingTimeInterval(29)).phase, .ready)
+    let stale = online.display(at: measured.addingTimeInterval(30))
+    XCTAssertEqual(stale.phase, .paused)
+    XCTAssertEqual(stale.sampleText, "上次 24 ms")
+    XCTAssertEqual(stale.observedAt, measured)
+    XCTAssertEqual(online.display(at: measured, systemStale: true).phase, .paused)
+    XCTAssertEqual(TerminalActivityState(phase: .paused).latencyText, "—")
+    XCTAssertEqual(TerminalActivityState(phase: .ready, timedOut: true).latencyText, "超时")
+  }
+
   func testRequiredCertificateAndProfileBinding() throws {
     var client = ClientProfile(
       name: "Test", host: "example.invalid", user: "tester", pin: "SHA256:test")
@@ -228,6 +255,21 @@ final class RemoteSessionTests: XCTestCase {
           try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTAssertTrue(latency.text?.contains(" ms") == true, "Expected a live SSH round trip")
+        let details = try XCTUnwrap(
+          descendants(screen.view).first {
+            $0.accessibilityIdentifier == "terminal.status.details"
+          } as? UIButton)
+        if let activity = Activity<TerminalActivity>.activities.first(where: {
+          $0.activityState == .active
+        }) {
+          XCTAssertFalse(details.isHidden)
+          XCTAssertTrue(connection.superview?.isHidden == true)
+          XCTAssertTrue(details.currentTitle?.contains(" ms") == true)
+          XCTAssertTrue(activity.content.state.phase == .ready)
+        } else {
+          XCTAssertTrue(details.isHidden)
+          XCTAssertFalse(connection.superview?.isHidden == true)
+        }
       }
       func type(_ command: String) async throws {
         let _: Any? = try await web.callAsyncJavaScript(
