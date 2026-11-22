@@ -709,6 +709,8 @@ final class RemoteSessionTests: XCTestCase {
     }
     let sessions = try await SessionDirectory.fetch(client)
     let root = try XCTUnwrap(rootController)
+    let window = try XCTUnwrap(root.view.window)
+    defer { window.rootViewController = root }
     let suffixes = config.hasHistoryFixture == true ? ["-messages", "-other", ""] : ["-other", ""]
     for suffix in suffixes {
       let selected = try XCTUnwrap(sessions.first { $0.name == config.sessionName + suffix })
@@ -717,9 +719,9 @@ final class RemoteSessionTests: XCTestCase {
       let host = UIHostingController(rootView: NavigationStack {
         TerminalView(client: client, session: selected, status: status)
       })
-      host.modalPresentationStyle = .fullScreen
-      root.present(host, animated: false)
-      defer { host.dismiss(animated: false) }
+      // Match the app's root NavigationStack without racing a previous modal dismissal.
+      window.rootViewController = host
+      host.view.layoutIfNeeded()
       for _ in 0..<50 {
         if descendants(host.view).contains(where: { $0 is WKWebView }) { break }
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -801,7 +803,6 @@ final class RemoteSessionTests: XCTestCase {
         XCTAssertNotNil(descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.leave" })
         let viewport = try XCTUnwrap(web.superview)
         let terminalFrame = viewport.convert(viewport.bounds, to: host.view)
-        let window = try XCTUnwrap(host.view.window)
         let display = host.view.convert(window.bounds, from: window)
         let measurement = try await web.evaluateJavaScript("""
           (() => {
