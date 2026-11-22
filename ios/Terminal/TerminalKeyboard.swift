@@ -37,16 +37,12 @@ private final class KeyboardSurface: WKWebView {
 }
 
 private final class TypingBridge: NSObject, WKScriptMessageHandler {
-  static let languagePreference = "terminal.typing.language"
   var onText: ((String) -> Void)?
 
   func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-    guard message.frameInfo.isMainFrame, let body = message.body as? [String: String] else { return }
-    if let language = body["language"], ["en", "zh"].contains(language) {
-      UserDefaults.standard.set(language, forKey: Self.languagePreference)
-    } else if let text = body["text"], !text.isEmpty, text.utf8.count <= 512 {
-      onText?(text)
-    }
+    guard message.frameInfo.isMainFrame, let body = message.body as? [String: String],
+          let text = body["text"], !text.isEmpty, text.utf8.count <= 512 else { return }
+    onText?(text)
   }
 }
 
@@ -63,10 +59,6 @@ final class TerminalTypingKeyboard: UIView {
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
     config.userContentController.add(bridge, name: "typingKeyboard")
-    let chinese = UserDefaults.standard.string(forKey: TypingBridge.languagePreference) == "zh"
-    config.userContentController.addUserScript(WKUserScript(
-      source: chinese ? "window.initialLanguage = 'zh'" : "window.initialLanguage = 'en'",
-      injectionTime: .atDocumentStart, forMainFrameOnly: true))
     surface = KeyboardSurface(frame: .zero, configuration: config)
     super.init(frame: .zero)
     panelHeight = heightAnchor.constraint(equalToConstant: preferredHeight)
@@ -85,7 +77,7 @@ final class TerminalTypingKeyboard: UIView {
       surface.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
       surface.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
       surface.topAnchor.constraint(equalTo: topAnchor),
-      surface.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor)
+      surface.bottomAnchor.constraint(equalTo: bottomAnchor)
     ])
     let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets/keyboard")!
     surface.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())

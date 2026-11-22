@@ -528,6 +528,8 @@ final class RemoteSessionTests: XCTestCase {
   func testOfflineEnglishAndPinyinKeyboard() async throws {
     let saved = UserDefaults.standard.string(forKey: "terminal.typing.language")
     defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
+    // An installation upgraded from a release that remembered Chinese must also start in English.
+    UserDefaults.standard.set("zh", forKey: "terminal.typing.language")
     let board = TerminalTypingKeyboard()
     let page = board.surface
     var committed: [String] = []
@@ -537,7 +539,7 @@ final class RemoteSessionTests: XCTestCase {
       try await Task.sleep(nanoseconds: 50_000_000)
     }
     let script = #"""
-      language='en'; resetComposition();
+      const initialSpace = keyboard.getButtonElement('{space}').textContent;
       const key = k => keyboard.handleButtonClicked(k);
       key('a'); key('{shift}'); key('B'); key('{symbols}'); key('7'); key('{symbols}');
       key('{lang}');
@@ -551,18 +553,16 @@ final class RemoteSessionTests: XCTestCase {
       const disambiguated = options[0].text;
       key('{bksp}'); handleShortcut('\x1b');
       key('n'); key('i'); key('{enter}'); key('{enter}'); key('{bksp}');
-      return [phrase, disambiguated, pending, keyboard.getInput()];
+      return [initialSpace, phrase, disambiguated, pending, keyboard.getInput()];
       """#
     let result = try await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
-    XCTAssertEqual(result, ["你好世界", "西安", "", ""])
+    XCTAssertEqual(result, ["space", "你好世界", "西安", "", ""])
     for _ in 0..<30 where committed.count < 8 { try await Task.sleep(nanoseconds: 20_000_000) }
     XCTAssertEqual(committed, ["a", "B", "7", "你好世界", "师姐", "你", "\r", "\u{7f}"])
   }
 
   @MainActor
   func testMixedPinyinDraftEditing() async throws {
-    let saved = UserDefaults.standard.string(forKey: "terminal.typing.language")
-    defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
     let board = TerminalTypingKeyboard()
     var committed = ""
     board.onText = { committed += $0 }
@@ -571,8 +571,8 @@ final class RemoteSessionTests: XCTestCase {
       try await Task.sleep(nanoseconds: 50_000_000)
     }
     let script = #"""
-      language = 'zh'; resetComposition();
       const key = k => keyboard.handleButtonClicked(k);
+      key('{lang}');
       const type = s => { for (const c of s) key(c); };
       const snapshots = [];
       type("nihao'shijie");
@@ -663,7 +663,17 @@ final class RemoteSessionTests: XCTestCase {
     let window = try XCTUnwrap(terminal.window)
     let keys = terminal.typingKeyboard.surface
     let keyFrame = keys.convert(keys.bounds, to: window)
-    XCTAssertLessThanOrEqual(keyFrame.maxY, window.safeAreaLayoutGuide.layoutFrame.maxY + 1)
+    let pixel = 1 / window.screen.scale
+    XCTAssertEqual(keyFrame.maxY, window.bounds.maxY, accuracy: pixel)
+    let bottomEdges = try await keys.evaluateJavaScript("""
+      ['{lang}', '{space}', '{enter}'].map(k => keyboard.getButtonElement(k).getBoundingClientRect().bottom)
+      """) as? [Double]
+    let edges = try XCTUnwrap(bottomEdges)
+    XCTAssertEqual(edges.count, 3)
+    for edge in edges {
+      let point = keys.convert(CGPoint(x: keys.bounds.midX, y: CGFloat(edge)), to: window)
+      XCTAssertEqual(point.y, window.bounds.maxY, accuracy: pixel)
+    }
     let viewport = try XCTUnwrap(web.superview)
     XCTAssertEqual(viewport.convert(viewport.bounds, to: window).maxY,
                    terminal.shortcutBar.convert(terminal.shortcutBar.bounds, to: window).minY, accuracy: 1)
@@ -955,8 +965,6 @@ final class RemoteSessionTests: XCTestCase {
         try await waitFor("__IME_READY__")
         let terminal = try XCTUnwrap(web as? TerminalWebView)
         let board = terminal.typingKeyboard.surface
-        let preference = UserDefaults.standard.string(forKey: "terminal.typing.language")
-        defer { UserDefaults.standard.set(preference, forKey: "terminal.typing.language") }
         func showKeyboard() async throws {
           _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
           for _ in 0..<50 where terminal.typingKeyboard.isHidden {
@@ -966,19 +974,18 @@ final class RemoteSessionTests: XCTestCase {
         }
         try await showKeyboard()
         _ = try await board.evaluateJavaScript("""
-          language = 'en'; resetComposition();
           window.tapKey = k => keyboard.handleButtonClicked(k);
           tapKey('x'); tapKey('{lang}');
           for (const c of 'nihaoz') tapKey(c);
-          tapKey('{bksp}'); tapKey('{lang}'); true
+          tapKey('{bksp}'); true
           """)
         bar.hideKeyboard?()
         XCTAssertTrue(terminal.typingKeyboard.isHidden)
         try await showKeyboard()
-        let resumed = try await board.evaluateJavaScript("spelling.textContent") as? String
-        XCTAssertEqual(resumed, "nihao")
+        let resumed = try await board.evaluateJavaScript("[language, spelling.textContent]") as? [String]
+        XCTAssertEqual(resumed, ["zh", "nihao"])
         let didRepeat = try await board.callAsyncJavaScript(#"""
-          tapKey('{lang}'); document.querySelector('#candidates button').click();
+          document.querySelector('#candidates button').click();
           for (const c of 'git') tapKey(c);
           tapKey('{lang}'); tapKey('{space}'); tapKey('{lang}');
           tapKey('n'); tapKey('i');

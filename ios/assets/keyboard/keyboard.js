@@ -7,7 +7,7 @@ const bottom = '{lang} {symbols} , {space} . {enter}';
 const symbols = ['1 2 3 4 5 6 7 8 9 0', '- / : ; ( ) $ & @ "', "{more} . , ? ! ' _ = {bksp}"];
 const more = ['[ ] {braceL} {braceR} # % ^ * + =', '~ ` | \\ < > € £ ¥ •', '{more} - / : ; ! ? @ {bksp}'];
 const shortcuts = {en: ['/','-','_','|','~','`','=','[',']'], zh: ['，','。','？','！','、','：','“','”',"'"]};
-let language = window.initialLanguage === 'zh' ? 'zh' : 'en', page = 'letters', shifted = false, pending = '';
+let language = 'en', page = 'letters', shifted = false, pending = '';
 let options = [], shown = 0;
 
 // A partial choice stays editable until the rest of the spelling is confirmed.
@@ -129,7 +129,6 @@ function handleKey(key, event) {
     language = language === 'en' ? 'zh' : 'en';
     page = 'letters'; shifted = false;
     updateLayout(); refreshChoices();
-    bridge.postMessage({language});
     return;
   case '{shift}': shifted = !shifted; updateLayout(); return;
   case '{symbols}': page = page === 'letters' ? 'symbols' : 'letters'; updateLayout(); return;

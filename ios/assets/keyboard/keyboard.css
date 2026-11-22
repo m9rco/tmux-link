@@ -1,7 +1,7 @@
 :root { color-scheme: dark; font-family: -apple-system, sans-serif; }
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0a141a; }
-body { display: flex; flex-direction: column; padding: 0 3px 3px; -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none; }
+body { display: flex; flex-direction: column; padding: 0 3px; -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none; }
 button { appearance: none; border: 0; color: #e4ecef; font: inherit; touch-action: manipulation; }
 #choices { display: flex; align-items: center; height: 30px; flex: none; border-top: 1px solid #25343b; }
 #spelling { max-width: 34%; overflow: hidden; white-space: nowrap; background: transparent; padding: 0 6px; color: #7de5c8; font: 13px ui-monospace, monospace; }
