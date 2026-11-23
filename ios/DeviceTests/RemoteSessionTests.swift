@@ -1055,7 +1055,10 @@ final class RemoteSessionTests: XCTestCase {
     let previous = window.rootViewController
     defer { window.rootViewController = previous }
     let open = ProcessInfo.processInfo.systemUptime
-    let host = UIHostingController(rootView: NavigationStack { TerminalView(client: client, session: session) })
+    let status = TerminalNavigationStatus()
+    let host = UIHostingController(rootView: NavigationStack {
+      TerminalView(client: client, session: session, status: status)
+    })
     window.rootViewController = host
     host.view.layoutIfNeeded()
     let until = open + 30
@@ -1073,7 +1076,8 @@ final class RemoteSessionTests: XCTestCase {
 
     let first = receipt.expect("TL-READY")
     // Listen on xterm's renderer in the actual app view. Only test markers leave JS.
-    while (try? await web.evaluateJavaScript("typeof term === 'object'")) as? Bool != true {
+    // WebKit exposes the #term DOM element by name before the terminal scripts finish loading.
+    while (try? await web.evaluateJavaScript("typeof window.display === 'function' && typeof term.onRender === 'function'")) as? Bool != true {
       guard ProcessInfo.processInfo.systemUptime < until else { return XCTFail("Terminal page did not load") }
       try await Task.sleep(for: .milliseconds(10))
     }
@@ -1121,7 +1125,10 @@ final class RemoteSessionTests: XCTestCase {
       }
     }
     guard await XCTWaiter.fulfillment(of: [first], timeout: max(0.1, until - ProcessInfo.processInfo.systemUptime)) == .completed
-    else { timeouts += 1; return XCTFail("Cold-open remote marker timed out") }
+    else {
+      timeouts += 1
+      return XCTFail("Cold-open remote marker timed out; phase = \(status.reading?.phase.rawValue ?? "unavailable")")
+    }
     coldMs = (receipt.arrival - open) * 1000
     phase = "warmup"
     let board = web.typingKeyboard.surface
