@@ -50,27 +50,23 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   let name: String
   var touchPaging: Bool? = nil
   var directory: String? = nil
+  var snapshot: Bool? = nil
 }
 
 enum SessionDirectory {
   static func fetch(_ client: ClientProfile) async throws -> [RemoteSession] {
-    try await Task.detached(priority: .userInitiated) {
-      let connection = try TerminalTransport(client)
-      var pair: [Int32] = [-1, -1]
-      guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
-        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-      }
-      let reader = FileHandle(fileDescriptor: pair[0], closeOnDealloc: true)
-      let worker = pair[1]
-      let transport = Task.detached { () -> String? in
-        connection.run(worker, target: -2)
-      }
-      let data = try reader.readToEnd() ?? Data()
-      if let message = await transport.value {
-        throw NSError(domain: "SSH", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-      }
-      return try JSONDecoder().decode([RemoteSession].self, from: data)
-    }.value
+    try await TerminalTransport.list(client)
+  }
+
+  static func snapshot(_ candidate: RemoteSession, client: ClientProfile) async throws -> DecisionSnapshot {
+    guard candidate.snapshot == true else {
+      throw RelayError("请升级这台机器的 agent 以批量读取。也可进入会话，在右侧快捷栏点「决策」。")
+    }
+    let pane = try await TerminalTransport.snapshot(client, sessionID: candidate.id)
+    guard pane.id == candidate.id, pane.name == candidate.name else {
+      throw RelayError("会话已更名或关闭，请刷新列表。")
+    }
+    return DecisionSnapshot(id: pane.id, name: pane.name, text: pane.text, context: pane.context)
   }
 }
 
@@ -431,7 +427,7 @@ private struct Sessions: View {
     List {
       Section {
         Button { showingAdvisor = true } label: {
-          Label("会话助手", systemImage: "sparkles")
+          Label("查看待答问题", systemImage: "bubble.left.and.text.bubble.right")
         }
         .accessibilityIdentifier("sessions.advisor")
       }.listRowBackground(panel)
@@ -484,7 +480,9 @@ private struct Sessions: View {
           self.pendingSelection = nil
         }
       }) {
-        SessionAdvisorView(sessions: sessions, notice: advisorNotice, open: openFromAdvisor)
+        SessionAdvisorView(
+          sessions: sessions, notice: advisorNotice,
+          capture: { try await SessionDirectory.snapshot($0, client: client) }, open: openFromAdvisor)
           .preferredColorScheme(.dark).tint(mint)
       }
       .navigationDestination(isPresented: Binding(

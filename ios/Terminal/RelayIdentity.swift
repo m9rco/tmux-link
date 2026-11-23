@@ -164,6 +164,13 @@ enum RelayIdentity {
   }
 }
 
+struct PaneSnapshot: Decodable {
+  let id: Int64
+  let name: String
+  let text: String
+  let context: String?
+}
+
 struct TerminalTransport {
   let endpoint: String
   let port: UInt16
@@ -196,6 +203,56 @@ struct TerminalTransport {
     } else {
       endpoint = client.endpoint
     }
+  }
+
+  static func list(_ client: ClientProfile) async throws -> [RemoteSession] {
+    let data = try await read(client, target: -2)
+    return try JSONDecoder().decode([RemoteSession].self, from: data)
+  }
+
+  static func snapshot(_ client: ClientProfile, sessionID: Int64) async throws -> PaneSnapshot {
+    let (target, overflow) = Int64(-3).subtractingReportingOverflow(sessionID)
+    guard sessionID >= 0, !overflow else { throw RelayError("无效的会话编号") }
+    let data = try await read(client, target: target)
+    guard let pane = try? JSONDecoder().decode(PaneSnapshot.self, from: data),
+      pane.id == sessionID, pane.text.utf8.count <= 6000,
+      pane.text.split(separator: "\n", omittingEmptySubsequences: false).count <= 40,
+      (pane.context?.utf8.count ?? 0) <= 16 * 1024,
+      (pane.context?.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0) <= 120
+    else { throw RelayError("窗格快照与所选会话不符或格式无效，请刷新后重试。") }
+    return pane
+  }
+
+  private static func read(_ client: ClientProfile, target: Int64) async throws -> Data {
+    let connection = try TerminalTransport(client)
+    var pair: [Int32] = [-1, -1]
+    guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    let reader = FileHandle(fileDescriptor: pair[0], closeOnDealloc: true)
+    let worker = pair[1]
+    // Both the FFI call and file read block. Drain concurrently outside the
+    // cooperative executor, including on devices with a small thread pool.
+    async let message: String? = withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .userInitiated).async {
+        continuation.resume(returning: connection.run(worker, target: target))
+      }
+    }
+    let data: Data = try await withCheckedThrowingContinuation { continuation in
+      DispatchQueue.global(qos: .userInitiated).async {
+        defer { try? reader.close() }
+        continuation.resume(with: Result { try reader.readToEnd() ?? Data() })
+      }
+    }
+    if let error = await message {
+      switch error {
+      case "snapshot unsupported": throw RelayError("远端代理不支持读取窗格，请更新 tmux-link-agent。")
+      case "snapshot pane in mode": throw RelayError("请先退出 tmux 的复制或选择模式，再读取当前窗格。")
+      case "snapshot unavailable": throw RelayError("无法读取所选窗格，会话可能已经关闭或切换。")
+      default: throw RelayError(error)
+      }
+    }
+    return data
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SwiftUI
 import UIKit
 import WebKit
 
@@ -196,7 +197,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
     ])
-    shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave) { [weak self] key in self?.press(key) }
+    shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave,
+                               review: { [weak self] in self?.reviewDecisions() }) { [weak self] key in self?.press(key) }
     if leave != nil {
       let edge = UISwipeGestureRecognizer(target: self, action: #selector(leaveSession))
       edge.direction = .right
@@ -218,6 +220,25 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       self, selector: #selector(resumeStatus),
       name: UIApplication.didBecomeActiveNotification, object: nil)
   }
+  private func reviewDecisions() {
+    guard active, ready, presentedViewController == nil else { return }
+    web.evaluateJavaScript("decisionScreen()") { [weak self] value, error in
+      guard let self, self.active, self.ready, self.view.window != nil,
+            self.presentedViewController == nil else { return }
+      guard error == nil, let lines = value as? [String: String], let text = lines["text"] else {
+        let alert = UIAlertController(title: "无法读取当前画面", message: "请稍后重新打开决策助手。", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "好", style: .default))
+        self.present(alert, animated: true)
+        return
+      }
+      // Legacy interactive connections have one visible terminal, without a numeric session ID.
+      let snapshot = DecisionSnapshot(id: max(0, self.target), name: self.heading,
+                                      text: text, context: lines["context"])
+      let review = DecisionReviewView(snapshot: snapshot) { [weak self] in self?.dismiss(animated: true) }
+      self.present(UIHostingController(rootView: review.preferredColorScheme(.dark)), animated: true)
+    }
+  }
+
   private func setKeyboardVisible(_ visible: Bool) {
     guard web.typingKeyboard.isHidden == visible else { return }
     UIView.performWithoutAnimation {

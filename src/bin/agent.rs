@@ -10,6 +10,9 @@ use std::{
 #[path = "agent/import_link.rs"]
 mod import_link;
 
+#[path = "agent/snapshot.rs"]
+mod snapshot;
+
 #[cfg(all(feature = "tls", feature = "ssh-probe"))]
 #[path = "agent/pair.rs"]
 mod pair;
@@ -58,6 +61,17 @@ fn attach() -> Result<()> {
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-page ")) {
         return page(request);
     }
+    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-snapshot ")) {
+        ensure!(
+            !request.is_empty() && request.bytes().all(|b| b.is_ascii_digit()),
+            "invalid snapshot ID"
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&snapshot::read(request.parse()?)?)?
+        );
+        return Ok(());
+    }
     if let Some(id) = command.and_then(|c| c.strip_prefix("tmux-link-attach ")) {
         let id: u64 = id.parse()?;
         return Err(Command::new("tmux")
@@ -102,7 +116,7 @@ fn attach() -> Result<()> {
                 let directory = path.status.success().then(|| {
                     String::from_utf8_lossy(&path.stdout).trim_end_matches('\n').to_owned()
                 });
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory}))
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory, "snapshot": true}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);

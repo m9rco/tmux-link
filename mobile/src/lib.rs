@@ -374,6 +374,7 @@ pub unsafe extern "C" fn tl_connect(
 /// # Safety
 /// Same ownership and pointer requirements as tl_connect. -1 opens the legacy picker,
 /// -2 lists sessions, and a nonnegative number attaches to that exact tmux session ID.
+/// Values <= -3 read a snapshot for ID (-3 - target), in 0..=i64::MAX-2.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tl_open(
     fd: i32,
@@ -478,7 +479,7 @@ unsafe fn open_inner(
                 let (read, writer) = UnixStream::from_std(socket)?.into_split();
                 let mut output = Output {
                     writer,
-                    framed: credentials.is_some() && target != -2,
+                    framed: credentials.is_some() && target >= -1,
                 };
                 let peer = Peer {
                     host,
@@ -488,28 +489,59 @@ unsafe fn open_inner(
                     key: PrivateKey::from(key),
                     identity,
                 };
-                ensure!(target >= -2, "invalid session");
                 let key = (target != -1).then(|| handoff::PeerKey::from(&peer));
                 let connection = handoff::open_channel(&peer, key.as_ref(), &mut output).await?;
-                if target == -2 {
+                if target <= -2 {
                     let (session, mut channel) = connection;
+                    let snapshot_id = (-3i64).checked_sub(target).filter(|id| *id >= 0);
+                    let command = snapshot_id.map_or_else(
+                        || String::from("tmux-link-list"),
+                        |id| format!("tmux-link-snapshot {id}"),
+                    );
+                    let limit = if snapshot_id.is_some() {
+                        128 * 1024
+                    } else {
+                        1024 * 1024
+                    };
                     timeout(Duration::from_secs(15), async {
-                        channel.exec(true, "tmux-link-list").await?;
+                        channel.exec(true, command).await?;
+                        if snapshot_id.is_some() {
+                            channel.eof().await?;
+                        }
                         let mut size = 0;
                         let mut status = None;
+                        let mut error = Vec::new();
                         while let Some(message) = channel.wait().await {
                             match message {
                                 ChannelMsg::Data { data } => {
                                     size += data.len();
-                                    ensure!(size <= 1024 * 1024, "session list too large");
+                                    ensure!(size <= limit, "remote response too large");
                                     output.data(&data).await?;
+                                }
+                                ChannelMsg::ExtendedData { data, .. } if snapshot_id.is_some() => {
+                                    error.extend_from_slice(
+                                        &data[..data.len().min(256 - error.len())],
+                                    );
                                 }
                                 ChannelMsg::ExitStatus { exit_status } => {
                                     status = Some(exit_status)
                                 }
+                                ChannelMsg::Failure if snapshot_id.is_some() => {
+                                    bail!("snapshot unsupported")
+                                }
                                 ChannelMsg::Failure => bail!("session list was refused"),
                                 _ => {}
                             }
+                        }
+                        if snapshot_id.is_some() && status != Some(0) {
+                            let diagnostic = String::from_utf8_lossy(&error);
+                            if diagnostic.contains("unsupported request") {
+                                bail!("snapshot unsupported");
+                            }
+                            if diagnostic.contains("snapshot pane in mode") {
+                                bail!("snapshot pane in mode");
+                            }
+                            bail!("snapshot unavailable");
                         }
                         ensure!(
                             status == Some(0),

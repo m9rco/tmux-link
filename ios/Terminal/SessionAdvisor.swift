@@ -12,6 +12,7 @@ struct SessionAdvice: Decodable {
 
 enum SessionAdvisorError: LocalizedError {
   case emptyQuestion, questionTooLong, invalidKey, noSessions
+  case invalidDecisionSelection, credentialInSnapshot
   case authentication, quota, rateLimited, timeout, network, requestRejected, serviceUnavailable, invalidResponse
 
   var errorDescription: String? {
@@ -20,6 +21,8 @@ enum SessionAdvisorError: LocalizedError {
     case .questionTooLong: return "问题太长，请缩短后重试。"
     case .invalidKey: return "请输入有效的 DeepSeek API 密钥。"
     case .noSessions: return "当前没有可供查找的会话。"
+    case .invalidDecisionSelection: return "请选择一至六个不同的有效会话。"
+    case .credentialInSnapshot: return "所选屏幕包含当前 API 密钥。请移除该会话或更新其屏幕后再试。"
     case .authentication: return "DeepSeek 未授权此次请求，请检查 API 密钥。"
     case .quota: return "DeepSeek 账户余额不足，请检查账户余额。"
     case .rateLimited: return "DeepSeek 请求过于频繁，请稍后重试。"
@@ -62,7 +65,7 @@ enum SessionAdvisor {
     }
   }
 
-  private static let transport: URLSession = {
+  static let transport: URLSession = {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.urlCache = nil
     configuration.httpCookieStorage = nil
@@ -80,10 +83,7 @@ enum SessionAdvisor {
     let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !question.isEmpty else { throw SessionAdvisorError.emptyQuestion }
     guard question.utf8.count <= 4096 else { throw SessionAdvisorError.questionTooLong }
-    let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !key.isEmpty, key.utf8.count <= 512, key.utf8.allSatisfy({ (33...126).contains($0) }) else {
-      throw SessionAdvisorError.invalidKey
-    }
+    let key = try validatedKey(key)
 
     var candidates = [Candidate]()
     var allowedIDs = Set<Int64>()
@@ -105,12 +105,30 @@ enum SessionAdvisor {
       返回 JSON，例如 {"message":"名称与项目匹配。","session_ids":[7]}。
       session_ids 按相关性排序，仅列出给定列表中有依据的 ID；没有匹配项时返回空数组。
       """
+    let advice: SessionAdvice = try await completion(
+      instructions: instructions, userMessage: userMessage, key: key, maxTokens: 768, session: session)
+    let message = advice.message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !message.isEmpty else { throw SessionAdvisorError.invalidResponse }
+    let ids = advice.sessionIDs.filter { allowedIDs.remove($0) != nil }
+    return SessionAdvice(message: message, sessionIDs: ids)
+  }
+
+  static func validatedKey(_ value: String) throws -> String {
+    let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !key.isEmpty, key.utf8.count <= 512, key.utf8.allSatisfy({ (33...126).contains($0) }) else {
+      throw SessionAdvisorError.invalidKey
+    }
+    return key
+  }
+
+  static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
+                                       maxTokens: Int, session: URLSession) async throws -> T {
     let body: [String: Any] = [
       "model": "deepseek-flash",
       "messages": [["role": "system", "content": instructions], ["role": "user", "content": userMessage]],
       "thinking": ["type": "disabled"],
       "response_format": ["type": "json_object"],
-      "max_tokens": 768,
+      "max_tokens": maxTokens,
     ]
     var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!,
                              cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
@@ -143,11 +161,8 @@ enum SessionAdvisor {
     guard data.count <= 128 * 1024,
           let choice = (try? decoder.decode(Completion.self, from: data))?.choices.first,
           choice.finish_reason == nil || choice.finish_reason == "stop",
-          let advice = try? decoder.decode(SessionAdvice.self, from: Data(choice.message.content.utf8))
+          let result = try? decoder.decode(T.self, from: Data(choice.message.content.utf8))
     else { throw SessionAdvisorError.invalidResponse }
-    let message = advice.message.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !message.isEmpty else { throw SessionAdvisorError.invalidResponse }
-    let ids = advice.sessionIDs.filter { allowedIDs.remove($0) != nil }
-    return SessionAdvice(message: message, sessionIDs: ids)
+    return result
   }
 }

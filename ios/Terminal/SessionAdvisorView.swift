@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct AdvisorSelection {
   let client: ClientProfile
@@ -15,155 +16,442 @@ struct AdvisorSelection {
   @MainActor var terminal: TerminalView { TerminalView(client: client, session: session) }
 }
 
+private struct PaneReading: Identifiable {
+  let snapshot: DecisionSnapshot
+  let readAt: Date
+  var id: Int64 { snapshot.id }
+}
+
 @MainActor
 struct SessionAdvisorView: View {
   let sessions: [RemoteSession]
   let notice: String?
+  let capture: @MainActor (RemoteSession) async throws -> DecisionSnapshot
   let open: @MainActor (RemoteSession) async throws -> Bool
 
-  private struct Reply {
-    let message: String
-    let choices: [RemoteSession]
+  private struct Preview {
+    let sources: [RemoteSession]
+    let readings: [PaneReading]
+    let failures: [String]
   }
 
-  private enum Work: Equatable { case asking, opening(Int64) }
-  private enum Field { case question, key }
   @Environment(\.dismiss) private var dismiss
-  @FocusState private var focus: Field?
-  @State private var question = ""
-  @State private var autoOpen = false
-  @State private var hasKey = false
+  @State private var selected: [Int64: String] = [:]
+  @State private var reading: Task<Void, Never>?
+  @State private var preview: Preview?
+  @State private var readErrors: [String] = []
+  @StateObject private var keyStatus = AdvisorKeyStatus()
   @State private var editingKey = false
-  @State private var draftKey = ""
-  @State private var keyError: String?
-  @State private var reply: Reply?
-  @State private var requestError: String?
-  @State private var work: Work?
-  @State private var task: Task<Void, Never>?
+
+  private var candidates: [RemoteSession] {
+    var seen = Set<Int64>()
+    return sessions.filter { $0.id >= 0 && seen.insert($0.id).inserted }
+  }
 
   var body: some View {
     NavigationStack {
       Form {
         Section {
-          TextField("例如：我想回到写 iOS 应用的会话", text: $question, axis: .vertical)
-            .lineLimit(2...4).focused($focus, equals: .question).disabled(work != nil)
-            .accessibilityIdentifier("advisor.question")
-          Toggle("本次自动打开首选会话", isOn: $autoOpen)
-            .disabled(work != nil).accessibilityIdentifier("advisor.autoOpen")
-          if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
-          if work != nil {
-            Button(action: cancel) {
+          if let notice { Text(notice).foregroundStyle(.secondary) }
+          ForEach(candidates) { candidate in
+            let included = selected[candidate.id] == candidate.name
+            Button {
+              readErrors = []
+              if included { selected.removeValue(forKey: candidate.id) }
+              else { selected[candidate.id] = candidate.name }
+            } label: {
               HStack {
-                ProgressView().controlSize(.small)
-                Text(work == .asking ? "正在查找会话…" : "正在核对会话…")
+                Text(verbatim: candidate.name).font(.body.monospaced()).foregroundStyle(.primary)
                 Spacer()
-                Text("取消")
+                Image(systemName: included ? "checkmark.circle.fill" : "circle")
               }
-            }.accessibilityLabel("取消请求").accessibilityIdentifier("advisor.cancel")
-          } else {
-            Button(action: ask) { Label("查找会话", systemImage: "magnifyingglass") }
-              .disabled(!hasKey || editingKey || notice != nil || trimmedQuestion.isEmpty)
-              .accessibilityIdentifier("advisor.submit")
+            }
+            .disabled(reading != nil || (!included && selected.count >= SessionAdvisor.maxDecisionSessions))
+            .accessibilityAddTraits(included ? .isSelected : [])
+            .accessibilityIdentifier("advisor.select.\(candidate.id)")
           }
         } header: {
-          Text("你想找哪个会话？")
+          Text("选择会话")
         } footer: {
-          VStack(alignment: .leading, spacing: 4) {
-            Text("提交时，DeepSeek 会收到你的问题，以及此客户端的会话编号、名称和工作目录末级名称。")
-            if sessions.count > SessionAdvisor.maxCandidates {
-              Text("本次最多比较列表中的前 \(SessionAdvisor.maxCandidates) 个有效会话。")
-            }
-          }
+          Text("最多选择 \(SessionAdvisor.maxDecisionSessions) 个会话。预览会读取各会话当前活动窗格中的文字。")
         }
-
-        if reply != nil || requestError != nil {
-          Section("会话建议") {
-            if let reply {
-              Text(verbatim: reply.message).textSelection(.enabled)
-                .accessibilityIdentifier("advisor.answer")
-              ForEach(reply.choices) { candidate in
-                if sessions.contains(where: { $0.id == candidate.id && $0.name == candidate.name }) {
-                  Button { choose(candidate) } label: {
-                    HStack {
-                      Text(verbatim: candidate.name).font(.body.monospaced()).foregroundStyle(.primary)
-                      Spacer()
-                      if work == .opening(candidate.id) { ProgressView().controlSize(.small) }
-                      else { Label("打开", systemImage: "arrow.up.right").font(.subheadline).fixedSize() }
-                    }
-                  }
-                  .disabled(work != nil)
-                  .accessibilityLabel("打开会话 " + candidate.name)
-                  .accessibilityIdentifier("advisor.open." + String(candidate.id))
-                }
-              }
-            }
-            if let requestError {
-              Text(verbatim: requestError).font(.callout).foregroundStyle(.orange)
-                .accessibilityIdentifier("advisor.error")
-            }
-          }
-        }
-        keySection
+        if !readErrors.isEmpty { failureSection(readErrors) }
+        AdvisorKeySection(editing: $editingKey).disabled(reading != nil)
       }
-      .scrollDismissesKeyboard(.interactively)
-      .navigationTitle("会话助手").navigationBarTitleDisplayMode(.inline)
+      .navigationTitle("待答问题").navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          Button("关闭") {
-            cancel()
-            dismiss()
-          }.accessibilityIdentifier("advisor.close")
+          Button("关闭") { cancelRead(); dismiss() }.accessibilityIdentifier("advisor.close")
         }
-        ToolbarItemGroup(placement: .keyboard) {
-          Spacer()
-          Button("完成") { focus = nil }
+        ToolbarItem(placement: .confirmationAction) {
+          if reading != nil {
+            Button(action: cancelRead) {
+              HStack { ProgressView().controlSize(.small); Text("取消读取") }
+            }.accessibilityIdentifier("advisor.cancel")
+          } else {
+            Button("预览（\(selected.count)）", action: readSelection)
+              .disabled(selected.isEmpty || notice != nil || editingKey)
+              .accessibilityIdentifier("advisor.preview")
+          }
+        }
+      }
+      .navigationDestination(isPresented: Binding(
+        get: { preview != nil }, set: { if !$0 { preview = nil } })
+      ) {
+        if let preview {
+          DecisionReviewContent(
+            readings: preview.readings, failures: preview.failures, openLabel: "打开原会话",
+            open: { id in
+              guard let source = preview.sources.first(where: { $0.id == id }) else { return false }
+              return try await open(source)
+            }, close: { dismiss() })
         }
       }
     }
-    .onAppear {
-      do { hasKey = try AdvisorCredential.load() != nil }
-      catch { keyError = error.localizedDescription }
+    .environmentObject(keyStatus)
+    .onChange(of: sessions) { current in
+      let valid = selected.filter { id, name in current.contains { $0.id == id && $0.name == name } }
+      guard valid.count != selected.count else { return }
+      cancelRead()
+      selected = valid
+      preview = nil
+      readErrors = ["所选会话已关闭或更名，请重新选择并预览。"]
     }
-    .onChange(of: question) { _ in
-      reply = nil
-      requestError = nil
+    .onDisappear { cancelRead() }
+  }
+
+  private func cancelRead() {
+    reading?.cancel()
+    reading = nil
+  }
+
+  private func readSelection() {
+    let sources = candidates.filter { selected[$0.id] == $0.name }
+    guard reading == nil, (1...SessionAdvisor.maxDecisionSessions).contains(sources.count) else { return }
+    readErrors = []
+    reading = Task {
+      var readings: [PaneReading] = []
+      var failures: [String] = []
+      for source in sources {
+        guard !Task.isCancelled else { return }
+        do {
+          let snapshot = try await capture(source).sanitized()
+          guard snapshot.id == source.id else { throw RelayError("会话已更改，请刷新列表。") }
+          guard !snapshot.text.isEmpty else { throw RelayError("活动窗格没有可分析的文字。") }
+          readings.append(PaneReading(snapshot: snapshot, readAt: Date()))
+        } catch {
+          failures.append("\(source.name) · \(error.localizedDescription)")
+        }
+      }
+      guard !Task.isCancelled else { return }
+      reading = nil
+      if readings.isEmpty { readErrors = failures }
+      else { preview = Preview(sources: sources, readings: readings, failures: failures) }
     }
-    .onDisappear {
-      cancel()
-      draftKey = ""
+  }
+}
+
+// Entry point for a terminal that is already open. Only dismissing the review returns to it.
+@MainActor
+struct DecisionReviewView: View {
+  private let reading: PaneReading
+  let onClose: () -> Void
+  @StateObject private var keyStatus = AdvisorKeyStatus()
+
+  init(snapshot: DecisionSnapshot, readAt: Date = Date(), onClose: @escaping () -> Void) {
+    reading = PaneReading(snapshot: snapshot.sanitized(), readAt: readAt)
+    self.onClose = onClose
+  }
+
+  var body: some View {
+    NavigationStack {
+      DecisionReviewContent(readings: [reading], failures: [], openLabel: "返回原终端",
+                            open: { _ in onClose(); return true }, close: onClose)
+    }.environmentObject(keyStatus)
+  }
+}
+
+@MainActor
+private struct DecisionReviewContent: View {
+  let readings: [PaneReading]
+  let failures: [String]
+  let openLabel: String
+  let open: @MainActor (Int64) async throws -> Bool
+  let close: () -> Void
+
+  private enum Operation { case analyzing, opening }
+  @State private var excluded: Set<Int64> = []
+  @EnvironmentObject private var keyStatus: AdvisorKeyStatus
+  @State private var editingKey = false
+  @State private var decisions: [SessionDecision]?
+  @State private var errorMessage: String?
+  @State private var copied: IndexPath?
+  @State private var operation: Operation?
+  @State private var task: Task<Void, Never>?
+
+  private var included: [PaneReading] {
+    readings.filter { !excluded.contains($0.id) && !$0.snapshot.text.isEmpty }
+  }
+
+  var body: some View {
+    Form {
+      if let decisions {
+        if decisions.isEmpty {
+          Section {
+            Label("在所分析的 \(included.count) 段摘录中未发现待答问题。", systemImage: "checkmark.circle")
+              .accessibilityIdentifier("advisor.none")
+            ForEach(included) { reading in readingHeader(reading) }
+          }
+        } else {
+          ForEach(decisions.indices, id: \.self) { index in
+            decisionSection(decisions[index], index: index)
+          }
+        }
+        Button("返回摘录预览") {
+          self.decisions = nil
+          copied = nil
+          errorMessage = nil
+        }.disabled(operation != nil)
+      } else {
+        ForEach(readings) { reading in
+          previewSection(reading)
+        }
+        Section {
+          Button(action: analyze) {
+            Label("发送 \(included.count) 段摘录给 DeepSeek 分析", systemImage: "sparkles")
+          }
+          .disabled(included.isEmpty || !keyStatus.saved || editingKey || operation != nil)
+          .accessibilityIdentifier("advisor.submit")
+        } footer: {
+          Text("DeepSeek 将收到勾选的会话编号、名称、当前屏幕摘录及本机压缩的历史摘要。发送前请检查这些内容。")
+        }
+      }
+      if let operation {
+        Section {
+          Button(action: cancel) {
+            HStack {
+              ProgressView()
+              Text(operation == .analyzing ? "正在分析待答问题…" : "正在核对原会话…")
+              Spacer()
+              Text("取消")
+            }
+          }.accessibilityIdentifier("advisor.cancel")
+        }
+      }
+      if let errorMessage {
+        Section {
+          Text(verbatim: errorMessage).foregroundStyle(.orange).accessibilityIdentifier("advisor.error")
+        }
+      }
+      if !failures.isEmpty { failureSection(failures) }
+      if decisions == nil {
+        AdvisorKeySection(editing: $editingKey).disabled(operation != nil)
+      }
+    }
+    .id(decisions == nil)
+    .scrollDismissesKeyboard(.interactively)
+    .navigationTitle(decisions == nil ? "摘录预览" : "待答问题").navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .confirmationAction) {
+        Button("关闭") { cancel(); close() }.accessibilityIdentifier("advisor.close")
+      }
+    }
+    .onDisappear { cancel() }
+  }
+
+  private func previewSection(_ reading: PaneReading) -> some View {
+    let snapshot = reading.snapshot
+    return Section {
+      if snapshot.text.isEmpty {
+        Text("当前窗格没有可分析的文字。").foregroundStyle(.secondary)
+      } else {
+        Toggle("纳入分析", isOn: Binding(
+          get: { !excluded.contains(snapshot.id) },
+          set: { include in
+            if include { excluded.remove(snapshot.id) } else { excluded.insert(snapshot.id) }
+            errorMessage = nil
+          }))
+          .disabled(operation != nil)
+          .accessibilityIdentifier("advisor.include.\(snapshot.id)")
+        SnapshotExcerpt(title: "当前屏幕", text: snapshot.text)
+        if let context = snapshot.context {
+          SnapshotExcerpt(title: "历史摘要（本机压缩）", text: context)
+        }
+      }
+    } header: {
+      readingHeader(reading)
     }
   }
 
-  private var keySection: some View {
+  private func decisionSection(_ decision: SessionDecision, index: Int) -> some View {
+    let source = readings.first { $0.id == decision.sessionID }
+    return Section {
+      Text(verbatim: decision.question).font(.headline).textSelection(.enabled)
+        .accessibilityIdentifier("advisor.question.\(index)")
+      VStack(alignment: .leading, spacing: 6) {
+        Label("终端原文", systemImage: "quote.opening").font(.caption).foregroundStyle(.secondary)
+        Text(verbatim: decision.evidence).font(.callout.monospaced()).textSelection(.enabled)
+      }.privacySensitive()
+      ForEach(decision.options.indices, id: \.self) { optionIndex in
+        let option = decision.options[optionIndex]
+        let recommended = decision.recommendedIndex == optionIndex
+        let position = IndexPath(row: optionIndex, section: index)
+        VStack(alignment: .leading, spacing: 6) {
+          if recommended {
+            Label("推荐回复", systemImage: "checkmark.circle.fill").font(.caption.bold()).foregroundStyle(.mint)
+          }
+          Text(verbatim: option.reply).font(.body.weight(.medium)).textSelection(.enabled)
+          Text(verbatim: option.tradeoff).font(.subheadline).foregroundStyle(.secondary)
+          if recommended && !decision.reason.isEmpty {
+            Text(verbatim: "推荐理由 · " + decision.reason).font(.subheadline)
+          }
+          Button {
+            UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: option.reply]], options: [.localOnly: true])
+            copied = position
+          } label: {
+            Label(copied == position ? "已复制" : "复制回复", systemImage: copied == position ? "checkmark" : "doc.on.doc")
+              .font(.subheadline)
+          }.buttonStyle(.borderless)
+            .accessibilityIdentifier("advisor.copy.\(index).\(optionIndex)")
+        }.padding(.vertical, 3).privacySensitive()
+      }
+      if decision.recommendedIndex == nil && !decision.reason.isEmpty {
+        Text(verbatim: decision.reason).font(.subheadline)
+      }
+      Button {
+        run(.opening) {
+          let opened = try await open(decision.sessionID)
+          try Task.checkCancellation()
+          if !opened { errorMessage = "原会话已关闭或更名，请返回会话列表重新预览。" }
+        }
+      } label: { Label(openLabel, systemImage: "terminal") }
+      .disabled(operation != nil || source == nil)
+      .accessibilityIdentifier("advisor.open.\(decision.sessionID).\(index)")
+    } header: {
+      if let source { readingHeader(source) }
+    }
+  }
+
+  private func readingHeader(_ reading: PaneReading) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(verbatim: "\(reading.snapshot.name) · #\(reading.id)").textCase(nil)
+      Text("读取于 \(reading.readAt.formatted(date: .omitted, time: .standard))")
+        .font(.caption).foregroundStyle(.secondary)
+    }
+  }
+
+  private func analyze() {
+    let approved = included.map(\.snapshot)
+    guard !approved.isEmpty else { return }
+    run(.analyzing) {
+      guard let key = try AdvisorCredential.load() else {
+        keyStatus.saved = false
+        errorMessage = "请先保存 DeepSeek API Key。"
+        return
+      }
+      let result = try await SessionAdvisor.analyze(approved, key: key)
+      try Task.checkCancellation()
+      decisions = result
+    }
+  }
+
+  private func cancel() {
+    task?.cancel()
+    task = nil
+    operation = nil
+  }
+
+  private func run(_ next: Operation, action: @escaping @MainActor () async throws -> Void) {
+    guard operation == nil else { return }
+    errorMessage = nil
+    operation = next
+    task = Task {
+      do {
+        try Task.checkCancellation()
+        try await action()
+      } catch {
+        guard !Task.isCancelled else { return }
+        errorMessage = error.localizedDescription
+      }
+      guard !Task.isCancelled else { return }
+      operation = nil
+      task = nil
+    }
+  }
+}
+
+private struct SnapshotExcerpt: View {
+  let title: String
+  let text: String
+  @State private var expanded = false
+
+  var body: some View {
+    let lastLines = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(4)
+    let excerpt = String(lastLines.joined(separator: "\n").suffix(200))
+    VStack(alignment: .leading, spacing: 6) {
+      Text(verbatim: title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+      Text(verbatim: expanded ? text : excerpt)
+        .font(.footnote.monospaced()).textSelection(.enabled).privacySensitive()
+        .frame(maxWidth: .infinity, alignment: .leading)
+      if excerpt != text {
+        Button(expanded ? "收起" : "展开全文") { expanded.toggle() }
+          .font(.footnote).buttonStyle(.borderless)
+          .accessibilityLabel((expanded ? "收起" : "展开") + title)
+      }
+    }
+  }
+}
+
+private func failureSection(_ errors: [String]) -> some View {
+  Section("以下会话未能读取") {
+    ForEach(errors.indices, id: \.self) { index in
+      Text(verbatim: errors[index]).font(.callout).foregroundStyle(.orange)
+    }
+  }
+}
+
+private final class AdvisorKeyStatus: ObservableObject {
+  @Published var saved = false
+  @Published var errorMessage: String?
+
+  init() {
+    do { saved = try AdvisorCredential.load() != nil }
+    catch { errorMessage = error.localizedDescription }
+  }
+}
+
+private struct AdvisorKeySection: View {
+  @EnvironmentObject private var keyStatus: AdvisorKeyStatus
+  @Binding var editing: Bool
+  @FocusState private var focused: Bool
+  @State private var draft = ""
+
+  var body: some View {
     Section {
-      if hasKey && !editingKey {
-        Label("已保存 API Key", systemImage: "key.fill")
-          .accessibilityIdentifier("advisor.key.saved")
-        Button("更换密钥") {
-          editingKey = true
-          focus = .key
-          keyError = nil
-        }.accessibilityIdentifier("advisor.key.replace")
-        Button("移除密钥", role: .destructive, action: removeKey)
-          .accessibilityIdentifier("advisor.key.remove")
+      if keyStatus.saved && !editing {
+        DisclosureGroup("已保存 DeepSeek API Key") {
+          Button("更换密钥") {
+            editing = true
+            keyStatus.errorMessage = nil
+            focused = true
+          }.accessibilityIdentifier("advisor.key.replace")
+          Button("移除密钥", role: .destructive, action: remove)
+            .accessibilityIdentifier("advisor.key.remove")
+        }.accessibilityIdentifier("advisor.key.saved")
       } else {
-        SecureField("DeepSeek API Key", text: $draftKey)
+        SecureField("DeepSeek API Key", text: $draft)
           .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
-          .focused($focus, equals: .key).accessibilityIdentifier("advisor.key.input")
-        Button("保存密钥", action: saveKey)
-          .disabled(draftKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          .focused($focused).submitLabel(.done).onSubmit(save)
+          .accessibilityIdentifier("advisor.key.input")
+        Button("保存密钥", action: save)
+          .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
           .accessibilityIdentifier("advisor.key.save")
-        if editingKey {
-          Button("取消更换") {
-            editingKey = false
-            draftKey = ""
-            keyError = nil
-            focus = nil
-          }.accessibilityIdentifier("advisor.key.cancel")
+        if editing {
+          Button("取消更换") { clearDraft() }.accessibilityIdentifier("advisor.key.cancel")
         }
       }
-      if let keyError {
-        Text(verbatim: keyError).font(.callout).foregroundStyle(.orange)
+      if let errorMessage = keyStatus.errorMessage {
+        Text(verbatim: errorMessage).font(.callout).foregroundStyle(.orange)
           .accessibilityIdentifier("advisor.key.error")
       }
     } header: {
@@ -171,90 +459,29 @@ struct SessionAdvisorView: View {
     } footer: {
       Text("API Key 保存在这台设备的钥匙串中。")
     }
-    .disabled(work != nil)
+    .onDisappear { draft = "" }
   }
 
-  private var trimmedQuestion: String { question.trimmingCharacters(in: .whitespacesAndNewlines) }
+  private func clearDraft() {
+    draft = ""
+    editing = false
+    focused = false
+    keyStatus.errorMessage = nil
+  }
 
-  private func saveKey() {
+  private func save() {
     do {
-      try AdvisorCredential.save(draftKey.trimmingCharacters(in: .whitespacesAndNewlines))
-      draftKey = ""
-      editingKey = false
-      hasKey = true
-      keyError = nil
-      requestError = nil
-      focus = nil
-    } catch { keyError = error.localizedDescription }
+      try AdvisorCredential.save(draft.trimmingCharacters(in: .whitespacesAndNewlines))
+      keyStatus.saved = true
+      clearDraft()
+    } catch { keyStatus.errorMessage = error.localizedDescription }
   }
 
-  private func removeKey() {
+  private func remove() {
     do {
       try AdvisorCredential.remove()
-      hasKey = false
-      keyError = nil
-      reply = nil
-      requestError = nil
-    } catch { keyError = error.localizedDescription }
-  }
-
-  private func cancel() {
-    task?.cancel()
-    task = nil
-    work = nil
-  }
-
-  private func run(_ operation: Work, action: @escaping @MainActor () async throws -> Void) {
-    cancel()
-    requestError = nil
-    focus = nil
-    work = operation
-    task = Task {
-      do {
-        try Task.checkCancellation()
-        try await action()
-      } catch {
-        guard !Task.isCancelled else { return }
-        requestError = error.localizedDescription
-      }
-      guard !Task.isCancelled else { return }
-      work = nil
-      task = nil
-    }
-  }
-
-  private func ask() {
-    let prompt = trimmedQuestion
-    let snapshot = sessions
-    guard work == nil, !prompt.isEmpty, !snapshot.isEmpty else { return }
-    let openFirst = autoOpen
-    autoOpen = false
-    reply = nil
-    run(.asking) {
-      guard let key = try AdvisorCredential.load() else {
-        hasKey = false
-        keyError = "请先保存 DeepSeek API Key。"
-        return
-      }
-      let advice = try await SessionAdvisor.advise(prompt, sessions: snapshot, key: key)
-      try Task.checkCancellation()
-      let choices = advice.sessionIDs.compactMap { id in snapshot.first { $0.id == id } }
-      reply = Reply(message: advice.message, choices: choices)
-      if openFirst, let first = choices.first {
-        work = .opening(first.id)
-        try await openVerified(first)
-      }
-    }
-  }
-
-  private func choose(_ candidate: RemoteSession) {
-    guard work == nil else { return }
-    run(.opening(candidate.id)) { try await openVerified(candidate) }
-  }
-
-  private func openVerified(_ candidate: RemoteSession) async throws {
-    let opened = try await open(candidate)
-    try Task.checkCancellation()
-    if !opened { requestError = "这个会话已关闭或更名。请重新查找，或打开其他建议。" }
+      keyStatus.saved = false
+      clearDraft()
+    } catch { keyStatus.errorMessage = error.localizedDescription }
   }
 }

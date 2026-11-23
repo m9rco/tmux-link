@@ -19,6 +19,7 @@ final class RemoteSessionTests: XCTestCase {
     let route: String?
     let hasHistoryFixture: Bool?
     let benchmarkSessionID: Int64?
+    let decisionFixtureIDs: [Int64]?
   }
 
   func configuration() throws -> Connection {
@@ -349,6 +350,26 @@ final class RemoteSessionTests: XCTestCase {
     await fulfillment(of: [bridge.loaded], timeout: 10)
 
     return (web, controller)
+  }
+
+  @MainActor
+  func testDecisionScreenSeparatesLivePromptFromHistoryAndConcealedCells() async throws {
+    let (web, controller) = try await loadBundledTerminal()
+    defer { controller.dismiss(animated: false) }
+    let checks = try await web.callAsyncJavaScript(#"""
+      await ready;
+      const write = s => new Promise(r => term.write(s, r));
+      await write("EARLIER-GOAL\r\n" + "checking\r\n".repeat(term.rows + 2));
+      await write("Proceed? [y/n] \x1b[8mhidden-cell\x1b[28m");
+      term.scrollToTop();
+      const normal = decisionScreen();
+      await write("\x1b[?1049h\x1b[HChoose format: CSV or JSON?");
+      const alternate = decisionScreen();
+      return [normal.text.includes('Proceed? [y/n]'), !normal.text.includes('EARLIER-GOAL'),
+              normal.context.includes('EARLIER-GOAL'), !normal.text.includes('hidden-cell'),
+              alternate.text.includes('Choose format'), alternate.context === ''];
+      """#, arguments: [:], in: nil, contentWorld: .page) as? [Bool]
+    XCTAssertEqual(checks, Array(repeating: true, count: 6))
   }
 
   @MainActor

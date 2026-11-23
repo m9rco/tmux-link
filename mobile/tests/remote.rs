@@ -330,3 +330,39 @@ fn pages_shell_history_with_one_ssh_session_per_connection() {
     visible(&mut view, b"__SCROLL_OK__");
     finish_session(view, worker);
 }
+
+#[test]
+#[ignore = "requires a disposable sshd/tmux fixture"]
+fn reads_only_the_selected_pane_over_authenticated_ssh() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    // -4 encodes session 1. Failed authentication must not emit terminal data.
+    for (requested_pin, key, expected) in [
+        ("SHA256:incorrect", "TL_TEST_KEY", "Unknown server key"),
+        (
+            pin.as_str(),
+            "TL_TEST_UNAUTHORIZED_KEY",
+            "phone key rejected",
+        ),
+    ] {
+        let (mut view, worker) = start_protocol(requested_pin, key, Some(-4));
+        let mut data = Vec::new();
+        view.read_to_end(&mut data).unwrap();
+        assert!(data.is_empty());
+        assert_eq!(worker.join().unwrap().unwrap_err(), expected);
+    }
+
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(-4));
+    let mut data = Vec::new();
+    view.read_to_end(&mut data).unwrap();
+    worker.join().unwrap().unwrap();
+    let pane: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(pane["id"], 1);
+    assert_eq!(pane["name"], "zz-中文🙂");
+    assert!(pane["text"].as_str().unwrap().contains("pane-左🙂右"));
+
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(i64::MIN));
+    data.clear();
+    view.read_to_end(&mut data).unwrap();
+    assert!(data.is_empty());
+    assert_eq!(worker.join().unwrap().unwrap_err(), "snapshot unavailable");
+}

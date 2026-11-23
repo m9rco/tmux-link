@@ -94,6 +94,7 @@ def benchmark(device, tmp):
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
+                    "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",
                     "-resultBundlePath", result, "test-without-building")
                 attachments = tmp / "attachments"
                 run("xcrun", "xcresulttool", "export", "attachments", "--path", result,

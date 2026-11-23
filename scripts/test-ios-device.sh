@@ -19,11 +19,14 @@ other=no
 messages=no
 latency=no
 created=no
+decision_ids="$temp/decision-ids"
+: > "$decision_ids"
 cleanup() {
     if [ "$created" = yes ]; then tmux kill-session -t "=$session" 2>/dev/null || true; fi
     if [ "$other" = yes ]; then tmux kill-session -t "=${session}-other" 2>/dev/null || true; fi
     if [ "$messages" = yes ]; then tmux kill-session -t "=${session}-messages" 2>/dev/null || true; fi
     if [ "$latency" = yes ]; then tmux kill-session -t "=${session}-latency" 2>/dev/null || true; fi
+    while IFS= read -r id; do tmux kill-session -t "$id" 2>/dev/null || true; done < "$decision_ids"
     rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -70,7 +73,19 @@ messages=yes
 tmux set-option -t "${session}-messages" mouse on
 benchmark_id=$(tmux new-session -d -P -F '#{session_id}' -s "${session}-latency" python3 "$PWD/scripts/terminal-latency-fixture.py")
 latency=yes
-python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" "$benchmark_id" <<'PY'
+if [ "${TMUX_LINK_E2E_DECISIONS:-0}" = 1 ]; then
+    decision_pane() {
+        tmux new-session -d -P -F '#{session_id}' -s "$session-$1" \
+            python3 -c 'import sys, time; print(sys.argv[1], flush=True); time.sleep(600)' "$2" >> "$decision_ids"
+    }
+    decision_pane format 'Choose the report format: 1) CSV 2) JSON'
+    decision_pane tests 'Which test suite should run: quick or full?'
+    decision_pane idle 'Build finished successfully.'
+    printf '%s\n' '{"enabled":true}' > "$temp/live.json"
+    xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \
+        --domain-identifier "$bundle" --source "$temp/live.json" --destination Library/Caches/tmux-link-decision-live.json
+fi
+python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" "$benchmark_id" "$decision_ids" <<'PY'
 import fcntl
 import json
 import os
@@ -79,7 +94,7 @@ import shlex
 import subprocess
 import sys
 
-key_file, output, ssh_agent, session, source_agent, benchmark_id = sys.argv[1:]
+key_file, output, ssh_agent, session, source_agent, benchmark_id, decision_ids = sys.argv[1:]
 parts = Path(key_file).read_text().strip().split()
 if len(parts) < 2 or parts[0] != "ssh-ed25519":
     raise SystemExit("Unexpected phone public key")
@@ -109,6 +124,7 @@ Path(output).write_text(json.dumps({
     "host": center, "port": 443, "user": user,
     "fingerprint": pin, "sessionName": session, "importLink": link, "hasHistoryFixture": True,
     "benchmarkSessionID": int(benchmark_id[1:]),
+    "decisionFixtureIDs": [int(value[1:]) for value in Path(decision_ids).read_text().splitlines()],
 }) + "\n")
 PY
 xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \

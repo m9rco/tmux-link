@@ -5,7 +5,7 @@ import XCTest
 
 @testable import TmuxLink
 
-private class AdvisorHTTPFixture: URLProtocol, @unchecked Sendable {
+class AdvisorHTTPFixture: URLProtocol, @unchecked Sendable {
   class func session() -> URLSession {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [self]

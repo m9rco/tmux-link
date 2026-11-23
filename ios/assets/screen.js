@@ -110,6 +110,36 @@ function keyboardCursor() {
   return {row: line?.querySelector('.xterm-cursor') ? row : -1, rows: term.rows};
 }
 
+// Read xterm's displayed cells only when the user opens decision review.
+// A full-screen application's alternate buffer has no preceding shell history.
+function decisionScreen() {
+  const buffer = term.buffer.active;
+  function lines(start, end) {
+    const result = [];
+    for (let y = start; y < end; y++) {
+      const line = buffer.getLine(y);
+      if (!line) continue;
+      let value = '';
+      for (let x = 0; x < line.length;) {
+        const cell = line.getCell(x);
+        if (!cell) break;
+        const width = Math.max(1, cell.getWidth());
+        value += cell.isInvisible() ? ' '.repeat(width) : (cell.getChars() || ' ');
+        x += width;
+      }
+      value = value.trimEnd();
+      if (value || result[result.length - 1]) result.push(value);
+    }
+    return result;
+  }
+  // A phone scrolled into local history may still have a live prompt below the viewport.
+  const top = buffer.baseY;
+  const text = lines(top, top + term.rows).slice(-40).join('\n').slice(-6000);
+  const context = buffer.type === 'normal'
+    ? lines(Math.max(0, top - 120), top).join('\n').slice(-16384) : '';
+  return {text, context};
+}
+
 function requestTerminalKeyboard() {
   bridge.postMessage({showKeyboard: true, cursor: keyboardCursor()});
 }
