@@ -702,6 +702,44 @@ final class RemoteSessionTests: XCTestCase {
       XCTAssertGreaterThanOrEqual(top, visible.minY - pixel)
       XCTAssertLessThanOrEqual(top + cell, visible.maxY + pixel)
     }
+    func checkBottomEditor(hiddenCursor: Bool) async throws {
+      _ = try await web.callAsyncJavaScript("pressTerminalKey(key); return true",
+        arguments: ["key": hiddenCursor ? "}" : "{"], in: nil, contentWorld: .page)
+      let footer = hiddenCursor ? "TL-FOOTER-HIDDEN" : "TL-FOOTER-VISIBLE"
+      var rows: [Int]?
+      for _ in 0..<150 {
+        let result = try await web.callAsyncJavaScript("""
+          const b = term.buffer.active;
+          const lines = Array.from({length: term.rows}, (_, y) =>
+            b.getLine(b.viewportY + y)?.translateToString(true) || '');
+          const footerRow = lines.indexOf(footer);
+          if (footerRow < 0) return [];
+          const caretRow = b.baseY + b.cursorY - b.viewportY;
+          const drawn = term.element.querySelector('.xterm-rows .xterm-cursor');
+          if (hidden ? drawn : !drawn) return [];
+          return [lines.findIndex(line => line.includes('TL-EDITOR-TOP')),
+                  lines.findIndex(line => line.includes(hidden ? 'prompt_' : '> prompt')),
+                  lines.findIndex(line => line.includes('TL-EDITOR-END')), footerRow, caretRow];
+          """, arguments: ["footer": footer, "hidden": hiddenCursor], in: nil, contentWorld: .page) as? [Int]
+        if let result, result.count == 5 { rows = result; break }
+        try await Task.sleep(for: .milliseconds(30))
+      }
+      let recorded = try XCTUnwrap(rows, "Incomplete multi-line TUI fixture: " + footer)
+      let first = recorded[0], input = recorded[1], edge = recorded[2], last = recorded[3]
+      XCTAssertGreaterThanOrEqual(first, 0)
+      XCTAssertEqual(input, first + 1)
+      XCTAssertEqual(edge, first + 4)
+      XCTAssertEqual(last, input + 4)
+      if !hiddenCursor { XCTAssertEqual(recorded[4], input) }
+      // An accessibility click has no touch coordinates, also exercising the hidden-caret default.
+      try await open()
+      let drawn = try await sampleGrid()
+      for row in [first, input, edge, last] { checkCaret(row: row, in: drawn) }
+      hide.sendActions(for: .touchUpInside)
+      let restored = try await sampleGrid()
+      XCTAssertEqual(restored.minY, fullGrid.minY, accuracy: pixel)
+      XCTAssertEqual(restored.maxY, fullGrid.maxY, accuracy: pixel)
+    }
     for bottom in [true, false, true] {
       let row = checkRemoteCursor ? try await fixtureReply(
         key: bottom ? "$" : "^", marker: bottom ? "TL-BOTTOM" : "TL-TOP").row : nil
@@ -733,6 +771,10 @@ final class RemoteSessionTests: XCTestCase {
       XCTAssertEqual(restored.minY, fullGrid.minY, accuracy: pixel)
       XCTAssertEqual(restored.maxY, fullGrid.maxY, accuracy: pixel)
       XCTAssertTrue(terminal.typingKeyboard.isHidden)
+    }
+    if checkRemoteCursor {
+      try await checkBottomEditor(hiddenCursor: false)
+      try await checkBottomEditor(hiddenCursor: true)
     }
     try await open()
     XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
@@ -768,7 +810,7 @@ final class RemoteSessionTests: XCTestCase {
     if let before {
       let after = try await fixtureReply(key: ">", marker: "TL-PTY>").suffix
       XCTAssertEqual(after, before, "Keyboard visibility changed the remote tmux pane SIGWINCH count or size")
-      print("Keyboard open/close cycles:", 4, "grid resizes:", events.count,
+      print("Keyboard open/close cycles:", 6, "grid resizes:", events.count,
             "remote SIGWINCH,cols,rows:", before, "→", after)
     }
     let restored = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]

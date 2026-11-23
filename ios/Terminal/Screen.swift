@@ -11,6 +11,7 @@ private final class TerminalViewport: UIView {
   private var grid = CGSize.zero
   private var cursor: (row: Int, rows: Int)?
   private var offset: CGFloat = 0
+  private var previousTravel: CGFloat = 0
 
   init(web: WKWebView) {
     self.web = web
@@ -54,13 +55,22 @@ private final class TerminalViewport: UIView {
   private func positionCanvas() {
     let height = web.bounds.height
     let travel = max(0, height - bounds.height)
+    // TUI composers draw their border, extra input lines and footer below the
+    // caret. Show the bottom of the grid on open, including for a software caret.
+    if offset == previousTravel { offset = travel }
     if travel > 0, let cursor {
       let rowHeight = height / CGFloat(cursor.rows)
       let top = CGFloat(cursor.row) * rowHeight
-      // Keep the current view still while the whole cursor row is already visible.
-      offset = min(top, max(offset, top + rowHeight - bounds.height))
+      if top < offset {
+        offset = max(0, top - 2 * rowHeight)
+      } else if top + rowHeight > offset + bounds.height {
+        // Return to the bottom when it fits with the caret. In a short window
+        // center an intermediate caret until the bottom becomes reachable.
+        offset = top >= travel ? travel : top + (rowHeight - bounds.height) / 2
+      }
     }
     offset = min(travel, max(0, offset))
+    previousTravel = travel
     UIView.performWithoutAnimation {
       web.layer.position = CGPoint(x: bounds.minX, y: bounds.minY - offset)
     }
