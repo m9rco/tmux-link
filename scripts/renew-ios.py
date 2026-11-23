@@ -20,6 +20,7 @@ RUN = ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"]
 BUNDLE = "dev.tmuxlink.mobile"
 WIDGET_BUNDLE = BUNDLE + ".status"
 CHECK_INTERVAL = 300
+PENDING = "pending-install.json"
 
 def run(*cmd, **kwargs):
     return subprocess.run(cmd, check=True, env=OS_ENV, **kwargs)
@@ -68,11 +69,36 @@ def signed_expiration(app, device, now, require_widget):
         raise RuntimeError("Signed build is missing the terminal status widget")
     return min(expirations.values())
 
+def build_release(source):
+    derived = BASE / "build"
+    run("xcodebuild", "-project", source / "ios/TmuxLink.xcodeproj", "-scheme", "TmuxLink",
+        "-configuration", "Release", "-destination", "generic/platform=iOS", "-derivedDataPath", derived,
+        "-allowProvisioningUpdates", "build", timeout=600)
+    return derived / "Build/Products/Release-iphoneos/TmuxLink.app"
+
+def version_info(app):
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    return {"version": info["CFBundleShortVersionString"], "build": info["CFBundleVersion"]}
+
+def queue_release(device, source):
+    # Keep the exact verified app until delivery. The copied source and Rust
+    # library allow a new signature if the phone returns after this one expires.
+    app = source / "Release/TmuxLink.app"
+    shutil.copytree(build_release(source), app, symlinks=True)
+    expires = signed_expiration(app, device, dt.datetime.now(dt.timezone.utc), True)
+    request = dict(device=device, expires=expires.isoformat(), **version_info(app))
+    (source / PENDING).write_text(json.dumps(request, indent=2) + "\n")
+    return request
+
 def refresh(device, source, force):
     now = dt.datetime.now(dt.timezone.utc)
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     previous = state.get("expires", "") if state.get("device") == device else ""
-    if not force and previous and dt.datetime.fromisoformat(previous) > now + dt.timedelta(days=3):
+    marker = source / PENDING
+    pending = json.loads(marker.read_text()) if marker.exists() else None
+    if pending and pending["device"] != device:
+        raise RuntimeError("The queued release belongs to another device")
+    if not pending and not force and previous and dt.datetime.fromisoformat(previous) > now + dt.timedelta(days=3):
         print("Installed profile valid until", previous)
         return
     reachable = subprocess.run(
@@ -84,24 +110,32 @@ def refresh(device, source, force):
             raise RuntimeError("Cannot reach the paired iPhone via Wi-Fi or USB")
         print("Paired iPhone unavailable; will retry at the next check")
         return
-    derived = BASE / "build"
-    project = source / "ios/TmuxLink.xcodeproj"
-    run("xcodebuild", "-project", project, "-scheme", "TmuxLink",
-        "-configuration", "Release", "-destination", "generic/platform=iOS", "-derivedDataPath", derived,
-        "-allowProvisioningUpdates", "build", timeout=600)
-    app = derived / "Build/Products/Release-iphoneos/TmuxLink.app"
     # Old pinned snapshots predate the widget and remain valid for their own builds.
-    require_widget = WIDGET_BUNDLE in (project / "project.pbxproj").read_text()
-    expires = signed_expiration(app, device, now, require_widget)
-    if not force and previous and expires <= dt.datetime.fromisoformat(previous):
+    require_widget = bool(pending) or WIDGET_BUNDLE in (source / "ios/TmuxLink.xcodeproj/project.pbxproj").read_text()
+    app = source / "Release/TmuxLink.app"
+    expires = None
+    if pending and dt.datetime.fromisoformat(pending["expires"]) > now and app.is_dir():
+        try:
+            expires = signed_expiration(app, device, now, require_widget)
+        except (OSError, RuntimeError, subprocess.CalledProcessError):
+            print("Queued signature needs to be rebuilt from its snapshot")
+    if expires is None:
+        app = build_release(source)
+        expires = signed_expiration(app, device, dt.datetime.now(dt.timezone.utc), require_widget)
+    release = version_info(app)
+    if pending and any(release[key] != pending[key] for key in release):
+        raise RuntimeError("Signed release version differs from the queued version")
+    if not pending and not force and previous and expires <= dt.datetime.fromisoformat(previous):
         print("Xcode did not extend the profile; will retry at the next check")
         return
     run("xcrun", "devicectl", "device", "install", "app", "--device", device, "--timeout", "90", app)
-    state.update(device=device, expires=expires.isoformat(), last_install=now.isoformat())
+    state.update(device=device, expires=expires.isoformat(), last_install=now.isoformat(), **release)
     save_state(state)
+    if pending:
+        marker.unlink()
     print("Installed. Profile valid until", expires.isoformat())
 
-def setup(device):
+def setup(device, queue=False):
     repo = Path(__file__).resolve().parents[1]
     # Pin the build inputs so unattended refreshes never deploy an untested working tree.
     tmp = Path(tempfile.mkdtemp(prefix="snapshot-", dir=BASE))
@@ -110,7 +144,10 @@ def setup(device):
         lib = Path("target/aarch64-apple-ios/release/libtmux_link_mobile.a")
         (tmp/lib.parent).mkdir(parents=True)
         shutil.copy2(repo/lib, tmp/lib)
-        refresh(device, tmp, True)
+        if queue:
+            pending = queue_release(device, tmp)
+        else:
+            refresh(device, tmp, True)
         helper = tmp / "renew-ios.py"
         shutil.copy2(__file__, helper)
         PLIST.parent.mkdir(parents=True, exist_ok=True)
@@ -122,15 +159,15 @@ def setup(device):
         stage.write_bytes(plistlib.dumps(config))
         old = plistlib.loads(PLIST.read_bytes()) if PLIST.exists() else {}
         subprocess.run(RUN, capture_output=True)
-        os.replace(stage, PLIST)
         try:
+            os.replace(stage, PLIST)
             run("launchctl", "bootstrap", f"gui/{os.getuid()}", PLIST)
         except Exception:
             if old:
                 PLIST.write_bytes(plistlib.dumps(old))
                 run("launchctl", "bootstrap", f"gui/{os.getuid()}", PLIST)
             else:
-                PLIST.unlink()
+                PLIST.unlink(missing_ok=True)
             raise
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -139,24 +176,31 @@ def setup(device):
         if path != tmp and path.is_dir():
             shutil.rmtree(path)
     print("Refresh job installed:", PLIST)
+    if queue:
+        print(f"Queued version {pending['version']} build {pending['build']} for {device}")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["install","check","status","uninstall"])
+    parser.add_argument("action", choices=["install","queue","check","status","uninstall"])
     parser.add_argument("device", nargs="?")
     args = parser.parse_args()
-    if args.action in ("check","install") and not args.device:
+    if args.action in ("check","install","queue") and not args.device:
         parser.error("device UDID required")
     os.umask(0o077)
     BASE.mkdir(parents=True, exist_ok=True)
     with (BASE / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if args.action == "install":
-            setup(args.device)
+        if args.action in ("install", "queue"):
+            setup(args.device, queue=args.action == "queue")
         elif args.action == "check":
             refresh(args.device, Path(__file__).resolve().parent, False)
         elif args.action == "status":
             print(STATE.read_text() if STATE.exists() else "No successful installation")
+            if PLIST.exists():
+                arguments = plistlib.loads(PLIST.read_bytes())["ProgramArguments"]
+                marker = Path(arguments[1]).parent / PENDING
+                if marker.exists():
+                    print("Pending installation:", marker.read_text().strip())
             run("launchctl", "print", f"gui/{os.getuid()}/{LABEL}")
         else:
             subprocess.run(RUN, capture_output=True)

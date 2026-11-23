@@ -118,6 +118,7 @@ jobs:
         run: |
           scripts/test-install.sh
           python3 scripts/test-download.py
+          python3 scripts/test-renew-ios.py
           (cd dist && shasum -a 256 *.tar.gz > SHA256SUMS)
           ./install.sh --from-dir "$PWD/dist" --prefix "$RUNNER_TEMP/tmux-link" --role agent
           set +e

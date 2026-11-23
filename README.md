@@ -252,4 +252,6 @@ scripts/renew-ios.py status
 
 安装命令会保存当前 iOS 源码和已编译的 Rust 库快照，签名并覆盖安装 Release 版，保留原 Bundle ID 和 Keychain。首次用 USB 在 Xcode 配对后，保持 Mac 已登录且未休眠。iPhone 与 Mac 接入能互相访问的同一局域网时，Xcode 可通过 Wi-Fi 安装。launchd 每五分钟检查一次，按主 App 和实时活动扩展两份描述文件中较早的到期时间，提前三天开始探测已配对的 iPhone，连通后请求 Xcode 更新描述文件。如果设备离线或 Apple 暂未延长有效期，任务会在下次检查时重试。只有安装成功才记录新有效期。更新项目后重新运行安装命令以替换快照。日志在 `~/Library/Application Support/TmuxLink/Renewal/refresh.log`。运行 `scripts/renew-ios.py uninstall` 可停用任务。
 
+手机暂时不在同一网络时，完成构建后可运行 `scripts/renew-ios.py queue 设备UDID`。Mac 会先签名并核对设备和扩展，再由同一个续签任务每五分钟检查一次。手机连回可互通的 Wi-Fi 或接上 USB 且系统允许安装时，任务会安装排队的版本，即使旧版签名还有效。运行 `scripts/renew-ios.py status` 可区分待安装版本和上次成功安装记录。
+
 使用手机端 SideStore 时，从 Release 下载 `TmuxLink.ipa`，按 [SideStore 官方安装指南](https://docs.sidestore.io/docs/installation/install.html) 配置，在 My Apps 导入 IPA 并刷新。SideStore 刷新需要 Wi-Fi 和 LocalDevVPN。建议同一安装只选一种签名管理方式。免费个人团队描述文件的有效期为七天，见 [Apple 开发者账户说明](https://developer.apple.com/help/account/basics/about-your-developer-account/)。
