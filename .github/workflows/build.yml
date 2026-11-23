@@ -109,8 +109,8 @@ jobs:
             cp "target/$target/release/agent" "target/$target/release/center" package/bin/
             cpu="$arch"
             if [ "$arch" = aarch64 ]; then cpu=arm64; fi
-            lipo -verify_arch "$cpu" package/bin/agent
-            lipo -verify_arch "$cpu" package/bin/center
+            lipo package/bin/agent -verify_arch "$cpu"
+            lipo package/bin/center -verify_arch "$cpu"
             tar -C package -czf "dist/tmux-link-macos-$arch.tar.gz" .
           done
       - name: macOS installer integration
