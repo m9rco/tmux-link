@@ -417,8 +417,24 @@ private struct Sessions: View {
   @State private var failure: String?
   @State private var loading = true
   @State private var revision = 0
+  @State private var showingAdvisor = false
+  @State private var pendingSelection: AdvisorSelection?
+  @State private var advisorDestination: AdvisorSelection?
+
+  private var advisorNotice: String? {
+    if loading { return "正在读取会话…" }
+    if failure != nil { return "会话列表读取失败，请返回列表刷新。" }
+    return sessions.isEmpty ? "这个客户端暂无会话。" : nil
+  }
+
   var body: some View {
     List {
+      Section {
+        Button { showingAdvisor = true } label: {
+          Label("会话助手", systemImage: "sparkles")
+        }
+        .accessibilityIdentifier("sessions.advisor")
+      }.listRowBackground(panel)
       Section {
         if loading {
           ProgressView("正在读取会话…")
@@ -462,6 +478,20 @@ private struct Sessions: View {
           Image(systemName: "arrow.clockwise")
         }.accessibilityLabel("刷新会话")
       }
+      .sheet(isPresented: $showingAdvisor, onDismiss: {
+        if let pendingSelection {
+          advisorDestination = pendingSelection
+          self.pendingSelection = nil
+        }
+      }) {
+        SessionAdvisorView(sessions: sessions, notice: advisorNotice, open: openFromAdvisor)
+          .preferredColorScheme(.dark).tint(mint)
+      }
+      .navigationDestination(isPresented: Binding(
+        get: { advisorDestination != nil }, set: { if !$0 { advisorDestination = nil } })
+      ) {
+        advisorDestination?.terminal
+      }
       .task(id: revision) {
         loading = true
         failure = nil
@@ -476,6 +506,18 @@ private struct Sessions: View {
         }
         loading = false
       }
+  }
+
+  @MainActor
+  private func openFromAdvisor(_ candidate: RemoteSession) async throws -> Bool {
+    let current = try await SessionDirectory.fetch(client)
+    try Task.checkCancellation()
+    guard showingAdvisor else { throw CancellationError() }
+    sessions = current
+    guard let selection = AdvisorSelection(candidate, in: current, client: client) else { return false }
+    pendingSelection = selection
+    showingAdvisor = false
+    return true
   }
 }
 
