@@ -272,19 +272,19 @@ async fn run(
                     // MaxSessions=1 permits the PTY but disallows a second
                     // channel. Reuse a separately authenticated connection there.
                     let result = timeout(Duration::from_secs(5), async {
-                        let channel = if let Some(control) = &paging_connection {
-                            control.channel_open_session().await?
-                        } else {
-                            match session.channel_open_session().await {
-                                Ok(channel) => channel,
-                                Err(russh::Error::ChannelOpenFailure(_)) => {
-                                    let control = authenticated(peer.clone(), None).await?;
-                                    let channel = control.channel_open_session().await?;
-                                    paging_connection = Some(control);
-                                    channel
-                                }
-                                Err(error) => return Err(error.into()),
+                        let control = paging_connection.as_ref().unwrap_or(&session);
+                        let channel = match control.channel_open_session().await {
+                            Ok(channel) => channel,
+                            // OpenSSH may still count the previous page channel against
+                            // MaxSessions even after sending its close. No command has
+                            // been submitted on the denied channel, so a fresh one is safe.
+                            Err(russh::Error::ChannelOpenFailure(_)) => {
+                                let control = authenticated(peer.clone(), None).await?;
+                                let channel = control.channel_open_session().await?;
+                                paging_connection = Some(control);
+                                channel
                             }
+                            Err(error) => return Err(error.into()),
                         };
                         page_pane(channel, id, direction).await
                     })
