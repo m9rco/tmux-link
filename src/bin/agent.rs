@@ -96,7 +96,13 @@ fn attach() -> Result<()> {
             .iter()
             .map(|(id, name)| -> Result<_> {
                 let id: u64 = id.strip_prefix('$').context("invalid tmux ID")?.parse()?;
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true}))
+                let path = Command::new("tmux")
+                    .args(["display-message", "-p", "-t", &format!("${id}:"), "#{pane_current_path}"])
+                    .output()?;
+                let directory = path.status.success().then(|| {
+                    String::from_utf8_lossy(&path.stdout).trim_end_matches('\n').to_owned()
+                });
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);

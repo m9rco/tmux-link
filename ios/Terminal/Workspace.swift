@@ -49,6 +49,7 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   let id: Int64
   let name: String
   var touchPaging: Bool? = nil
+  var directory: String? = nil
 }
 
 enum SessionDirectory {
@@ -432,12 +433,21 @@ private struct Sessions: View {
             TerminalView(client: client, session: session)
           } label: {
             Label {
-              Text(session.name).font(.body.monospaced()).padding(.vertical, 7)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(session.name).font(.body.monospaced())
+                if let directory = session.directory, !directory.isEmpty {
+                  Text(directory).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                }
+              }.padding(.vertical, 7)
             } icon: {
               Image(systemName: "rectangle.split.2x1").foregroundStyle(mint)
             }
           }.contextMenu {
             Button("复制会话名称") { UIPasteboard.general.string = session.name }
+            if let directory = session.directory, !directory.isEmpty {
+              Button("复制工作目录") { UIPasteboard.general.string = directory }
+            }
           }
         }
       } header: {
