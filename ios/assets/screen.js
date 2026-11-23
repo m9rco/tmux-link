@@ -101,8 +101,33 @@ function selectionSnapshot(x, y) {
   return {text, offset, atCursor: point.atCursor || !!inInput, selected: inputSelection ? term.getSelection() : ''};
 }
 
-function setTerminalHeight(height) {
-  document.getElementById('term').style.height = height + 'px';
+function keyboardCursor() {
+  const b = term.buffer.active;
+  const row = b.baseY + b.cursorY - b.viewportY;
+  // A full-screen program can park a hidden cursor anywhere during a repaint.
+  // Follow only the cursor xterm actually drew in the displayed buffer.
+  const line = term.element.querySelector('.xterm-rows').children[row];
+  return {row: line?.querySelector('.xterm-cursor') ? row : -1, rows: term.rows};
+}
+
+function requestTerminalKeyboard() {
+  bridge.postMessage({showKeyboard: true, cursor: keyboardCursor()});
+}
+
+let cursorWatch;
+function trackKeyboardCursor(enabled) {
+  cursorWatch?.dispose();
+  cursorWatch = null;
+  if (!enabled) return;
+  let last;
+  function report() {
+    const cursor = keyboardCursor();
+    if (last?.row === cursor.row && last.rows === cursor.rows) return;
+    last = cursor;
+    bridge.postMessage({cursor});
+  }
+  cursorWatch = term.onRender(report);
+  report();
 }
 
 // tmux can erase a pane with SU (scroll up the entire scrolling region),
@@ -158,7 +183,7 @@ const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
     term.open(area);
     term.textarea.inputMode = 'none';
     term.textarea.addEventListener('click', event => {
-      if (event.detail === 0) bridge.postMessage({showKeyboard: true});
+      if (event.detail === 0) requestTerminalKeyboard();
     });
     installSelectionTouches(area);
     // OSC 133 B marks the editable input after a shell prompt when forwarded by tmux.

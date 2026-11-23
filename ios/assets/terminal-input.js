@@ -215,7 +215,7 @@ function installSelectionTouches(area) {
       const tap = start && event.timeStamp - start.time < 320 &&
         Math.hypot(t.clientX - start.x, t.clientY - start.y) < 12;
       lastTap = tap ? {x: t.clientX, y: t.clientY, time: event.timeStamp, span: start.span} : null;
-      if (tap) { term.focus(); bridge.postMessage({showKeyboard: true}); }
+      if (tap) { term.focus(); requestTerminalKeyboard(); }
       if (tap && inputSelection) { term.clearSelection(); inputSelection = null; }
     }
     start = null;

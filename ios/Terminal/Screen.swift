@@ -9,8 +9,8 @@ private final class TerminalViewport: UIView {
   let web: WKWebView
   private var measuredArea = CGSize.zero
   private var grid = CGSize.zero
-  private var committedSize = CGSize.zero
-  private var pageLoaded = false
+  private var cursor: (row: Int, rows: Int)?
+  private var offset: CGFloat = 0
 
   init(web: WKWebView) {
     self.web = web
@@ -22,46 +22,53 @@ private final class TerminalViewport: UIView {
 
   required init?(coder: NSCoder) { fatalError() }
 
-  func didLoadPage() {
-    pageLoaded = true
-    committedSize = .zero
-    setNeedsLayout()
+  func setCursor(row: Int, rows: Int) {
+    cursor = (0..<rows).contains(row) ? (row, rows) : nil
+    positionCanvas()
   }
 
   func setMeasurement(area: CGSize, grid: CGSize) {
     guard measuredArea != area || self.grid != grid else { return }
     measuredArea = area
     self.grid = grid
-    applyGridScale()
+    setNeedsLayout()
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
     guard bounds.width > 0, bounds.height > 0 else { return }
-    let size = bounds.size
-    // WebKit tries to preserve the focused element's screen position when its scroll
-    // view grows. Keep that canvas full-height and resize only the clipped terminal grid.
-    let fullHeight = window.map { convert($0.bounds, from: $0).maxY } ?? bounds.height
+    // The keyboard clips this viewport. Only a change to the session's full
+    // bounds (such as rotation) should change the web page or send a PTY resize.
+    let fullHeight = superview.map { convert($0.bounds, from: $0).maxY } ?? bounds.height
     let canvas = CGSize(width: bounds.width, height: max(fullHeight, bounds.height))
     UIView.performWithoutAnimation {
       if web.bounds.size != canvas { web.bounds = CGRect(origin: .zero, size: canvas) }
-      web.layer.position = bounds.origin
-      if pageLoaded && committedSize != size {
-        web.callAsyncJavaScript("setTerminalHeight(height)", arguments: ["height": size.height],
-                                in: nil, in: .page, completionHandler: nil)
+      if grid.width > 0, grid.height > 0,
+         abs(measuredArea.width - canvas.width) < 1, abs(measuredArea.height - canvas.height) < 1 {
+        web.transform = CGAffineTransform(scaleX: canvas.width / grid.width, y: canvas.height / grid.height)
       }
-      committedSize = size
-      applyGridScale()
+      positionCanvas()
     }
   }
 
-  private func applyGridScale() {
-    guard grid.width > 0, grid.height > 0,
-      abs(measuredArea.width - committedSize.width) < 1, abs(measuredArea.height - committedSize.height) < 1
-    else { return }
-    UIView.performWithoutAnimation {
-      web.transform = CGAffineTransform(scaleX: committedSize.width / grid.width, y: committedSize.height / grid.height)
+  private func positionCanvas() {
+    let height = web.bounds.height
+    let travel = max(0, height - bounds.height)
+    if travel > 0, let cursor {
+      let rowHeight = height / CGFloat(cursor.rows)
+      let top = CGFloat(cursor.row) * rowHeight
+      // Keep the current view still while the whole cursor row is already visible.
+      offset = min(top, max(offset, top + rowHeight - bounds.height))
     }
+    offset = min(travel, max(0, offset))
+    UIView.performWithoutAnimation {
+      web.layer.position = CGPoint(x: bounds.minX, y: bounds.minY - offset)
+    }
+  }
+
+  func relativeGridPoint(_ point: CGPoint) -> CGPoint {
+    let local = web.convert(point, from: self)
+    return CGPoint(x: local.x / max(1, grid.width), y: local.y / max(1, grid.height))
   }
 }
 
@@ -208,9 +215,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       web.typingKeyboard.isHidden = !visible
       view.layoutIfNeeded()
     }
-    if !visible {
-      web.evaluateJavaScript("term.blur()", completionHandler: nil)
-    }
+    web.evaluateJavaScript(visible ? "trackKeyboardCursor(true)" : "trackKeyboardCursor(false); term.blur()",
+                           completionHandler: nil)
   }
 
   func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
@@ -284,8 +290,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     switch pan.state {
     case .began:
       let point = pan.location(in: viewport)
-      scrollOrigin = CGPoint(x: point.x / max(1, viewport.bounds.width),
-                             y: (point.y - dy) / max(1, viewport.bounds.height))
+      scrollOrigin = viewport.relativeGridPoint(CGPoint(x: point.x, y: point.y - dy))
       lastScrollDistance = 0
       firstScrollStep = true
     case .changed, .ended: break
@@ -375,7 +380,6 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     guard active && !started else { return }
     started = true
-    viewport.didLoadPage()
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
       finish("本地连接失败")
@@ -505,6 +509,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     if ready, touchPaging, let direction = obj["page"] as? String, ["up", "down"].contains(direction) {
       send(2, Data([direction == "up" ? 1 : 0]))
+    }
+    if let cursor = obj["cursor"] as? [String: Int], let row = cursor["row"], let rows = cursor["rows"],
+       rows > 0, rows <= Int(UInt16.max) {
+      viewport.setCursor(row: row, rows: rows)
     }
     if obj["showKeyboard"] as? Bool == true, ready { setKeyboardVisible(true) }
     if let metrics = obj["layout"] as? [String: Double],

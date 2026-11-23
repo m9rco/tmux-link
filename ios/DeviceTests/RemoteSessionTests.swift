@@ -312,9 +312,11 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertNotNil(rootController as? UIHostingController<Workspace>)
   }
 
-  @MainActor private var rootController: UIViewController? {
+  @MainActor private var rootController: UIViewController? { appWindow?.rootViewController }
+
+  @MainActor private var appWindow: UIWindow? {
     UIApplication.shared.connectedScenes.compactMap {
-      ($0 as? UIWindowScene)?.windows.first(where: \.isKeyWindow)?.rootViewController
+      ($0 as? UIWindowScene)?.windows.first(where: \.isKeyWindow)
     }.first
   }
 
@@ -638,30 +640,102 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
-  private func verifyKeyboardLayout(_ web: WKWebView) async throws {
+  private func verifyKeyboardLayout(_ web: WKWebView, checkRemoteCursor: Bool = false) async throws {
+    let terminal = try XCTUnwrap(web as? TerminalWebView)
+    let window = try XCTUnwrap(terminal.window)
+    let viewport = try XCTUnwrap(web.superview)
+    let hide = try XCTUnwrap(descendants(terminal.shortcutBar).first {
+      $0.accessibilityIdentifier == "terminal.keyboard.hide"
+    } as? UIButton)
+    let pixel = 1 / window.screen.scale
+    func sampleGrid() async throws -> CGRect {
+      let result = try await web.callAsyncJavaScript("""
+        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const r = term.element.querySelector('.xterm-screen').getBoundingClientRect();
+        return [r.left, r.top, r.width, r.height];
+        """, arguments: [:], in: nil, contentWorld: .page) as? [Double]
+      let rect = try XCTUnwrap(result)
+      return web.convert(CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3]), to: window)
+    }
+    func open() async throws {
+      _ = try await web.evaluateJavaScript("term.textarea.click(); true")
+      for _ in 0..<100 where terminal.typingKeyboard.isHidden {
+        try await Task.sleep(for: .milliseconds(20))
+      }
+      XCTAssertFalse(terminal.typingKeyboard.isHidden)
+      XCTAssertFalse(terminal.shortcutBar.isHidden)
+    }
+    func fixtureReply(key: String, marker: String) async throws -> (row: Int, suffix: String) {
+      _ = try await web.callAsyncJavaScript("pressTerminalKey(key); return true",
+        arguments: ["key": key], in: nil, contentWorld: .page)
+      for _ in 0..<150 {
+        let result = try await web.callAsyncJavaScript("""
+          const b = term.buffer.active;
+          const line = b.getLine(b.baseY + b.cursorY)?.translateToString(true);
+          return line?.startsWith(marker) ? [b.baseY + b.cursorY - b.viewportY, line.slice(marker.length)] : [];
+          """, arguments: ["marker": marker], in: nil, contentWorld: .page) as? [Any]
+        if let result, result.count == 2, let row = result[0] as? Int, let suffix = result[1] as? String {
+          return (row, suffix)
+        }
+        try await Task.sleep(for: .milliseconds(30))
+      }
+      throw NSError(domain: "TerminalTest", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Remote fixture did not draw " + marker])
+    }
+
     let initial = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
     let full = try XCTUnwrap(initial)
     let canvas = web.bounds.size
+    let fullGrid = try await sampleGrid()
     _ = try await web.evaluateJavaScript("""
       window.keyboardSizes = [];
       window.watchGrid = term.onResize(({cols, rows}) => keyboardSizes.push([cols, rows]));
       true
       """)
-    let terminal = try XCTUnwrap(web as? TerminalWebView)
     defer { web.evaluateJavaScript("watchGrid.dispose()", completionHandler: nil) }
-    _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
-    try await Task.sleep(nanoseconds: 950_000_000)
-    let opening = try await web.evaluateJavaScript("keyboardSizes.splice(0)") as? [[Int]]
-    let focused = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
-    let compact = try XCTUnwrap(focused)
-    XCTAssertEqual(compact.first, full.first)
-    XCTAssertLessThan(try XCTUnwrap(compact.last), try XCTUnwrap(full.last))
-    XCTAssertEqual(opening, [compact])
-    XCTAssertEqual(web.bounds.size, canvas)
-    XCTAssertFalse(terminal.typingKeyboard.isHidden)
-    XCTAssertFalse(terminal.shortcutBar.isHidden)
+    // Initial attach may legitimately resize the PTY; compare counter and dimensions from this point.
+    let before = checkRemoteCursor ? try await fixtureReply(key: "<", marker: "TL-PTY<").suffix : nil
+    func checkCaret(row: Int, in drawn: CGRect) {
+      let visible = viewport.convert(viewport.bounds, to: window)
+      let cell = drawn.height / CGFloat(full[1])
+      let top = drawn.minY + CGFloat(row) * cell
+      XCTAssertGreaterThanOrEqual(top, visible.minY - pixel)
+      XCTAssertLessThanOrEqual(top + cell, visible.maxY + pixel)
+    }
+    for bottom in [true, false, true] {
+      let row = checkRemoteCursor ? try await fixtureReply(
+        key: bottom ? "$" : "^", marker: bottom ? "TL-BOTTOM" : "TL-TOP").row : nil
+      try await open()
+      let drawn = try await sampleGrid()
+      XCTAssertEqual(drawn.width, fullGrid.width, accuracy: pixel)
+      XCTAssertEqual(drawn.height, fullGrid.height, accuracy: pixel)
+      XCTAssertEqual(web.bounds.size, canvas)
+      if let row {
+        checkCaret(row: row, in: drawn)
+        if bottom {
+          XCTAssertGreaterThanOrEqual(row, full[1] - 3)
+          // Moving to the opposite end while typing brings the caret into view once.
+          let top = try await fixtureReply(key: "^", marker: "TL-TOP")
+          let shifted = try await sampleGrid()
+          checkCaret(row: top.row, in: shifted)
+          XCTAssertGreaterThan(shifted.minY, drawn.minY)
+          // The next reply stays within that visible region and must leave its origin alone.
+          let near = try await fixtureReply(key: "z", marker: "TL-WARM")
+          let still = try await sampleGrid()
+          checkCaret(row: near.row, in: still)
+          XCTAssertEqual(still.minY, shifted.minY, accuracy: pixel)
+        } else {
+          XCTAssertLessThanOrEqual(row, 1)
+        }
+      }
+      hide.sendActions(for: .touchUpInside)
+      let restored = try await sampleGrid()
+      XCTAssertEqual(restored.minY, fullGrid.minY, accuracy: pixel)
+      XCTAssertEqual(restored.maxY, fullGrid.maxY, accuracy: pixel)
+      XCTAssertTrue(terminal.typingKeyboard.isHidden)
+    }
+    try await open()
     XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
-    let window = try XCTUnwrap(terminal.window)
     if IslandHardware.supportedDevice && window.bounds.width < window.bounds.height {
       let top = window.safeAreaInsets.top
       // In portrait, the status button takes taps beside the island while typing.
@@ -674,7 +748,6 @@ final class RemoteSessionTests: XCTestCase {
     }
     let keys = terminal.typingKeyboard.surface
     let keyFrame = keys.convert(keys.bounds, to: window)
-    let pixel = 1 / window.screen.scale
     XCTAssertEqual(keyFrame.maxY, window.bounds.maxY, accuracy: pixel)
     let bottomEdges = try await keys.evaluateJavaScript("""
       ['{lang}', '{space}', '{enter}'].map(k => keyboard.getButtonElement(k).getBoundingClientRect().bottom)
@@ -685,14 +758,20 @@ final class RemoteSessionTests: XCTestCase {
       let point = keys.convert(CGPoint(x: keys.bounds.midX, y: CGFloat(edge)), to: window)
       XCTAssertEqual(point.y, window.bounds.maxY, accuracy: pixel)
     }
-    let viewport = try XCTUnwrap(web.superview)
     XCTAssertEqual(viewport.convert(viewport.bounds, to: window).maxY,
                    terminal.shortcutBar.convert(terminal.shortcutBar.bounds, to: window).minY, accuracy: 1)
-    terminal.shortcutBar.hideKeyboard?()
-    try await Task.sleep(nanoseconds: 950_000_000)
-    let closing = try await web.evaluateJavaScript("keyboardSizes") as? [[Int]]
+    hide.sendActions(for: .touchUpInside)
+    _ = try await sampleGrid()
+    let sizes = try await web.evaluateJavaScript("keyboardSizes")
+    let events = try XCTUnwrap(sizes as? [[Int]])
+    XCTAssertTrue(events.isEmpty, "Keyboard toggles resized the terminal grid: \(events)")
+    if let before {
+      let after = try await fixtureReply(key: ">", marker: "TL-PTY>").suffix
+      XCTAssertEqual(after, before, "Keyboard visibility changed the remote tmux pane SIGWINCH count or size")
+      print("Keyboard open/close cycles:", 4, "grid resizes:", events.count,
+            "remote SIGWINCH,cols,rows:", before, "→", after)
+    }
     let restored = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
-    XCTAssertEqual(closing, [full])
     XCTAssertEqual(restored, full)
     XCTAssertEqual(web.bounds.size, canvas)
   }
@@ -1051,7 +1130,7 @@ final class RemoteSessionTests: XCTestCase {
     }
     // Connecting by the fixture's known ID avoids warming SSH by fetching the directory.
     let session = RemoteSession(id: id, name: config.sessionName + "-latency")
-    let window = try XCTUnwrap(rootController?.view.window)
+    let window = try XCTUnwrap(appWindow)
     let previous = window.rootViewController
     defer { window.rootViewController = previous }
     let open = ProcessInfo.processInfo.systemUptime
@@ -1166,6 +1245,9 @@ final class RemoteSessionTests: XCTestCase {
       }
       samples.append(ms)
     }
+    phase = "keyboardLayout"
+    web.shortcutBar.hideKeyboard?()
+    try await verifyKeyboardLayout(web, checkRemoteCursor: true)
     phase = "complete"
   }
 
