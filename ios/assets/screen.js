@@ -169,12 +169,16 @@ const ready = document.fonts.load('14px "Terminal Symbols"', '\ue0b0')
     });
     const grid = area.querySelector('.xterm-screen');
     guardPaneRedraw(grid);
+    let measured = false;
     function fitGrid() {
       // FitAddon's fit() explicitly clears every painted row before resize.
       // The DOM renderer can reuse existing row elements when resized directly.
+      if (!area.clientWidth || !area.clientHeight) return;
       const size = fit.proposeDimensions();
-      if (size && Number.isFinite(size.cols) && Number.isFinite(size.rows)
-          && (term.cols !== size.cols || term.rows !== size.rows)) term.resize(size.cols, size.rows);
+      if (!size || !Number.isFinite(size.cols) || !Number.isFinite(size.rows)) return;
+      if (term.cols !== size.cols || term.rows !== size.rows) term.resize(size.cols, size.rows);
+      else if (!measured) bridge.postMessage({cols: term.cols, rows: term.rows});
+      measured = true;
     }
     fitGrid();
     const layout = new ResizeObserver(() => {

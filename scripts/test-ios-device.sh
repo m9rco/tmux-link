@@ -17,11 +17,13 @@ temp=$(mktemp -d)
 session="tmux-link-device-e2e-$$"
 other=no
 messages=no
+latency=no
 created=no
 cleanup() {
     if [ "$created" = yes ]; then tmux kill-session -t "=$session" 2>/dev/null || true; fi
     if [ "$other" = yes ]; then tmux kill-session -t "=${session}-other" 2>/dev/null || true; fi
     if [ "$messages" = yes ]; then tmux kill-session -t "=${session}-messages" 2>/dev/null || true; fi
+    if [ "$latency" = yes ]; then tmux kill-session -t "=${session}-latency" 2>/dev/null || true; fi
     rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -66,7 +68,9 @@ tmux new-session -d -s "${session}-messages" /usr/bin/vim -Nu NONE -i NONE -n -R
     -c 'set mouse=a ttymouse=sgr nowrap scrolloff=0' -c 'normal! G' "$temp/messages.txt"
 messages=yes
 tmux set-option -t "${session}-messages" mouse on
-python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" <<'PY'
+benchmark_id=$(tmux new-session -d -P -F '#{session_id}' -s "${session}-latency" python3 "$PWD/scripts/terminal-latency-fixture.py")
+latency=yes
+python3 - "$temp/phone.pub" "$temp/tmux-link-e2e.json" "$agent" "$session" "$PWD/target/release/agent" "$benchmark_id" <<'PY'
 import fcntl
 import json
 import os
@@ -75,7 +79,7 @@ import shlex
 import subprocess
 import sys
 
-key_file, output, ssh_agent, session, source_agent = sys.argv[1:]
+key_file, output, ssh_agent, session, source_agent, benchmark_id = sys.argv[1:]
 parts = Path(key_file).read_text().strip().split()
 if len(parts) < 2 or parts[0] != "ssh-ed25519":
     raise SystemExit("Unexpected phone public key")
@@ -104,6 +108,7 @@ if not link.startswith("tmuxlink://client?") or len(link.splitlines()) != 1:
 Path(output).write_text(json.dumps({
     "host": center, "port": 443, "user": user,
     "fingerprint": pin, "sessionName": session, "importLink": link, "hasHistoryFixture": True,
+    "benchmarkSessionID": int(benchmark_id[1:]),
 }) + "\n")
 PY
 xcrun devicectl device copy to --device "$device" --domain-type appDataContainer \

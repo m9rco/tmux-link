@@ -98,7 +98,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var fd: Int32 = -1
   private var started = false
   private var active = true
-  private var dimensions = (UInt16(80), UInt16(24))
+  private var dimensions: (UInt16, UInt16)?
+  private var sentDimensions: (UInt16, UInt16)?
   init(
     client: ClientProfile, session: RemoteSession?,
     navigationStatus: TerminalNavigationStatus? = nil, leave: (() -> Void)? = nil
@@ -397,10 +398,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       finish(error.localizedDescription)
       return
     }
-    resize()
     let hasIdentity = connection.identity != nil
     let result = Task.detached(priority: .userInitiated) { [target] in
-      connection.run(worker, target: target)
+      connection.run(worker, target: target, fitInitialGrid: true)
     }
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       let stream = FileHandle(fileDescriptor: reader, closeOnDealloc: true)
@@ -485,6 +485,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       web.typingKeyboard.isUserInteractionEnabled = true
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
+    if phase == .attaching || phase == .ready { resize() }
     refreshStatus()
   }
 
@@ -524,7 +525,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
   }
   private func resize() {
-    let (c, r) = dimensions
+    guard let (c, r) = dimensions,
+          ready || (activityState.phase == .attaching && sentDimensions == nil) else { return }
+    if let sentDimensions, sentDimensions == (c, r) { return }
+    sentDimensions = (c, r)
     send(
       1,
       Data([

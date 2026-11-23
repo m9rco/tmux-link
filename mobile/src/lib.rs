@@ -1,4 +1,5 @@
 //! iOS transport. A private socket pair links UIKit input and terminal output to SSH.
+mod handoff;
 use anyhow::{Context, Result, bail, ensure};
 use russh::{
     ChannelMsg, client,
@@ -177,18 +178,57 @@ async fn page_pane(
     Ok(())
 }
 
+async fn initial_pty_grid<R: tokio::io::AsyncRead + Unpin>(
+    mut read: R,
+    fitted: bool,
+) -> Result<((u16, u16), impl tokio::io::AsyncRead + Unpin)> {
+    let mut grid = (80, 24);
+    let mut prefix = Vec::new();
+    if fitted {
+        // A hidden or suspended WebView may not report a size. read_to_end keeps
+        // partial bytes on cancellation, so a late resize still reaches the pump.
+        let mut first_frame = (&mut read).take(9);
+        if let Ok(result) = timeout(
+            Duration::from_millis(250),
+            first_frame.read_to_end(&mut prefix),
+        )
+        .await
+        {
+            result?;
+        }
+        if let [1, 0, 0, 0, 4, a, b, c, d] = prefix[..] {
+            let cols = u16::from_be_bytes([a, b]);
+            let rows = u16::from_be_bytes([c, d]);
+            if cols > 0 && rows > 0 {
+                grid = (cols, rows);
+                prefix.clear();
+            }
+        }
+    }
+    Ok((grid, std::io::Cursor::new(prefix).chain(read)))
+}
+
 async fn run(
-    session: client::Handle<PinnedHost>,
-    mut read: tokio::net::unix::OwnedReadHalf,
+    (session, channel): handoff::SessionChannel,
+    read: tokio::net::unix::OwnedReadHalf,
     mut output: Output,
     target: Option<u64>,
     peer: Peer<'_>,
+    fit_initial_grid: bool,
 ) -> Result<()> {
     output.stage("attaching").await?;
+    let (mut applied_grid, mut read) = initial_pty_grid(read, fit_initial_grid).await?;
     let channel = timeout(Duration::from_secs(20), async {
-        let channel = session.channel_open_session().await?;
         channel
-            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .request_pty(
+                true,
+                "xterm-256color",
+                applied_grid.0.into(),
+                applied_grid.1.into(),
+                0,
+                0,
+                &[],
+            )
             .await?;
         if let Some(id) = target {
             channel.exec(true, format!("tmux-link-attach {id}")).await?;
@@ -217,7 +257,10 @@ async fn run(
                 1 if count == 4 => {
                     let cols = read.read_u16().await?;
                     let rows = read.read_u16().await?;
-                    ssh_tx.window_change(cols.into(), rows.into(), 0, 0).await?;
+                    if !fit_initial_grid || applied_grid != (cols, rows) {
+                        ssh_tx.window_change(cols.into(), rows.into(), 0, 0).await?;
+                        applied_grid = (cols, rows);
+                    }
                 }
                 2 if count == 1 => {
                     let id = target.context("paging requires a named session")?;
@@ -341,7 +384,7 @@ pub unsafe extern "C" fn tl_open(
     seed: *const u8,
     target: i64,
 ) -> *mut c_char {
-    unsafe { open_inner(fd, host, port, user, pin, seed, target, None) }
+    unsafe { open_inner(fd, host, port, user, pin, seed, target, None, false) }
 }
 
 /// # Safety
@@ -363,7 +406,29 @@ pub unsafe extern "C" fn tl_open_secure(
     key_len: usize,
 ) -> *mut c_char {
     let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
-    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials) }
+    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials, false) }
+}
+
+/// # Safety
+/// Same requirements as tl_open_secure. A terminal caller replies to "attaching"
+/// with its measured grid in the usual resize frame before sending any other input.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_open_secure_fitted(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    target: i64,
+    cert_der: *const u8,
+    cert_len: usize,
+    key_pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
+    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials, true) }
 }
 
 type CredentialBuffers = (*const u8, usize, *const u8, usize);
@@ -378,6 +443,7 @@ unsafe fn open_inner(
     seed: *const u8,
     target: i64,
     credentials: Option<CredentialBuffers>,
+    fit_initial_grid: bool,
 ) -> *mut c_char {
     let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     let result = (|| -> Result<()> {
@@ -405,9 +471,9 @@ unsafe fn open_inner(
         let pin = unsafe { CStr::from_ptr(pin) }.to_str()?;
         let key = Ed25519Keypair::from_seed(unsafe { &*seed.cast::<[u8; 32]>() });
         socket.set_nonblocking(true)?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
+        handoff::RUNTIME
+            .as_ref()
+            .context("starting SSH runtime")?
             .block_on(async {
                 let (read, writer) = UnixStream::from_std(socket)?.into_split();
                 let mut output = Output {
@@ -422,10 +488,12 @@ unsafe fn open_inner(
                     key: PrivateKey::from(key),
                     identity,
                 };
-                let session = authenticated(peer.clone(), Some(&mut output)).await?;
+                ensure!(target >= -2, "invalid session");
+                let key = (target != -1).then(|| handoff::PeerKey::from(&peer));
+                let connection = handoff::open_channel(&peer, key.as_ref(), &mut output).await?;
                 if target == -2 {
+                    let (session, mut channel) = connection;
                     timeout(Duration::from_secs(15), async {
-                        let mut channel = session.channel_open_session().await?;
                         channel.exec(true, "tmux-link-list").await?;
                         let mut size = 0;
                         let mut status = None;
@@ -449,10 +517,21 @@ unsafe fn open_inner(
                         );
                         Ok(())
                     })
-                    .await?
+                    .await??;
+                    if let Some(key) = key {
+                        handoff::offer(key, session);
+                    }
+                    Ok(())
                 } else {
-                    ensure!(target >= -1, "invalid session");
-                    run(session, read, output, u64::try_from(target).ok(), peer).await
+                    run(
+                        connection,
+                        read,
+                        output,
+                        u64::try_from(target).ok(),
+                        peer,
+                        fit_initial_grid,
+                    )
+                    .await
                 }
             })
     })();
@@ -554,4 +633,53 @@ pub unsafe extern "C" fn tl_approve_pairing(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tl_free_error(p: *mut c_char) {
     drop(unsafe { CString::from_raw(p) });
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn interrupted_first_frame_is_replayed_and_legacy_open_never_waits_for_input() {
+        let (mut producer, input) = tokio::io::duplex(64);
+        let (grid, input) = timeout(Duration::from_millis(20), initial_pty_grid(input, false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grid, (80, 24));
+        let resize = [1, 0, 0, 0, 4, 0, 53, 0, 31];
+        producer.write_all(&resize[..3]).await.unwrap();
+        let (grid, mut input) = timeout(Duration::from_secs(2), initial_pty_grid(input, true))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grid, (80, 24));
+        producer.write_all(&resize[3..]).await.unwrap();
+        let mut replay = [0; 9];
+        input.read_exact(&mut replay).await.unwrap();
+        assert_eq!(replay, resize);
+    }
+
+    #[tokio::test]
+    async fn consumes_only_a_complete_valid_first_resize() {
+        for first in [
+            [1, 0, 0, 0, 4, 0, 53, 0, 31],
+            [0, 0, 0, 0, 4, b'a', b'b', b'c', b'd'],
+        ] {
+            let (mut writer, input) = tokio::io::duplex(64);
+            writer.write_all(&first).await.unwrap();
+            writer.write_all(b"next").await.unwrap();
+            writer.shutdown().await.unwrap();
+            let (grid, mut input) = initial_pty_grid(input, true).await.unwrap();
+            let mut rest = Vec::new();
+            input.read_to_end(&mut rest).await.unwrap();
+            if first[0] == 1 {
+                assert_eq!(grid, (53, 31));
+                assert_eq!(rest, b"next");
+            } else {
+                assert_eq!(grid, (80, 24));
+                assert_eq!(rest, [&first[..], b"next"].concat());
+            }
+        }
+    }
 }

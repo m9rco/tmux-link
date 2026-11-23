@@ -147,6 +147,16 @@ jobs:
           xcodebuild -project ios/TmuxLink.xcodeproj -scheme TmuxLink -configuration Debug \
             -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO \
             -derivedDataPath target/xcode-ci-tests build-for-testing
+      - name: Measure terminal startup and echo on an iPhone simulator
+        run: |
+          command -v tmux || brew install tmux
+          python3 scripts/test-ios-simulator.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: simulator-performance
+          path: target/terminal-performance-simulator.json
+          if-no-files-found: error
       - name: Package unsigned iOS builds
         run: |
           mkdir -p dist target/ipa/Payload

@@ -18,6 +18,15 @@ fn start_protocol(
     key_env: &str,
     secure_target: Option<i64>,
 ) -> (UnixStream, JoinHandle<Result<(), String>>) {
+    start_with_grid(pin, key_env, secure_target, false)
+}
+
+fn start_with_grid(
+    pin: &str,
+    key_env: &str,
+    secure_target: Option<i64>,
+    fitted: bool,
+) -> (UnixStream, JoinHandle<Result<(), String>>) {
     let get = |key| std::env::var(key).unwrap();
     let key = load_secret_key(get(key_env), None).unwrap();
     let seed = key
@@ -38,7 +47,12 @@ fn start_protocol(
         .unwrap();
     let worker = thread::spawn(move || unsafe {
         let error = if let Some(target) = secure_target {
-            tmux_link_mobile::tl_open_secure(
+            let open = if fitted {
+                tmux_link_mobile::tl_open_secure_fitted
+            } else {
+                tmux_link_mobile::tl_open_secure
+            };
+            open(
                 core.into_raw_fd(),
                 host.as_ptr(),
                 port,
@@ -111,6 +125,31 @@ fn read_frame(socket: &mut UnixStream) -> (u8, Vec<u8>) {
     let mut payload = vec![0; size];
     socket.read_exact(&mut payload).unwrap();
     (header[0], payload)
+}
+
+#[test]
+#[ignore = "requires a disposable sshd sizing fixture"]
+fn requests_measured_pty_before_command_and_resizes_afterward() {
+    fn expect_grid(view: &mut UnixStream, expected: &[u8]) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut data = Vec::new();
+        while !data.windows(expected.len()).any(|s| s == expected) {
+            assert!(Instant::now() < deadline, "missing PTY dimensions");
+            let (kind, frame) = read_frame(view);
+            if kind == 0 {
+                data.extend(frame);
+            }
+        }
+    }
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start_with_grid(&pin, "TL_TEST_KEY", Some(90027), true);
+    while read_frame(&mut view) != (1, b"attaching".to_vec()) {}
+    send(&mut view, 1, &[0, 53, 0, 31]);
+    expect_grid(&mut view, b"initial-grid 31 53");
+    send(&mut view, 1, &[0, 88, 0, 22]);
+    send(&mut view, 0, b"\r");
+    expect_grid(&mut view, b"current-grid 22 88");
+    finish_session(view, worker);
 }
 
 #[test]
@@ -226,18 +265,36 @@ fn lists_and_attaches_unicode_session_in_c_locale() {
     worker.join().unwrap().unwrap();
     assert!(list.contains("zz-中文🙂"), "{list}");
 
+    // A listed connection must not bypass a changed pin or a different phone key.
+    for (requested_pin, key, expected) in [
+        ("SHA256:incorrect", "TL_TEST_KEY", "Unknown server key"),
+        (
+            pin.as_str(),
+            "TL_TEST_UNAUTHORIZED_KEY",
+            "phone key rejected",
+        ),
+    ] {
+        let (_view, rejected) = start_protocol(requested_pin, key, Some(1));
+        assert_eq!(rejected.join().unwrap().unwrap_err(), expected);
+    }
     // The fixture creates this pane in its second session (ID 1).
     let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(1));
     let marker = "pane-左🙂右".as_bytes();
     let mut terminal = Vec::new();
+    let mut stages = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !terminal.windows(marker.len()).any(|p| p == marker) {
+    while !terminal.windows(marker.len()).any(|p| p == marker)
+        || stages.last().map(Vec::as_slice) != Some(b"ready")
+    {
         assert!(Instant::now() < deadline, "missing Unicode pane text");
         let (kind, payload) = read_frame(&mut view);
         if kind == 0 {
             terminal.extend(payload);
+        } else if kind == 1 {
+            stages.push(payload);
         }
     }
+    assert_eq!(stages, [b"attaching".to_vec(), b"ready".to_vec()]);
     finish_session(view, worker);
 }
 

@@ -7,6 +7,8 @@ char *tl_open(int fd, const char *host, uint16_t port, const char *user, const c
 // 3 = a page request failed (empty payload, terminal stays connected).
 // Target -2 still returns unframed JSON. An identity requires both DER buffers and WSS.
 char *tl_open_secure(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t target, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
+// The terminal UI replies to the "attaching" stage with its first measured resize.
+char *tl_open_secure_fitted(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t target, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
 void tl_free_error(char *);
 // Returns NULL after approved host reports an outbound tunnel, otherwise an owned error string.
 char *tl_approve_pairing(const char *url, const char *id, const char *request_json, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);

@@ -2091,6 +2091,7 @@ dependencies = [
  "anyhow",
  "russh",
  "serde_json",
+ "sha2 0.10.9",
  "tmux-link",
  "tokio",
 ]

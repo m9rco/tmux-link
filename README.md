@@ -218,9 +218,13 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 | tmux 集成 | 真实 Linux / OpenSSH 隧道，验证错误指纹、未授权密钥、分片输入、尺寸调整和断线重连 |
 | 输入协议 | 超大帧和未知帧被拒绝并断开连接 |
 | 发布包 | x86_64 和 ARM64 构建包安装后执行实际二进制 |
-| iOS | 设备与 ARM64 模拟器构建，检查设备 IPA 内嵌的实时活动扩展及其版本 |
+| iOS | 设备与 ARM64 模拟器构建，校验 IPA 内嵌的实时活动扩展，并在模拟器通过真实 SSH 和 tmux 测量首屏与 100 次按键回显 |
 
 输入缓冲区在同一连接中复用，减少连续按键和粘贴时的重复分配。SSH 即使遇到输入协议错误也会发起断开，关闭等待上限为 5 秒。
+
+读取会话列表成功后，手机会将最近使用的 SSH 连接保留 20 秒。打开相同主机的会话时可以复用这条连接，主机指纹、路由、用户和设备凭据都要匹配。终端会优先用手机实测的行列数打开远程 PTY。
+
+每次推送和 PR 的 CI 在 `simulator-performance` 构建产物中保存一份 JSON。它记录打开会话到 xterm 首次显示远端标记的时间，以及内置键盘发出按键到 xterm 显示远端回显的中位数和 P95。CI 使用隔离的本地 SSH/tmux，适合比较客户端版本。下方真机测试会通过实际中继生成同样的指标，保存在 XCTest 的 `terminal-performance.json` 附件中。两组数据应分别比较。
 
 `cargo fmt --all -- --check` 和 `cargo clippy --workspace --all-targets -- -D warnings` 检查 Rust 代码。`scripts/e2e-linux.sh` 使用临时 Docker 容器和临时密钥，通过 iOS 同一 Rust FFI 入口访问真实 Linux tmux，检查错误指纹、未授权设备密钥、会话选择、输入回显、窗口尺寸和重连后的 shell 状态。Apple Silicon 上默认测试目标为 x86_64 Linux musl，Docker 需要支持运行 amd64 镜像。终端组件、字符数据和字体的许可证位于 `ios/assets/`。
 

@@ -199,13 +199,14 @@ struct TerminalTransport {
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.
-  func run(_ fd: Int32, target: Int64) -> String? {
+  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false) -> String? {
     let der = identity?.certificate ?? Data()
     let pkcs8 = identity?.privateKey ?? Data()
+    let open = fitInitialGrid ? tl_open_secure_fitted : tl_open_secure
     let error = seed.withUnsafeBytes { (seedBytes: UnsafeRawBufferPointer) in
       der.withUnsafeBytes { (cert: UnsafeRawBufferPointer) in
         pkcs8.withUnsafeBytes { (key: UnsafeRawBufferPointer) in
-          tl_open_secure(
+          open(
             fd, endpoint, port, user, pin, seedBytes.bindMemory(to: UInt8.self).baseAddress!,
             target, der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress, cert.count,
             pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress, key.count)

@@ -28,6 +28,19 @@ cat /tmp/center-match >> /tmp/outer.conf
 /usr/sbin/sshd -f /tmp/outer.conf -E /tmp/outer.log
 # Phones do not forward a locale. Exercise the agent in an ASCII SSH environment.
 echo 'SetEnv LC_ALL=C' >> /etc/tmux-link/inner-sshd.conf
+# Only the sizing test uses this target. Sample the SSH PTY before any tmux
+# client can resize it, then let the test request a second sample after rotation.
+cat > /tmp/fixture-attach <<'SH'
+#!/bin/sh
+if [ "${SSH_ORIGINAL_COMMAND:-}" = "tmux-link-attach 90027" ]; then
+    printf 'initial-grid %s\n' "$(stty size)"
+    while IFS= read -r _line; do printf 'current-grid %s\n' "$(stty size)"; done
+    exit 0
+fi
+exec /usr/local/bin/tmux-link-agent attach
+SH
+chmod 755 /tmp/fixture-attach
+sed -i 's|^ForceCommand .*|ForceCommand /tmp/fixture-attach|' /etc/tmux-link/inner-sshd.conf
 /usr/sbin/sshd -f /etc/tmux-link/inner-sshd.conf -E /tmp/inner.log
 install -d -m700 /root/.ssh
 { printf '[127.0.0.1]:2202 '; cat /etc/ssh/ssh_host_ed25519_key.pub; } >> /root/.ssh/known_hosts

@@ -18,6 +18,7 @@ final class RemoteSessionTests: XCTestCase {
     let importLink: String?
     let route: String?
     let hasHistoryFixture: Bool?
+    let benchmarkSessionID: Int64?
   }
 
   func configuration() throws -> Connection {
@@ -1014,6 +1015,151 @@ final class RemoteSessionTests: XCTestCase {
         try await waitFor("__IME_78e4bda0e5a5bd676974207f2e__")
       }
     }
+  }
+
+  @MainActor
+  private final class RenderReceipt: NSObject, WKScriptMessageHandler {
+    private var expected = ""
+    private var pending: XCTestExpectation?
+    private(set) var arrival: TimeInterval = 0
+
+    func expect(_ marker: String) -> XCTestExpectation {
+      expected = marker
+      let event = XCTestExpectation(description: "Remote fixture rendered its reply")
+      pending = event
+      return event
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+      guard message.frameInfo.isMainFrame, let marker = message.body as? String,
+            marker == expected, let event = pending else { return }
+      arrival = ProcessInfo.processInfo.systemUptime
+      pending = nil
+      event.fulfill()
+    }
+  }
+
+  @MainActor
+  func testTerminalPerformanceBaseline() async throws {
+    let config = try configuration()
+    guard let id = config.benchmarkSessionID else { throw XCTSkip("No isolated latency fixture configured") }
+    let client: ClientProfile
+    if let link = config.importLink { client = try ClientTransfer.parse(link) }
+    else {
+      client = ClientProfile(name: "Benchmark", host: config.host, port: config.port,
+                             route: config.route ?? "", user: config.user, pin: config.fingerprint)
+    }
+    // Connecting by the fixture's known ID avoids warming SSH by fetching the directory.
+    let session = RemoteSession(id: id, name: config.sessionName + "-latency")
+    let window = try XCTUnwrap(rootController?.view.window)
+    let previous = window.rootViewController
+    defer { window.rootViewController = previous }
+    let open = ProcessInfo.processInfo.systemUptime
+    let host = UIHostingController(rootView: NavigationStack { TerminalView(client: client, session: session) })
+    window.rootViewController = host
+    host.view.layoutIfNeeded()
+    let until = open + 30
+    var terminal: TerminalWebView?
+    repeat {
+      terminal = descendants(host.view).compactMap { $0 as? TerminalWebView }.first
+      if terminal != nil { break }
+      try await Task.sleep(for: .milliseconds(10))
+    } while ProcessInfo.processInfo.systemUptime < until
+    let web = try XCTUnwrap(terminal)
+    let receipt = RenderReceipt()
+    let bridge = web.configuration.userContentController
+    bridge.add(receipt, name: "benchmarkRender")
+    defer { bridge.removeScriptMessageHandler(forName: "benchmarkRender") }
+
+    let first = receipt.expect("TL-READY")
+    // Listen on xterm's renderer in the actual app view. Only test markers leave JS.
+    while (try? await web.evaluateJavaScript("typeof term === 'object'")) as? Bool != true {
+      guard ProcessInfo.processInfo.systemUptime < until else { return XCTFail("Terminal page did not load") }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    _ = try await web.callAsyncJavaScript(#"""
+      await ready;
+      let lastReply, sentReady = false;
+      function report() {
+        const b = term.buffer.active;
+        for (let i = 0; i < term.rows; i++) {
+          const row = b.getLine(b.viewportY + i)?.translateToString(true).trim();
+          if (row === 'TL-READY' && !sentReady) sentReady = true;
+          else if (row && /^TL-(WARM|\d{3}-[a-y])$/.test(row) && row !== lastReply) lastReply = row;
+          else continue;
+          window.webkit.messageHandlers.benchmarkRender.postMessage(row);
+        }
+      }
+      term.onRender(report);
+      requestAnimationFrame(report);
+      return true;
+      """#, arguments: [:], in: nil, contentWorld: .page)
+    var coldMs: Double?
+    var samples: [Double] = []
+    var timeouts = 0
+    let sampleCount = 100
+    var phase = "coldOpen"
+    defer {
+      let ordered = samples.sorted()
+      func percentile(_ fraction: Double) -> Double? {
+        guard !ordered.isEmpty else { return nil }
+        return ordered[Int(ceil(Double(ordered.count) * fraction)) - 1]
+      }
+      var report: [String: Any] = [
+        "phase": phase, "requested": sampleCount, "completed": samples.count,
+        "warmSamplesMs": samples, "timeouts": timeouts
+      ]
+      report["openToFirstRenderMs"] = coldMs
+      report["warmP50Ms"] = percentile(0.5)
+      report["warmP95Ms"] = percentile(0.95)
+      if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]) {
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "terminal-performance.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("TMUX_LINK_PERF", String(decoding: data, as: UTF8.self))
+      }
+    }
+    guard await XCTWaiter.fulfillment(of: [first], timeout: max(0.1, until - ProcessInfo.processInfo.systemUptime)) == .completed
+    else { timeouts += 1; return XCTFail("Cold-open remote marker timed out") }
+    coldMs = (receipt.arrival - open) * 1000
+    phase = "warmup"
+    let board = web.typingKeyboard.surface
+    let keyboardDeadline = ProcessInfo.processInfo.systemUptime + 5
+    while true {
+      let loaded = (try? await board.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool
+      if loaded == true && web.typingKeyboard.isUserInteractionEnabled { break }
+      guard ProcessInfo.processInfo.systemUptime < keyboardDeadline else { return XCTFail("Keyboard did not become ready") }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
+    while web.typingKeyboard.isHidden {
+      guard ProcessInfo.processInfo.systemUptime < keyboardDeadline else { return XCTFail("Keyboard did not open") }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    // Start each timer just before dispatch to the real keyboard. The waiter receives
+    // a render marker generated by the remote raw-mode fixture with PTY echo disabled.
+    func tap(_ key: String, expect marker: String) async throws -> Double? {
+      let event = receipt.expect(marker)
+      let start = ProcessInfo.processInfo.systemUptime
+      _ = try await board.callAsyncJavaScript("keyboard.handleButtonClicked(key); return true",
+                                              arguments: ["key": key], in: nil, contentWorld: .page)
+      guard await XCTWaiter.fulfillment(of: [event], timeout: 5) == .completed else { return nil }
+      return (receipt.arrival - start) * 1000
+    }
+    guard try await tap("z", expect: "TL-WARM") != nil else {
+      timeouts += 1; return XCTFail("Warm-up marker timed out")
+    }
+    let keys = Array("abcdefghijklmnopqrstuvwxy")
+    phase = "typing"
+    for n in 1...sampleCount {
+      let key = String(keys[(n - 1) % keys.count])
+      guard let ms = try await tap(key, expect: String(format: "TL-%03d-", n) + key) else {
+        timeouts += 1; return XCTFail("Missing remote render at sample \(n)")
+      }
+      samples.append(ms)
+    }
+    phase = "complete"
   }
 
   func testCommandAndReconnect() throws {
