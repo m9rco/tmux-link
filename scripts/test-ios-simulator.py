@@ -93,6 +93,7 @@ def benchmark(device, tmp):
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",
                     "-resultBundlePath", result, "test-without-building")

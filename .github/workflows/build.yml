@@ -91,30 +91,29 @@ jobs:
     needs: checks
     runs-on: macos-15
     timeout-minutes: 20
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch: aarch64
-          - target: x86_64-apple-darwin
-            arch: x86_64
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
         run: |
           rustup update stable --no-self-update
           rustup default stable
-          rustup target add "${{ matrix.target }}"
-      - name: Build macOS package
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build Apple Silicon and Intel packages
         run: |
-          cargo build --locked --release -p tmux-link --bins --target "${{ matrix.target }}"
           mkdir -p package/bin package/share/tmux-link dist
-          cp target/${{ matrix.target }}/release/{agent,center} package/bin/
           cp -R deploy package/share/tmux-link/
           cp README.md package/share/tmux-link/
-          tar -C package -czf dist/tmux-link-macos-${{ matrix.arch }}.tar.gz .
+          for arch in aarch64 x86_64; do
+            target="$arch-apple-darwin"
+            cargo build --locked --release -p tmux-link --bins --target "$target"
+            cp "target/$target/release/agent" "target/$target/release/center" package/bin/
+            cpu="$arch"
+            if [ "$arch" = aarch64 ]; then cpu=arm64; fi
+            lipo -verify_arch "$cpu" package/bin/agent
+            lipo -verify_arch "$cpu" package/bin/center
+            tar -C package -czf "dist/tmux-link-macos-$arch.tar.gz" .
+          done
       - name: macOS installer integration
-        if: matrix.arch == 'aarch64'
         run: |
           scripts/test-install.sh
           python3 scripts/test-download.py
@@ -129,8 +128,13 @@ jobs:
           grep -q 'usage: agent' smoke.log
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          name: macos-aarch64
+          path: dist/tmux-link-macos-aarch64.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: dist/tmux-link-macos-x86_64.tar.gz
           if-no-files-found: error
   ios:
     runs-on: macos-26

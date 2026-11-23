@@ -546,7 +546,6 @@ struct TerminalView: View {
       let top = geometry.safeAreaInsets.top
       let inCutout = UIDevice.current.userInterfaceIdiom == .phone && top >= 44
       let cornerInset = inCutout ? top / 2 : 0
-      let besideIsland = inCutout && geometry.size.width < geometry.size.height && IslandHardware.supportedDevice
       TerminalController(client: client, session: session, status: status, leave: { dismiss() })
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .top) {
@@ -559,14 +558,16 @@ struct TerminalView: View {
             .allowsHitTesting(false)
             .accessibilityAddTraits(.isHeader)
         }
-        .overlay(alignment: besideIsland ? .topLeading : .topTrailing) {
+        .overlay {
           if let reading = status.reading {
-            // iOS exposes the top inset but no frame for the camera housing.
-            // Reserve its center and anchor the status at the inner edge of the free space.
-            statusButton(reading, besideIsland: besideIsland)
-              .padding(.leading, besideIsland ? geometry.size.width / 2 + max(64, top + 4) : 0)
-              .padding(.trailing, cornerInset)
-              .padding(.top, besideIsland ? max(0, (top - 44) / 2) : 1)
+            TerminalStatusOverlay(reading: reading, value: accessibilityValue(reading)) {
+              var lines = [reading.phase.title]
+              if reading.phase == .ready {
+                lines.append(reading.mtls ? "mTLS · SSH" : "SSH")
+                lines.append("RTT " + reading.latencyText)
+              }
+              detail = lines.joined(separator: "\n")
+            }
           }
         }
         .ignoresSafeArea(.container, edges: .vertical)
@@ -587,30 +588,6 @@ struct TerminalView: View {
       }
   }
 
-  private func statusButton(_ reading: TerminalActivityState, besideIsland: Bool) -> some View {
-    Button {
-      var lines = [reading.phase.title]
-      if reading.phase == .ready {
-        lines.append(reading.mtls ? "mTLS · SSH" : "SSH")
-        lines.append("RTT " + reading.latencyText)
-      }
-      detail = lines.joined(separator: "\n")
-    } label: {
-      HStack(spacing: 4) {
-        Circle().fill(reading.phase == .ready && !reading.timedOut ? mint : .orange)
-          .frame(width: 6, height: 6)
-        Text(reading.phase == .ready ? reading.latencyText : reading.phase.title)
-          .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
-          .minimumScaleFactor(0.8)
-      }
-      .padding(.horizontal, besideIsland ? 4 : 8)
-      .frame(minWidth: 44, minHeight: 44, alignment: besideIsland ? .leading : .top)
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain).accessibilityLabel("连接详情")
-    .accessibilityValue(accessibilityValue(reading)).accessibilityIdentifier("terminal.status.details")
-  }
-
   private func accessibilityValue(_ reading: TerminalActivityState) -> String {
     guard reading.phase == .ready else { return reading.phase.title }
     let description: String
@@ -622,6 +599,92 @@ struct TerminalView: View {
       description = "正在测量会话往返延迟"
     }
     return reading.phase.title + "，" + description
+  }
+}
+
+// Keep the control above the terminal while letting all touches outside its bounds reach WebKit.
+private struct TerminalStatusOverlay: UIViewRepresentable {
+  let reading: TerminalActivityState
+  let value: String
+  let showDetails: () -> Void
+
+  func makeUIView(context: Context) -> TerminalStatusControls { TerminalStatusControls() }
+
+  func updateUIView(_ view: TerminalStatusControls, context: Context) {
+    view.showDetails = showDetails
+    view.update(reading, accessibilityValue: value)
+  }
+}
+
+final class TerminalStatusControls: UIView {
+  let button = UIButton(type: .system)
+  var showDetails: (() -> Void)?
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    button.accessibilityIdentifier = "terminal.status.details"
+    button.accessibilityLabel = "连接详情"
+    button.addTarget(self, action: #selector(open), for: .touchUpInside)
+    addSubview(button)
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  @objc private func open() { showDetails?() }
+
+  func update(_ reading: TerminalActivityState, accessibilityValue: String) {
+    var config = UIButton.Configuration.plain()
+    config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4)
+    config.baseForegroundColor = .secondaryLabel
+    config.title = reading.phase == .ready ? reading.latencyText : reading.phase.title
+    config.titleLineBreakMode = .byTruncatingTail
+    config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+      var result = incoming
+      result.font = UIFont.monospacedDigitSystemFont(
+        ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular)
+      return result
+    }
+    let tint: UIColor = reading.phase == .ready && !reading.timedOut ? .systemMint : .systemOrange
+    config.image = UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 6))?
+      .withTintColor(tint, renderingMode: .alwaysOriginal)
+    config.imagePadding = 4
+    button.configuration = config
+    button.accessibilityValue = accessibilityValue
+    setNeedsLayout()
+  }
+
+  override func safeAreaInsetsDidChange() {
+    super.safeAreaInsetsDidChange()
+    setNeedsLayout()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    // The SwiftUI navigation container may consume the top safe area. Position the touch
+    // target using the window inset expressed in the overlay's own coordinate space.
+    let top = window.map { convert(CGPoint(x: 0, y: $0.safeAreaInsets.top), from: $0).y - bounds.minY }
+      ?? safeAreaInsets.top
+    let available = bounds.inset(by: UIEdgeInsets(top: 0, left: safeAreaInsets.left,
+                                                 bottom: 0, right: safeAreaInsets.right))
+    button.frame = Self.buttonFrame(in: available, topInset: max(0, top),
+                                    isPhone: traitCollection.userInterfaceIdiom == .phone,
+                                    island: IslandHardware.supportedDevice, width: button.intrinsicContentSize.width)
+  }
+
+  static func buttonFrame(in bounds: CGRect, topInset: CGFloat, isPhone: Bool,
+                          island: Bool, width: CGFloat) -> CGRect {
+    let alongside = isPhone && island && bounds.width < bounds.height
+    let top = alongside ? max(44, topInset) : topInset
+    let corner = isPhone && top >= 44 ? top / 2 : 0
+    let right = bounds.maxX - corner
+    let left = alongside ? bounds.midX + max(64, top + 4) : bounds.minX
+    let w = min(max(44, width), max(0, right - left))
+    return CGRect(x: alongside ? left : right - w, y: bounds.minY + (alongside ? (top - 44) / 2 : 1),
+                  width: w, height: 44)
+  }
+
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    button.frame.contains(point)
   }
 }
 

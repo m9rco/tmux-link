@@ -165,6 +165,44 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertThrowsError(try RelayIdentity.resolve(client))
   }
 
+  @MainActor
+  func testStatusButtonFitsIslandAndInlineLayouts() {
+    let portrait = CGRect(x: 0, y: 0, width: 402, height: 874)
+    let surface = UIView(frame: portrait)
+    let terminal = UIView(frame: portrait)
+    let controls = TerminalStatusControls(frame: portrait)
+    surface.addSubview(terminal)
+    surface.addSubview(controls)
+    func verifyTouches(_ frame: CGRect, line: UInt = #line) {
+      controls.button.frame = frame
+      let center = CGPoint(x: frame.midX, y: frame.midY)
+      let below = CGPoint(x: frame.midX, y: frame.maxY + 8)
+      XCTAssertTrue(surface.hitTest(center, with: nil)?.isDescendant(of: controls.button) == true, line: line)
+      XCTAssertIdentical(surface.hitTest(below, with: nil), terminal, line: line)
+    }
+    let island = TerminalStatusControls.buttonFrame(in: portrait, topInset: 62, isPhone: true,
+                                                   island: true, width: 38)
+    verifyTouches(island)
+    XCTAssertEqual(island.size, CGSize(width: 44, height: 44))
+    XCTAssertGreaterThan(island.minX, portrait.midX + 60)
+    XCTAssertEqual(island.midY, 31)
+    XCTAssertLessThanOrEqual(island.maxY, 62)
+    // A hidden status bar can yield no top inset even on an island-capable window.
+    let hidden = TerminalStatusControls.buttonFrame(in: portrait, topInset: 0, isPhone: true,
+                                                   island: true, width: 50)
+    verifyTouches(hidden)
+    XCTAssertGreaterThan(hidden.minX, portrait.midX + 60)
+    XCTAssertEqual(hidden.minY, 0)
+    for top: CGFloat in [0, 20, 47] {
+      let inline = TerminalStatusControls.buttonFrame(in: portrait, topInset: top, isPhone: true,
+                                                     island: false, width: 38)
+      verifyTouches(inline)
+      XCTAssertEqual(inline.maxX, portrait.maxX - (top >= 44 ? top / 2 : 0))
+      XCTAssertEqual(inline.minY, 1)
+      XCTAssertEqual(inline.size, CGSize(width: 44, height: 44))
+    }
+  }
+
   func testStatusFramesRejectTruncationAndOversize() throws {
     let pipe = Pipe()
     let stream = pipe.fileHandleForReading
@@ -799,16 +837,17 @@ final class RemoteSessionTests: XCTestCase {
     }
     try await open()
     XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
-    if IslandHardware.supportedDevice && window.bounds.width < window.bounds.height {
-      let top = window.safeAreaInsets.top
-      // In portrait, the status button takes taps beside the island while typing.
-      // The cell immediately below the status area still belongs to the terminal.
-      let x = window.bounds.midX + 87
-      let statusHit = try XCTUnwrap(window.hitTest(CGPoint(x: x, y: top / 2), with: nil))
-      let terminalHit = try XCTUnwrap(window.hitTest(CGPoint(x: x, y: top + 8), with: nil))
-      XCTAssertFalse(statusHit.isDescendant(of: web))
-      XCTAssertTrue(terminalHit.isDescendant(of: web))
-    }
+    let statusButton = try XCTUnwrap(descendants(window).compactMap { $0 as? UIButton }.first {
+      $0.accessibilityIdentifier == "terminal.status.details"
+    })
+    let frame = statusButton.convert(statusButton.bounds, to: window)
+    XCTAssertGreaterThanOrEqual(frame.width, 44)
+    XCTAssertEqual(frame.height, 44)
+    let statusHit = try XCTUnwrap(window.hitTest(CGPoint(x: frame.midX, y: frame.midY), with: nil))
+    XCTAssertTrue(statusHit.isDescendant(of: statusButton),
+                  "Status tap hit \(type(of: statusHit)), button \(frame), safe insets \(window.safeAreaInsets)")
+    let terminalHit = try XCTUnwrap(window.hitTest(CGPoint(x: frame.midX, y: frame.maxY + 8), with: nil))
+    XCTAssertTrue(terminalHit.isDescendant(of: web), "The row below the status button must accept terminal taps")
     let keys = terminal.typingKeyboard.surface
     let keyFrame = keys.convert(keys.bounds, to: window)
     XCTAssertEqual(keyFrame.maxY, window.bounds.maxY, accuracy: pixel)
