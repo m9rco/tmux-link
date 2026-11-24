@@ -389,6 +389,7 @@ pub(super) fn serve(path: &Path) -> Result<()> {
         .open(path.with_extension("run.lock"))?;
     lock.try_lock_exclusive()
         .context("outbound host is already running")?;
+    super::managed::resume();
     runtime()?.block_on(async {
         let mut tasks = tokio::task::JoinSet::new();
         let state = std::sync::Arc::new(state);

@@ -218,7 +218,15 @@ struct TerminalTransport {
     return try version.decode(data, for: session)
   }
 
-  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false) async throws -> Data {
+  static func managed(_ client: ClientProfile, sessionID: Int64, action: ManagedAction, instance: String? = nil) async throws -> ManagedStatus {
+    guard sessionID >= 0 else { throw RelayError("无效的会话编号") }
+    guard action == .status || instance != nil else { throw RelayError("请刷新会话列表后再调整托管。") }
+    let request = action.wireValue + (instance.map { "@" + $0 } ?? "")
+    let data = try await read(client, target: sessionID, managedAction: request)
+    return try JSONDecoder().decode(ManagedStatus.self, from: data)
+  }
+
+  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil) async throws -> Data {
     let connection = try TerminalTransport(client)
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
@@ -230,7 +238,7 @@ struct TerminalTransport {
     // cooperative executor, including on devices with a small thread pool.
     async let message: String? = withCheckedContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2))
+        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2, managedAction: managedAction))
       }
     }
     let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -241,6 +249,9 @@ struct TerminalTransport {
     }
     if let error = await message {
       switch error {
+      case "managed unsupported": throw RelayError("远端节点需要更新 tmux-link-agent 才能使用托管。")
+      case "managed session changed": throw RelayError("当前会话或窗格已切换，请返回会话列表刷新。")
+      case "managed unavailable": throw RelayError("节点未能完成托管请求。请刷新会话，并检查节点上的托管状态。")
       case "snapshot unsupported": throw RelayError("远端代理不支持读取窗格，请更新 tmux-link-agent。")
       case "snapshot pane in mode": throw RelayError("请先退出 tmux 的复制或选择模式，再读取当前窗格。")
       case "snapshot exceeds capture limit": throw RelayError("这个窗格的数据量超出节点读取上限。请进入会话，点「决策」读取当前画面。")
@@ -252,17 +263,22 @@ struct TerminalTransport {
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.
-  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false) -> String? {
+  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false, managedAction: String? = nil) -> String? {
     let der = identity?.certificate ?? Data()
     let pkcs8 = identity?.privateKey ?? Data()
     let open = snapshotV2 ? tl_snapshot_v2_secure : (fitInitialGrid ? tl_open_secure_fitted : tl_open_secure)
     let error = seed.withUnsafeBytes { (seedBytes: UnsafeRawBufferPointer) in
       der.withUnsafeBytes { (cert: UnsafeRawBufferPointer) in
         pkcs8.withUnsafeBytes { (key: UnsafeRawBufferPointer) in
-          open(
-            fd, endpoint, port, user, pin, seedBytes.bindMemory(to: UInt8.self).baseAddress!,
-            target, der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress, cert.count,
-            pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress, key.count)
+          let seedPointer = seedBytes.bindMemory(to: UInt8.self).baseAddress!
+          let certificate = der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress
+          let privateKey = pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress
+          if let managedAction {
+            return tl_managed_secure(fd, endpoint, port, user, pin, seedPointer, target, managedAction,
+                                     certificate, cert.count, privateKey, key.count)
+          }
+          return open(fd, endpoint, port, user, pin, seedPointer, target,
+                      certificate, cert.count, privateKey, key.count)
         }
       }
     }

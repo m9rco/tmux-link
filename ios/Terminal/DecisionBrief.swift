@@ -27,6 +27,41 @@ struct DecisionBrief: Codable, Equatable {
 
   static let maxEncodedBytes = 4096
   static let maxHistoryBytes = 1152
+
+  // Retry only a prompt already visible in the approved preview. Dropping a later reply
+  // or progress update would make an answered question look pending again.
+  var focusedForRetry: DecisionBrief? {
+    let current = blocks.indices.filter { blocks[$0].source == .current }
+    let screenQuestion = current.last { blocks[$0].kind == .question }
+    let following = current.filter { $0 > (screenQuestion ?? -1) }
+    let hasMenu = menu?.items.isEmpty == false
+    guard menu == nil || hasMenu else { return nil }
+    let question: Int?
+    if let screenQuestion {
+      question = following.allSatisfy { blocks[$0].kind == .choice } ? screenQuestion : nil
+    } else {
+      question = blocks.indices.first {
+        blocks[$0].source == .latestAssistant && blocks[$0].kind == .question
+      }
+    }
+    guard hasMenu || question != nil else { return nil }
+
+    var keep = Set<Int>()
+    if let question {
+      keep.insert(question)
+      if screenQuestion == question { keep.formUnion(following.filter { blocks[$0].kind == .choice }) }
+    }
+    for kind in [Kind.rationale, .goal, .constraint, .plan] {
+      // Current screen and tmux history are chronological; transcript excerpts are newest first.
+      let index = current.last { blocks[$0].kind == kind }
+        ?? blocks.indices.first { blocks[$0].kind == kind && [.transcriptAssistant, .transcriptUser].contains(blocks[$0].source) }
+        ?? blocks.indices.last { blocks[$0].kind == kind && blocks[$0].source == .history }
+      if let index { keep.insert(index) }
+    }
+    var focus = DecisionBrief(id: id, name: name, blocks: keep.sorted().map { blocks[$0] }, menu: menu)
+    focus.requiresExplicitQuestion = true
+    return focus
+  }
 }
 
 // The three strings have a fixed wire order shared by the prompt and byte-budget calculation.

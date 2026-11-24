@@ -16,6 +16,10 @@ mod codemaker;
 mod codemaker_export;
 #[path = "agent/codemaker_status.rs"]
 mod codemaker_status;
+#[path = "agent/managed.rs"]
+mod managed;
+#[path = "agent/managed_decision.rs"]
+mod managed_decision;
 #[path = "agent/snapshot.rs"]
 mod snapshot;
 
@@ -72,6 +76,18 @@ fn print_snapshot(request: &str, detailed: bool) -> Result<()> {
     Ok(())
 }
 
+fn manage(action: &str, id: &str, instance: Option<&str>) -> Result<()> {
+    ensure!(
+        tmux_link::valid_managed_action(action),
+        "invalid managed action"
+    );
+    ensure!(
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        "invalid managed session ID"
+    );
+    managed::control(action, id.parse()?, instance)
+}
+
 // Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
@@ -79,6 +95,12 @@ fn attach() -> Result<()> {
         .as_deref()
         .map(|v| v.to_str().context("invalid request"))
         .transpose()?;
+    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-managed-v1 ")) {
+        let (action, id) = request.split_once(' ').context("invalid managed request")?;
+        let (action, instance) =
+            tmux_link::managed_remote_action(action).context("invalid managed request")?;
+        return manage(action, id, instance);
+    }
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-page ")) {
         return page(request);
     }
@@ -125,13 +147,13 @@ fn attach() -> Result<()> {
             .iter()
             .map(|(id, name)| -> Result<_> {
                 let id: u64 = id.strip_prefix('$').context("invalid tmux ID")?.parse()?;
-                let path = Command::new("tmux")
-                    .args(["display-message", "-p", "-t", &format!("${id}:"), "#{pane_current_path}"])
+                let details = Command::new("tmux")
+                    .args(["-u", "display-message", "-p", "-t", &format!("${id}:"), "#{pid}-#{session_created}-#{pane_id}-#{pane_pid}\n#{pane_current_path}"])
                     .output()?;
-                let directory = path.status.success().then(|| {
-                    String::from_utf8_lossy(&path.stdout).trim_end_matches('\n').to_owned()
-                });
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory, "snapshot": true, "snapshotVersion": 2}))
+                let fields = String::from_utf8_lossy(&details.stdout);
+                let (instance, directory) = details.status.success()
+                    .then(|| fields.strip_suffix('\n').and_then(|s| s.split_once('\n'))).flatten().unzip();
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 1, "managedInstance": instance}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);
@@ -174,6 +196,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         [op] if op == "attach" => attach(),
+        [op, action, id] if op == "managed" => manage(action, id, None),
+        [op] if op == "managed-key" && env::var_os("SSH_ORIGINAL_COMMAND").is_none() => {
+            managed::set_key()
+        }
+        [op] if op == "managed-worker" && env::var_os("SSH_ORIGINAL_COMMAND").is_none() => {
+            managed::supervise()
+        }
         [op, rest @ ..] if op == "bind-session" || op == "unbind-session" => {
             codemaker::configure(op, rest)
         }
@@ -223,7 +252,7 @@ fn main() -> Result<()> {
                 .into())
         }
         _ => bail!(
-            "usage: agent attach | agent snapshot SESSION_ID | agent bind-session --help | agent unbind-session SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
+            "usage: agent attach | agent managed ACTION SESSION_ID | agent managed-key | agent snapshot SESSION_ID | agent bind-session --help | agent unbind-session SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
         ),
     }
 }

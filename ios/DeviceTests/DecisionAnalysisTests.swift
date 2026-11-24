@@ -402,6 +402,38 @@ final class DecisionAnalysisTests: XCTestCase {
     XCTAssertEqual(echoed.blocks.filter { $0.text == repeated }.map(\.source), [.transcriptUser])
   }
 
+  func testFocusedRetryKeepsOnlyPreviewedEvidenceForAnOpenPrompt() throws {
+    let latest = "Should we publish report-r42.json?"
+    let turns = [["role": "assistant", "text": latest],
+                 ["role": "user", "text": "Constraint: retain the original."],
+                 ["role": "assistant", "text": "Should we use the archived format?"]]
+    let checks = Self.checksMenu.prepared()
+    let current = DecisionSnapshot(id: 6, name: "reports", text: "Which language?\n" + latest,
+                                   context: "Should we use the archived format?").prepared()
+    let transcript = try alternate(messages: turns).prepared()
+    for preview in [checks, current, transcript] {
+      let focus = try XCTUnwrap(preview.focusedForRetry)
+      XCTAssertEqual(focus.id, preview.id)
+      XCTAssertEqual(focus.name, preview.name)
+      XCTAssertEqual(focus.menu, preview.menu)
+      XCTAssertTrue(focus.blocks.allSatisfy { preview.blocks.contains($0) })
+      if preview.menu == nil {
+        let questions = focus.blocks.filter { $0.kind == .question }
+        XCTAssertEqual(questions.map(\.text), [latest])
+        XCTAssertEqual(questions.first?.source, preview.id == current.id ? .current : .latestAssistant)
+      }
+    }
+    let answered = try alternate("Which chart?\n> Use the bar chart.\nWorking...", activity: "running")
+    let idle = DecisionSnapshot(id: 1, name: "idle", text: "Build finished.", context: latest)
+    let oldTurn = try alternate(messages: turns, latestIsDisplayed: false)
+    let userReplied = try alternate(messages: [["role": "user", "text": "Yes, publish it."]] + turns)
+    let submitted = DecisionSnapshot(id: 2, name: "submitted", text: "❯ Submit answers\nEnter to submit")
+    XCTAssertEqual(submitted.prepared().menu?.items.count, 0)
+    for snapshot in [answered, idle, oldTurn, userReplied, submitted] {
+      XCTAssertNil(snapshot.prepared().focusedForRetry)
+    }
+  }
+
   func testNativeLongIdentifierKeepsSeparateQuestionAndRedactsAssignmentsAndURLs() throws {
     let longName = String(repeating: "build-system.v3-", count: 2_000)
     let question = "Should I change the data/\nstore?"
@@ -488,6 +520,97 @@ final class DecisionAnalysisTests: XCTestCase {
     XCTAssertEqual(decision.recommendedIndex, 1)
     XCTAssertEqual(decision.options.map(\.reply), ["1) CSV", "2) JSON"])
     XCTAssertTrue(decision.reason.contains("嵌套"))
+  }
+
+  func testDecisionResponseSeparatesNoQuestionsFromUnusableOutputAndOversizedInput() async throws {
+    final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        switch request.value(forHTTPHeaderField: "Authorization") {
+        case "Bearer fixture-none": return (200, try completion(#"{"decisions":[]}"#))
+        case "Bearer fixture-length": return (200, try completion(#"{"decisions":[]}"#, finishReason: "length"))
+        case "Bearer fixture-length-blank": return (200, try completion("", finishReason: "length"))
+        case "Bearer fixture-blank": return (200, try completion(" \n\t "))
+        case "Bearer fixture-missing": return (200, Data())
+        case "Bearer fixture-limit": return (413, Data())
+        case "Bearer fixture-context":
+          return (400, Data(#"{"error":{"code":"context_length_exceeded","message":"request too large"}}"#.utf8))
+        case "Bearer fixture-requested":
+          return (400, Data(#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, you requested 131000 tokens."}}"#.utf8))
+        case "Bearer fixture-other": return (400, Data(#"{"error":{"message":"invalid parameter"}}"#.utf8))
+        default: throw URLError(.badURL)
+        }
+      }
+    }
+    let session = Endpoint.session()
+    defer { session.invalidateAndCancel() }
+    let cases: [(String, SessionAdvisorError?)] = [
+      ("none", nil), ("length", .outputTruncated), ("length-blank", .outputTruncated), ("blank", .emptyContent),
+      ("missing", .invalidResponse), ("limit", .inputTooLong), ("context", .inputTooLong),
+      ("requested", .inputTooLong), ("other", .requestRejected),
+    ]
+    for (fixture, expected) in cases {
+      do {
+        let result = try await SessionAdvisor.analyzePrepared(
+          [Self.review.prepared()], key: "fixture-" + fixture, session: session)
+        XCTAssertNil(expected, fixture)
+        XCTAssertTrue(result.isEmpty, fixture)
+      } catch let actual as SessionAdvisorError {
+        XCTAssertEqual(actual, expected, fixture)
+      }
+    }
+  }
+
+  private static let longPreviews = (1...6).map { id in
+    let rows = (1...24).map {
+      "Constraint: keep report-\(id).json section \($0) intact. " + String(repeating: "样本", count: 40)
+    }
+    return DecisionSnapshot(id: Int64(id), name: "report-\(id)",
+      text: (rows + ["Should we export report-\(id).json?"]).joined(separator: "\n")).prepared()
+  }
+
+  func testSixLongSessionsThenSingleFocusedRetryPreservesOtherResults() async throws {
+    final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody()) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let content = try XCTUnwrap(messages.last?["content"])
+        let sent = try JSONDecoder().decode([DecisionBrief].self, from: Data(content.utf8))
+        let previews = DecisionAnalysisTests.longPreviews
+        let id: Int64
+        if request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-batch" {
+          XCTAssertEqual(sent, previews)
+          XCTAssertGreaterThan(content.utf8.count, 6 * 3000)
+          XCTAssertLessThanOrEqual(content.utf8.count, 6 * DecisionBrief.maxEncodedBytes + 7)
+          id = 1
+        } else {
+          let selected = try XCTUnwrap(previews.last)
+          let focus = try XCTUnwrap(selected.focusedForRetry)
+          XCTAssertEqual(sent.map(\.id), [selected.id])
+          XCTAssertEqual(sent.first?.blocks, focus.blocks)
+          XCTAssertEqual(sent.first?.menu, focus.menu)
+          XCTAssertLessThan(content.utf8.count, try JSONEncoder().encode(selected).count)
+          id = selected.id
+        }
+        return (200, try completion("""
+          {"decisions":[{"session_id":\(id),"question":"Export report?","evidence":"Should we export report-\(id).json?",
+          "options":[{"reply":"Export","tradeoff":"Available now"},{"reply":"Wait","tradeoff":"Time to review"}],
+          "recommended_index":null,"reason":""}]}
+          """))
+      }
+    }
+    let session = Endpoint.session()
+    defer { session.invalidateAndCancel() }
+    let batch = try await SessionAdvisor.analyzePrepared(Self.longPreviews, key: "fixture-batch", session: session)
+    XCTAssertEqual(batch.map(\.sessionID), [1])
+    let focus = try XCTUnwrap(Self.longPreviews.last?.focusedForRetry)
+    let retry = try await SessionAdvisor.analyzePrepared([focus], key: "fixture-focused", session: session)
+    var result = DecisionReviewResults(batch)
+    result.mergeRetry(retry, for: focus.id)
+    XCTAssertEqual(result.decisions.map(\.sessionID), [1, 6])
+    XCTAssertEqual(result.decisions.first?.evidence, batch.first?.evidence)
+    result.mergeRetry([], for: 3)
+    XCTAssertEqual(result.emptyRetries, [3])
+    XCTAssertEqual(result.decisions.map(\.sessionID), [1, 6])
   }
 
   func testOnlyGroundedDistinctChoicesAreAccepted() throws {

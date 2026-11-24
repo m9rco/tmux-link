@@ -18,9 +18,9 @@ class AdvisorHTTPFixture: URLProtocol, @unchecked Sendable {
 
   func reply() throws -> (Int, Data) { throw URLError(.badServerResponse) }
 
-  func completion(_ content: String) throws -> Data {
+  func completion(_ content: String, finishReason: String = "stop") throws -> Data {
     try JSONSerialization.data(withJSONObject: [
-      "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": content]]]
+      "choices": [["finish_reason": finishReason, "message": ["role": "assistant", "content": content]]]
     ])
   }
 
@@ -56,6 +56,38 @@ class AdvisorHTTPFixture: URLProtocol, @unchecked Sendable {
 }
 
 final class SessionAdvisorTests: XCTestCase {
+  func testManagedSessionCapabilityActionsAndNodeStatus() throws {
+    let decoder = JSONDecoder()
+    let old = try decoder.decode(RemoteSession.self, from: Data(#"{"id":7,"name":"work"}"#.utf8))
+    XCTAssertNil(old.managedVersion)
+    let current = try decoder.decode(RemoteSession.self, from: Data(#"{"id":7,"name":"work","managedVersion":1}"#.utf8))
+    XCTAssertEqual(current.managedVersion, 1)
+    XCTAssertEqual(ManagedAction.status.wireValue, "status")
+    XCTAssertEqual(ManagedAction.disable.wireValue, "disable")
+    XCTAssertEqual(ManagedAction.forget.wireValue, "forget")
+    for mode in ManagedMode.allCases {
+      for style in ManagedStyle.allCases {
+        XCTAssertEqual(ManagedAction.enable(mode, style).wireValue, "enable-\(mode.rawValue)-\(style.rawValue)")
+      }
+    }
+    let payload = """
+      {"enabled":true,"state":"needsConfirmation","keyReady":true,"mode":"assist","style":"concise",
+       "callsToday":2,"tokensToday":700,"memory":"Prefer short replies","records":[
+         {"at":100,"question":"Language?","choice":null,"reason":"Needs keyboard input",
+          "outcome":"needsConfirmation","mode":"assist","style":"concise","draft":"English"},
+         {"at":99,"question":"Pick a layout","choice":"Compact","reason":"Fits the screen","outcome":"applied"}]}
+      """
+    let status = try decoder.decode(ManagedStatus.self, from: Data(payload.utf8))
+    XCTAssertTrue(status.enabled)
+    XCTAssertEqual(status.callsToday, 2)
+    XCTAssertEqual(status.tokensToday, 700)
+    XCTAssertEqual(status.records.map(\.at), [100, 99])
+    XCTAssertNil(status.records[0].choice)
+    XCTAssertEqual(status.records[0].draft, "English")
+    XCTAssertEqual(status.records[1].choice, "Compact")
+    XCTAssertNil(status.records[1].draft)
+  }
+
   func testRequestSendsOnlySessionLabelsAndRanksKnownIDsOnce() async throws {
     final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
       override func reply() throws -> (Int, Data) {

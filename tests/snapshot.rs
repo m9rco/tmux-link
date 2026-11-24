@@ -166,6 +166,7 @@ fn selected_pane_snapshot_separates_history_preserves_grid_and_never_attaches() 
             .unwrap()
             .iter()
             .all(|s| s["snapshot"] == true
+                && s["managedVersion"] == 1
                 && s["snapshotVersion"] == 2
                 && s.get("text").is_none()
                 && s.get("context").is_none())
@@ -772,4 +773,59 @@ exit "$code"
         assert_eq!(pane["applicationContextStatus"], "unbound");
         assert!(pane.get("applicationContext").is_none());
     }
+}
+
+#[test]
+fn managed_forced_command_is_session_scoped_and_has_a_closed_vocabulary() {
+    let server = Server::new("management");
+    server.session("first", "80", "24", "exec sleep 120");
+    let run = |request: &str| server.codemaker_agent(&["attach"], Some(request));
+    let output = run("tmux-link-managed-v1 status 0");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["keyReady"], false);
+    assert_eq!(status["callsToday"], 0);
+    assert_eq!(status["records"], serde_json::json!([]));
+    for invalid in [
+        "tmux-link-managed-v1 status 2",
+        "tmux-link-managed-v1 enable-menu-concise 0 extra",
+        "tmux-link-managed-v1 enable-menu-unlimited 0",
+        "tmux-link-managed-v1 managed-key 0",
+        "tmux-link-managed-v1 enter 0",
+        "tmux-link-managed-v1 forget -1",
+    ] {
+        assert!(!run(invalid).status.success(), "accepted {invalid}");
+    }
+    let listing = run("tmux-link-list");
+    let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    let token = listing[0]["managedInstance"].as_str().unwrap();
+    // sshd may supply a C locale. Without tmux -u, the embedded newline
+    // separating the instance from its directory is replaced with an underscore.
+    let c_locale = server
+        .cmd(env!("CARGO_BIN_EXE_agent"))
+        .arg("attach")
+        .env("SSH_ORIGINAL_COMMAND", "tmux-link-list")
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    let c_listing: Value = serde_json::from_slice(&c_locale.stdout).unwrap();
+    assert_eq!(c_listing[0]["managedInstance"], token);
+    assert!(
+        run(&format!("tmux-link-managed-v1 status@{token} 0"))
+            .status
+            .success()
+    );
+    assert!(
+        !run("tmux-link-managed-v1 forget@1-1-%1-1 0")
+            .status
+            .success()
+    );
+    assert!(!run("tmux-link-managed-v1 forget 0").status.success());
+    let unchanged = run("tmux-link-managed-v1 status 0");
+    assert_eq!(unchanged.stdout, output.stdout);
 }

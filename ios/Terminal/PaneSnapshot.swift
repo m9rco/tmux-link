@@ -7,6 +7,8 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   var directory: String? = nil
   var snapshot: Bool? = nil
   var snapshotVersion: Int? = nil
+  var managedVersion: Int? = nil
+  var managedInstance: String? = nil
 
   var negotiatedSnapshotVersion: PaneSnapshotVersion? {
     guard snapshot == true else { return nil }

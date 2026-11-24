@@ -144,6 +144,7 @@ def benchmark(device, tmp):
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testBoundConversationUsesLatestReply",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testManagedStatusUsesPinnedSessionWithoutEnablingIt",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",

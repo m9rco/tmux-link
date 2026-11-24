@@ -14,6 +14,7 @@ enum SessionAdvisorError: LocalizedError {
   case emptyQuestion, questionTooLong, invalidKey, noSessions
   case invalidDecisionSelection, credentialInSnapshot
   case authentication, quota, rateLimited, timeout, network, requestRejected, serviceUnavailable, invalidResponse
+  case inputTooLong, outputTruncated, emptyContent
 
   var errorDescription: String? {
     switch self {
@@ -29,6 +30,9 @@ enum SessionAdvisorError: LocalizedError {
     case .timeout: return "DeepSeek 请求超时，请重试。"
     case .network: return "无法连接 DeepSeek，请检查网络连接。"
     case .requestRejected: return "DeepSeek 无法处理此次请求，请调整问题后重试。"
+    case .inputTooLong: return "发送的内容太长，请缩短问题或减少所选会话后重试。"
+    case .outputTruncated: return "DeepSeek 的回复达到输出上限，未能完整返回。请缩小提问范围或减少所选会话后重试。"
+    case .emptyContent: return "DeepSeek 返回了空白回复，请重试。"
     case .serviceUnavailable: return "DeepSeek 服务暂时不可用，请稍后重试。"
     case .invalidResponse: return "无法读取 DeepSeek 返回的会话建议，请重试。"
     }
@@ -52,8 +56,17 @@ enum SessionAdvisor {
   private struct Completion: Decodable {
     struct Choice: Decodable {
       struct Message: Decodable { let content: String }
-      let message: Message
+      let message: Message?
       let finish_reason: String?
+
+      private enum CodingKeys: String, CodingKey { case message, finish_reason }
+
+      init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        finish_reason = try fields.decodeIfPresent(String.self, forKey: .finish_reason)
+        // A length-limited response can have an incomplete or missing message.
+        message = finish_reason == "length" ? nil : try fields.decode(Message.self, forKey: .message)
+      }
     }
     let choices: [Choice]
   }
@@ -121,6 +134,27 @@ enum SessionAdvisor {
     return key
   }
 
+  private static func isContextLengthError(_ data: Data) -> Bool {
+    struct Failure: Decodable {
+      struct Detail: Decodable {
+        let code: String?
+        let type: String?
+        let message: String?
+      }
+      let error: Detail
+    }
+    guard data.count <= 16 * 1024,
+          let detail = (try? JSONDecoder().decode(Failure.self, from: data))?.error else { return false }
+    if detail.code == "context_length_exceeded" || detail.type == "context_length_exceeded" { return true }
+    guard let message = detail.message?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+      return false
+    }
+    if message == "context length exceeded" || message.hasPrefix("context length exceeded:") { return true }
+    return message.hasPrefix("this model's maximum context length is ") &&
+      (message.contains("however, you requested ") || message.contains("however, your messages resulted in ") ||
+       message.contains("however, you are requesting "))
+  }
+
   static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
                                        maxTokens: Int, session: URLSession) async throws -> T {
     let body: [String: Any] = [
@@ -150,6 +184,8 @@ enum SessionAdvisor {
     guard let http = response as? HTTPURLResponse else { throw SessionAdvisorError.invalidResponse }
     switch http.statusCode {
     case 200..<300: break
+    case 413: throw SessionAdvisorError.inputTooLong
+    case 400 where isContextLengthError(data): throw SessionAdvisorError.inputTooLong
     case 401, 403: throw SessionAdvisorError.authentication
     case 402: throw SessionAdvisorError.quota
     case 408, 504: throw SessionAdvisorError.timeout
@@ -159,10 +195,15 @@ enum SessionAdvisor {
     }
     let decoder = JSONDecoder()
     guard data.count <= 128 * 1024,
-          let choice = (try? decoder.decode(Completion.self, from: data))?.choices.first,
-          choice.finish_reason == nil || choice.finish_reason == "stop",
-          let result = try? decoder.decode(T.self, from: Data(choice.message.content.utf8))
+          let choice = (try? decoder.decode(Completion.self, from: data))?.choices.first
     else { throw SessionAdvisorError.invalidResponse }
+    if choice.finish_reason == "length" { throw SessionAdvisorError.outputTruncated }
+    guard choice.finish_reason == nil || choice.finish_reason == "stop", let content = choice.message?.content
+    else { throw SessionAdvisorError.invalidResponse }
+    guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SessionAdvisorError.emptyContent }
+    guard let result = try? decoder.decode(T.self, from: Data(content.utf8)) else {
+      throw SessionAdvisorError.invalidResponse
+    }
     return result
   }
 }

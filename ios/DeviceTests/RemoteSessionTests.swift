@@ -61,6 +61,29 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
   }
 
+  func testManagedStatusUsesPinnedSessionWithoutEnablingIt() async throws {
+    let config: Connection
+    if let fixture = ProcessInfo.processInfo.environment["TMUX_LINK_MANAGED_TEST_FIXTURE"] {
+      config = try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
+    } else {
+      config = try configuration()
+    }
+    guard let id = config.snapshotFixtureID else { throw XCTSkip("No isolated decision pane configured") }
+    let client = ClientProfile(name: "Managed fixture", host: config.host, port: config.port,
+                               user: config.user, pin: config.fingerprint)
+    let directory = try await SessionDirectory.fetch(client)
+    let fixture = config.sessionName.hasPrefix("tmux-link-managed-e2e-") ? config.sessionName : "ios-decision-fixture"
+    let session = try XCTUnwrap(directory.first { $0.id == id && $0.name == fixture })
+    XCTAssertEqual(session.managedVersion, 1)
+    let instance = try XCTUnwrap(session.managedInstance)
+    let status = try await TerminalTransport.managed(client, sessionID: id, action: .status, instance: instance)
+    XCTAssertFalse(status.enabled)
+    XCTAssertFalse(status.keyReady)
+    XCTAssertTrue(status.records.isEmpty)
+    XCTAssertEqual(status.callsToday, 0)
+    XCTAssertEqual(status.tokensToday, 0)
+  }
+
   func testBoundConversationUsesLatestReply() async throws {
     let config = try configuration()
     guard let id = config.conversationFixtureID, let pane = config.conversationFixturePane else {

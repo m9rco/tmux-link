@@ -24,20 +24,28 @@ struct Binding {
 }
 
 #[derive(PartialEq, Eq)]
-struct Pane {
-    server_pid: u32,
-    session_created: u64,
-    pane_pid: u32,
-    pane_id: u64,
-    alternate: bool,
-    socket: PathBuf,
-    directory: PathBuf,
+pub(super) struct Pane {
+    pub(super) server_pid: u32,
+    pub(super) session_created: u64,
+    pub(super) pane_pid: u32,
+    pub(super) pane_id: u64,
+    pub(super) alternate: bool,
+    pub(super) socket: PathBuf,
+    pub(super) directory: PathBuf,
 }
 
 impl Pane {
-    fn inspect(id: u64) -> Result<Self> {
+    pub(super) fn inspect(id: u64) -> Result<Self> {
+        Self::inspect_at(id, None)
+    }
+
+    pub(super) fn inspect_at(id: u64, socket: Option<&Path>) -> Result<Self> {
         let format = "#{session_id} #{pane_id} #{pid} #{session_created} #{pane_pid} #{alternate_on}\n#{socket_path}\n#{pane_current_path}";
-        let output = Command::new("tmux")
+        let mut tmux = Command::new("tmux");
+        if let Some(socket) = socket {
+            tmux.arg("-S").arg(socket);
+        }
+        let output = tmux
             .args([
                 "-u",
                 "display-message",
@@ -77,12 +85,19 @@ impl Pane {
         })
     }
 
+    pub(super) fn instance(&self) -> String {
+        format!(
+            "{}-{}-%{}-{}",
+            self.server_pid, self.session_created, self.pane_id, self.pane_pid
+        )
+    }
+
     fn slot(&self, root: &Path) -> PathBuf {
         let key = Sha256::digest(self.socket.as_os_str().as_encoded_bytes());
         root.join(format!("{key:x}-{}.json", self.pane_id))
     }
 
-    fn foreground(&self) -> Result<(u32, String)> {
+    pub(super) fn foreground(&self) -> Result<(u32, String)> {
         fn field(pid: u32, name: &str) -> Result<String> {
             let out = Command::new("ps")
                 .env("LC_ALL", "C")

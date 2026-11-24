@@ -402,6 +402,7 @@ private struct Sessions: View {
   @State private var loading = true
   @State private var revision = 0
   @State private var showingAdvisor = false
+  @State private var managedSession: RemoteSession?
   @State private var pendingSelection: AdvisorSelection?
   @State private var advisorDestination: AdvisorSelection?
 
@@ -429,25 +430,34 @@ private struct Sessions: View {
           Text("暂无会话").foregroundStyle(.secondary)
         }
         ForEach(sessions) { session in
-          NavigationLink {
-            TerminalView(client: client, session: session)
-          } label: {
-            Label {
-              VStack(alignment: .leading, spacing: 4) {
-                Text(session.name).font(.body.monospaced())
-                if let directory = session.directory, !directory.isEmpty {
-                  Text(directory).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-                }
-              }.padding(.vertical, 7)
-            } icon: {
-              Image(systemName: "rectangle.split.2x1").foregroundStyle(mint)
+          HStack(spacing: 12) {
+            NavigationLink {
+              TerminalView(client: client, session: session)
+            } label: {
+              Label {
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(session.name).font(.body.monospaced())
+                  if let directory = session.directory, !directory.isEmpty {
+                    Text(directory).font(.caption.monospaced()).foregroundStyle(.secondary)
+                      .lineLimit(1).truncationMode(.middle)
+                  }
+                }.padding(.vertical, 7)
+              } icon: {
+                Image(systemName: "rectangle.split.2x1").foregroundStyle(mint)
+              }
+              .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain).contextMenu {
+              Button("复制会话名称") { UIPasteboard.general.string = session.name }
+              if let directory = session.directory, !directory.isEmpty {
+                Button("复制工作目录") { UIPasteboard.general.string = directory }
+              }
             }
-          }.contextMenu {
-            Button("复制会话名称") { UIPasteboard.general.string = session.name }
-            if let directory = session.directory, !directory.isEmpty {
-              Button("复制工作目录") { UIPasteboard.general.string = directory }
-            }
+            Button { managedSession = session } label: {
+              Text("托管").font(.subheadline.weight(.medium)).fixedSize()
+                .frame(minWidth: 44, minHeight: 44)
+            }.buttonStyle(.borderless)
+              .accessibilityLabel("托管会话 " + session.name)
+              .accessibilityIdentifier("sessions.managed.\(session.id)")
           }
         }
       } header: {
@@ -471,6 +481,10 @@ private struct Sessions: View {
         SessionAdvisorView(
           sessions: sessions, notice: advisorNotice,
           capture: { try await SessionDirectory.snapshot($0, client: client) }, open: openFromAdvisor)
+          .preferredColorScheme(.dark).tint(mint)
+      }
+      .sheet(item: $managedSession) { session in
+        ManagedSessionView(client: client, session: session)
           .preferredColorScheme(.dark).tint(mint)
       }
       .navigationDestination(isPresented: Binding(

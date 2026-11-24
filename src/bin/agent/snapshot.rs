@@ -318,10 +318,21 @@ fn decode_v2(id: u64, raw: &str, separator: &str, window: usize) -> Result<Snaps
     })
 }
 
+/// Return the visible body only if an idle CodeMaker prompt frame was positively recognized.
+pub(super) fn clean_for_advisor(text: &str) -> Option<String> {
+    let mut rows: Vec<_> = text.lines().collect();
+    let original = rows.len();
+    if screen::clean(&mut rows).is_some() || rows.len() == original {
+        return None;
+    }
+    history::remove_private_keys(&mut Vec::new(), &mut rows);
+    Some(rows.join("\n"))
+}
+
 // tmux's plain capture prints the underlying characters of concealed cells.
 // Read its styled capture, discard control sequences (including hyperlink URLs),
 // and replace SGR 8 cells with spaces before taking either excerpt.
-fn plain_text(styled: &str) -> Result<String> {
+pub(super) fn plain_text(styled: &str) -> Result<String> {
     let mut chars = styled.chars();
     let mut plain = String::new();
     let mut concealed = false;

@@ -490,15 +490,56 @@ pub unsafe extern "C" fn tl_snapshot_v2_secure(
     }
 }
 
+/// Run one scoped managed-session operation over the same pinned SSH channel as snapshots.
+/// # Safety
+/// Same requirements as tl_open_secure; action must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_managed_secure(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    session_id: i64,
+    action: *const c_char,
+    cert_der: *const u8,
+    cert_len: usize,
+    key_pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let action = if action.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(action) }.to_str().unwrap_or("")
+    };
+    let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            Target::Managed(session_id, action),
+            credentials,
+            false,
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
-enum Target {
+enum Target<'a> {
     Terminal(Option<u64>),
     List,
     SnapshotV1(i64),
     SnapshotV2(i64),
+    Managed(i64, &'a str),
 }
 
-impl From<i64> for Target {
+impl From<i64> for Target<'_> {
     fn from(target: i64) -> Self {
         match target {
             -1 => Self::Terminal(None),
@@ -519,7 +560,7 @@ unsafe fn open_inner(
     user: *const c_char,
     pin: *const c_char,
     seed: *const u8,
-    target: Target,
+    target: Target<'_>,
     credentials: Option<CredentialBuffers>,
     fit_initial_grid: bool,
 ) -> *mut c_char {
@@ -529,6 +570,12 @@ unsafe fn open_inner(
             !matches!(target, Target::SnapshotV2(id) if id < 0),
             "invalid snapshot ID"
         );
+        if let Target::Managed(id, action) = target {
+            ensure!(
+                id >= 0 && tmux_link::managed_remote_action(action).is_some(),
+                "invalid managed request"
+            );
+        }
         let identity = match credentials {
             None => None,
             Some((cert, 0, key, 0)) if cert.is_null() && key.is_null() => None,
@@ -578,15 +625,19 @@ unsafe fn open_inner(
                         return run(connection, read, output, id, peer, fit_initial_grid).await;
                     }
                     Target::List => (String::from("tmux-link-list"), 1024 * 1024),
+                    Target::Managed(id, action) => {
+                        (format!("tmux-link-managed-v1 {action} {id}"), 1024 * 1024)
+                    }
                     Target::SnapshotV1(id) => (format!("tmux-link-snapshot {id}"), 128 * 1024),
                     // Two 32 KiB excerpts, plus room for JSON string escaping and metadata.
                     Target::SnapshotV2(id) => (format!("tmux-link-snapshot-v2 {id}"), 512 * 1024),
                 };
-                let snapshot = !matches!(target, Target::List);
+                let capture = !matches!(target, Target::List);
+                let managed = matches!(target, Target::Managed(..));
                 let (session, mut channel) = connection;
                 timeout(Duration::from_secs(15), async {
                     channel.exec(true, command).await?;
-                    if snapshot {
+                    if capture {
                         channel.eof().await?;
                     }
                     let mut size = 0;
@@ -599,19 +650,29 @@ unsafe fn open_inner(
                                 ensure!(size <= limit, "remote response too large");
                                 output.data(&data).await?;
                             }
-                            ChannelMsg::ExtendedData { data, .. } if snapshot => {
+                            ChannelMsg::ExtendedData { data, .. } if capture => {
                                 error.extend_from_slice(&data[..data.len().min(256 - error.len())]);
                             }
                             ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-                            ChannelMsg::Failure if snapshot => {
+                            ChannelMsg::Failure if managed => bail!("managed unsupported"),
+                            ChannelMsg::Failure if capture => {
                                 bail!("snapshot unsupported")
                             }
                             ChannelMsg::Failure => bail!("session list was refused"),
                             _ => {}
                         }
                     }
-                    if snapshot && status != Some(0) {
+                    if capture && status != Some(0) {
                         let diagnostic = String::from_utf8_lossy(&error);
+                        if managed {
+                            if diagnostic.contains("unsupported request") {
+                                bail!("managed unsupported");
+                            }
+                            if diagnostic.contains("managed session changed") {
+                                bail!("managed session changed");
+                            }
+                            bail!("managed unavailable");
+                        }
                         if diagnostic.contains("unsupported request") {
                             bail!("snapshot unsupported");
                         }

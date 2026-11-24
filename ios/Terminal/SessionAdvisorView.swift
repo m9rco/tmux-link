@@ -225,6 +225,22 @@ struct DecisionReviewView: View {
   }
 }
 
+struct DecisionReviewResults {
+  private(set) var decisions: [SessionDecision]
+  private(set) var emptyRetries: Set<Int64> = []
+
+  init(_ decisions: [SessionDecision]) { self.decisions = decisions }
+
+  func isMissing(_ id: Int64) -> Bool { !decisions.contains { $0.sessionID == id } }
+
+  mutating func mergeRetry(_ response: [SessionDecision], for id: Int64) {
+    guard isMissing(id), !emptyRetries.contains(id) else { return }
+    let matches = response.filter { $0.sessionID == id }
+    if matches.isEmpty { emptyRetries.insert(id) }
+    else { decisions.append(contentsOf: matches) }
+  }
+}
+
 @MainActor
 private struct DecisionReviewContent: View {
   let readings: [PaneReading]
@@ -233,11 +249,12 @@ private struct DecisionReviewContent: View {
   let open: @MainActor (Int64) async throws -> Bool
   let close: () -> Void
 
-  private enum Operation { case analyzing, opening }
+  private enum Operation: Equatable { case analyzing, retrying(Int64), opening }
   @State private var excluded: Set<Int64> = []
   @EnvironmentObject private var keyStatus: AdvisorKeyStatus
   @State private var editingKey = false
-  @State private var decisions: [SessionDecision]?
+  @State private var results: DecisionReviewResults?
+  @State private var retryErrors: [Int64: String] = [:]
   @State private var errorMessage: String?
   @State private var copied: IndexPath?
   @State private var operation: Operation?
@@ -249,37 +266,31 @@ private struct DecisionReviewContent: View {
 
   var body: some View {
     Form {
-      if let decisions {
-        if decisions.isEmpty {
+      if let results {
+        if results.decisions.isEmpty {
           Section {
-            Label("DeepSeek 本次未返回候选答复。", systemImage: "checkmark.circle")
+            Label("DeepSeek 本次未返回候选答复。", systemImage: "text.bubble")
               .accessibilityIdentifier("advisor.none")
-            ForEach(included.filter { $0.brief.menu == nil }) { reading in readingHeader(reading) }
-          }
-        } else {
-          ForEach(decisions.indices, id: \.self) { index in
-            decisionSection(decisions[index], index: index)
           }
         }
-        ForEach(included) { reading in
-          if let menu = reading.brief.menu, !decisions.contains(where: { $0.sessionID == reading.id }) {
-            Section {
-              TerminalMenuPreview(menu: menu)
-              openButton(reading.id, identifier: "advisor.open.menu.\(reading.id)")
-            } header: { readingHeader(reading) }
-          }
+        ForEach(results.decisions.indices, id: \.self) { index in
+          decisionSection(results.decisions[index], index: index)
+        }
+        ForEach(included.filter { results.isMissing($0.id) }) { reading in
+          unansweredSection(reading, retried: results.emptyRetries.contains(reading.id))
         }
         Button("返回上下文预览") {
-          self.decisions = nil
+          self.results = nil
+          retryErrors = [:]
           copied = nil
           errorMessage = nil
-        }.disabled(operation != nil)
+        }.disabled(operation != nil).accessibilityIdentifier("advisor.backToPreview")
       } else {
         ForEach(readings) { reading in
           previewSection(reading)
         }
         Section {
-          Button(action: analyze) {
+          Button { analyze(included.map(\.brief)) } label: {
             Label(included.isEmpty ? "分析所选会话" : "分析 \(included.count) 个会话", systemImage: "sparkles")
           }
           .disabled(included.isEmpty || !keyStatus.saved || editingKey || operation != nil)
@@ -288,16 +299,9 @@ private struct DecisionReviewContent: View {
           Text("DeepSeek 将收到所选会话的编号、名称和这里展示的上下文。")
         }
       }
-      if let operation {
+      if operation == .analyzing || operation == .opening {
         Section {
-          Button(action: cancel) {
-            HStack {
-              ProgressView()
-              Text(operation == .analyzing ? "正在分析待答问题…" : "正在核对原会话…")
-              Spacer()
-              Text("取消")
-            }
-          }.accessibilityIdentifier("advisor.cancel")
+          cancelButton(operation == .analyzing ? "正在分析待答问题…" : "正在核对原会话…")
         }
       }
       if let errorMessage {
@@ -306,13 +310,13 @@ private struct DecisionReviewContent: View {
         }
       }
       if !failures.isEmpty { failureSection(failures) }
-      if decisions == nil {
+      if results == nil {
         AdvisorKeySection(editing: $editingKey).disabled(operation != nil)
       }
     }
-    .id(decisions == nil)
+    .id(results == nil)
     .scrollDismissesKeyboard(.interactively)
-    .navigationTitle(decisions == nil ? "决策上下文" : "待答问题").navigationBarTitleDisplayMode(.inline)
+    .navigationTitle(results == nil ? "决策上下文" : "待答问题").navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .confirmationAction) {
         Button("关闭") { cancel(); close() }.accessibilityIdentifier("advisor.close")
@@ -423,7 +427,7 @@ private struct DecisionReviewContent: View {
       if decision.recommendedIndex == nil && !decision.reason.isEmpty {
         Text(verbatim: decision.reason).font(.subheadline)
       }
-      if let menu = source?.brief.menu, decisions?.firstIndex(where: { $0.sessionID == decision.sessionID }) == index {
+      if let menu = source?.brief.menu, results?.decisions.firstIndex(where: { $0.sessionID == decision.sessionID }) == index {
         DisclosureGroup("查看终端菜单") { TerminalMenuPreview(menu: menu) }
       }
       openButton(decision.sessionID, identifier: "advisor.open.\(decision.sessionID).\(index)")
@@ -431,6 +435,63 @@ private struct DecisionReviewContent: View {
     } header: {
       if let source { readingHeader(source) }
     }
+  }
+
+  private func unansweredSection(_ reading: PaneReading, retried: Bool) -> some View {
+    let focused = reading.brief.focusedForRetry
+    let menu = reading.brief.menu
+    let status: String
+    if retried {
+      status = "单独分析后，DeepSeek 仍未给出候选答复。"
+    } else if let menu, menu.items.isEmpty {
+      status = "当前画面只有提交提示，可回原终端核对。"
+    } else if menu != nil {
+      status = "终端显示了选择菜单，DeepSeek 未给出选择建议。"
+    } else if focused != nil {
+      status = "原文中有提问，DeepSeek 未给出这道题的候选答复。"
+    } else {
+      status = "DeepSeek 未识别出此会话当前有待答的问题。"
+    }
+
+    return Section {
+      Text(verbatim: status).foregroundStyle(.secondary)
+        .accessibilityIdentifier("advisor.unanswered.\(reading.id)")
+      if let focused { BriefPreview(brief: focused) }
+      if let menu { TerminalMenuPreview(menu: menu) }
+      if let focused, !retried {
+        if operation == .retrying(reading.id) {
+          cancelButton(menu == nil ? "正在分析这道题…" : "正在分析这个菜单…")
+        } else {
+          Button(menu == nil ? "只分析这道题" : "只分析这个菜单") {
+            analyze([focused], retrying: reading.id)
+          }
+          .disabled(operation != nil || !keyStatus.saved)
+          .accessibilityIdentifier("advisor.retry.\(reading.id)")
+        }
+      }
+      if let error = retryErrors[reading.id] {
+        Text(verbatim: error).foregroundStyle(.orange)
+          .accessibilityIdentifier("advisor.retry.error.\(reading.id)")
+      }
+      openButton(reading.id, identifier: menu == nil ? "advisor.open.\(reading.id)" : "advisor.open.menu.\(reading.id)")
+    } header: {
+      readingHeader(reading)
+    } footer: {
+      if focused != nil, !retried {
+        Text("单独分析只会向 DeepSeek 发送本会话的编号、名称和本节展示的摘录。")
+      }
+    }
+  }
+
+  private func cancelButton(_ label: String) -> some View {
+    Button(action: cancel) {
+      HStack {
+        ProgressView()
+        Text(verbatim: label)
+        Spacer()
+        Text("取消")
+      }
+    }.accessibilityIdentifier("advisor.cancel")
   }
 
   private func openButton(_ id: Int64, identifier: String) -> some View {
@@ -453,18 +514,23 @@ private struct DecisionReviewContent: View {
     }
   }
 
-  private func analyze() {
-    let approved = included.map(\.brief)
+  private func analyze(_ approved: [DecisionBrief], retrying id: Int64? = nil) {
     guard !approved.isEmpty else { return }
-    run(.analyzing) {
+    if let id {
+      guard let results, results.isMissing(id), !results.emptyRetries.contains(id) else { return }
+    }
+    run(id.map(Operation.retrying) ?? .analyzing) {
+      if let id { retryErrors[id] = nil }
       guard let key = try AdvisorCredential.load() else {
         keyStatus.saved = false
-        errorMessage = "请先保存 DeepSeek API Key。"
+        if let id { retryErrors[id] = "请返回上下文预览保存 DeepSeek API Key。" }
+        else { errorMessage = "请先保存 DeepSeek API Key。" }
         return
       }
       let result = try await SessionAdvisor.analyzePrepared(approved, key: key)
       try Task.checkCancellation()
-      decisions = result
+      if let id { results?.mergeRetry(result, for: id) }
+      else { results = DecisionReviewResults(result) }
     }
   }
 
@@ -484,7 +550,8 @@ private struct DecisionReviewContent: View {
         try await action()
       } catch {
         guard !Task.isCancelled else { return }
-        errorMessage = error.localizedDescription
+        if case .retrying(let id) = next { retryErrors[id] = error.localizedDescription }
+        else { errorMessage = error.localizedDescription }
       }
       guard !Task.isCancelled else { return }
       operation = nil
