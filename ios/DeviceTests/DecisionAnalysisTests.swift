@@ -233,6 +233,101 @@ final class DecisionAnalysisTests: XCTestCase {
     XCTAssertTrue(preview.blocks.contains { $0.source == .current && $0.kind == .plan && $0.text.contains("a1b2c3d") })
   }
 
+  func testNegotiatesHostExcerptAndRejectsInconsistentMetadata() throws {
+    var remote = RemoteSession(id: 4, name: "review")
+    XCTAssertNil(remote.negotiatedSnapshotVersion)
+    remote.snapshot = true
+    XCTAssertEqual(remote.negotiatedSnapshotVersion, .v1)
+    let legacy: [String: Any] = ["id": 4, "name": "review", "text": "Done.", "context": NSNull()]
+    let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+    XCTAssertNil(try PaneSnapshotVersion.v1.decode(legacyData, for: remote).capture)
+    remote.snapshotVersion = 2
+    XCTAssertEqual(remote.negotiatedSnapshotVersion, .v2)
+    XCTAssertThrowsError(try PaneSnapshotVersion.v2.decode(legacyData, for: remote))
+
+    let screen = (1...80).map { "Sample \($0) ready." }.joined(separator: "\n") + "\n是否提交？"
+    var payload: [String: Any] = [
+      "id": 4, "name": "review", "version": 2, "paneId": 17, "columns": 80, "rows": 85,
+      "alternate": false, "text": screen, "context": "原因：验证结果已通过。",
+      "screenTruncated": false, "historyTruncated": true,
+      "historyRowsScanned": 5000, "historyCompacted": true
+    ]
+    func decode() throws -> DecisionSnapshot {
+      try PaneSnapshotVersion.v2.decode(JSONSerialization.data(withJSONObject: payload), for: remote)
+    }
+    let result = try decode()
+    XCTAssertEqual(result.text, screen)
+    XCTAssertEqual(result.capture?.paneId, 17)
+    XCTAssertEqual(result.capture?.historyTruncated, true)
+    XCTAssertEqual(result.capture?.historyRowsScanned, 5000)
+    XCTAssertEqual(result.capture?.historyCompacted, true)
+    let wire = try JSONEncoder().encode(result.prepared())
+    let brief = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+    XCTAssertNil(brief["capture"])
+    XCTAssertNil(brief["paneId"])
+    XCTAssertLessThanOrEqual(wire.count, DecisionBrief.maxEncodedBytes)
+    payload["alternate"] = true
+    XCTAssertThrowsError(try decode())
+    payload["context"] = NSNull()
+    XCTAssertThrowsError(try decode())
+    payload["alternate"] = false
+    payload["rows"] = 1
+    XCTAssertThrowsError(try decode())
+    payload["rows"] = 85
+    payload["historyRowsScanned"] = 5001
+    XCTAssertThrowsError(try decode())
+    payload["historyRowsScanned"] = 5000
+    payload["context"] = nil
+    XCTAssertThrowsError(try decode())
+    payload["context"] = NSNull()
+    payload["text"] = String(repeating: "界", count: 11_000)
+    XCTAssertThrowsError(try decode())
+    payload["text"] = "Done."
+    payload["id"] = 5
+    XCTAssertThrowsError(try decode())
+  }
+
+  func testCompactedHistorySupportsTheLiveQuestionThroughRepeatedStatusRows() throws {
+    let screen = (0..<255).map { "Tests passed for shard \($0)." } + ["Should I publish catalog-r42.json?"]
+    let archive = [
+      "Constraint: retain the signed catalog-r42.json.",
+      "Reason: config/catalog-r42.json is the rollback copy.",
+      "Goal: publish catalog-r42.json after review.",
+      "The digest for catalog-r42.json is ab47f2.",
+    ] + (0..<200).map { "Constraint: avoid touching unrelated-\($0).json." }
+    let metadata = NativePaneCapture(version: 2, paneId: 2, columns: 80, rows: 256, alternate: false,
+                                     screenTruncated: false, historyTruncated: false,
+                                     historyRowsScanned: 4820, historyCompacted: true)
+    let input = DecisionSnapshot(id: 37, name: "catalog", text: screen.joined(separator: "\n"),
+                                 context: archive.joined(separator: "\n"), capture: metadata)
+    let brief = input.prepared()
+    XCTAssertTrue(brief.blocks.contains { $0.source == .current && $0.kind == .question && $0.text == screen.last })
+    XCTAssertTrue(brief.blocks.contains { $0.source == .current && $0.text == "Tests passed for shard 254." })
+    let support = brief.blocks.filter { $0.source == .history }
+    for kind: DecisionBrief.Kind in [.constraint, .rationale, .goal, .fact] {
+      XCTAssertTrue(support.contains { $0.kind == kind && $0.text.contains("catalog-r42.json") })
+    }
+    XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
+  }
+
+  func testNativeLongIdentifierKeepsSeparateQuestionAndRedactsAssignmentsAndURLs() throws {
+    let longName = String(repeating: "build-system.v3-", count: 2_000)
+    let question = "Should I change the data/\nstore?"
+    let screen = longName + "\nShould I change the data/\n  store?\n--api-key=fixture-value\nhttps://demo:fixture-url@host"
+    let metadata = NativePaneCapture(version: 2, paneId: 1, columns: 80, rows: 256, alternate: false,
+                                     screenTruncated: false, historyTruncated: false,
+                                     historyRowsScanned: 0, historyCompacted: false)
+    let start = Date()
+    let result = DecisionSnapshot(id: 7, name: "test", text: screen, capture: metadata).prepared()
+    // A word-boundary search previously rescanned this entire dotted name at each hyphen.
+    XCTAssertLessThan(Date().timeIntervalSince(start), 10)
+    XCTAssertTrue(result.blocks.contains { $0.kind == .question && $0.text == question })
+    let wire = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+    XCTAssertFalse(wire.contains("fixture-value"))
+    XCTAssertFalse(wire.contains("fixture-url"))
+    XCTAssertLessThanOrEqual(wire.utf8.count, DecisionBrief.maxEncodedBytes)
+  }
+
   func testVisibleUnicodeBoundsAndCommonSecrets() throws {
     let secrets = [
       "Authorization: Bearer fixture-header-value",

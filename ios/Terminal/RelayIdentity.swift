@@ -164,13 +164,6 @@ enum RelayIdentity {
   }
 }
 
-struct PaneSnapshot: Decodable {
-  let id: Int64
-  let name: String
-  let text: String
-  let context: String?
-}
-
 struct TerminalTransport {
   let endpoint: String
   let port: UInt16
@@ -210,20 +203,22 @@ struct TerminalTransport {
     return try JSONDecoder().decode([RemoteSession].self, from: data)
   }
 
-  static func snapshot(_ client: ClientProfile, sessionID: Int64) async throws -> PaneSnapshot {
-    let (target, overflow) = Int64(-3).subtractingReportingOverflow(sessionID)
-    guard sessionID >= 0, !overflow else { throw RelayError("无效的会话编号") }
-    let data = try await read(client, target: target)
-    guard let pane = try? JSONDecoder().decode(PaneSnapshot.self, from: data),
-      pane.id == sessionID, pane.text.utf8.count <= 6000,
-      pane.text.split(separator: "\n", omittingEmptySubsequences: false).count <= 40,
-      (pane.context?.utf8.count ?? 0) <= 16 * 1024,
-      (pane.context?.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0) <= 120
-    else { throw RelayError("窗格快照与所选会话不符或格式无效，请刷新后重试。") }
-    return pane
+  static func snapshot(_ client: ClientProfile, session: RemoteSession, version: PaneSnapshotVersion) async throws -> DecisionSnapshot {
+    guard session.id >= 0 else { throw RelayError("无效的会话编号") }
+    let target: Int64
+    switch version {
+    case .v1:
+      let (encodedID, overflow) = Int64(-3).subtractingReportingOverflow(session.id)
+      guard !overflow else { throw RelayError("无效的会话编号") }
+      target = encodedID
+    case .v2:
+      target = session.id
+    }
+    let data = try await read(client, target: target, snapshotV2: version == .v2)
+    return try version.decode(data, for: session)
   }
 
-  private static func read(_ client: ClientProfile, target: Int64) async throws -> Data {
+  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false) async throws -> Data {
     let connection = try TerminalTransport(client)
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
@@ -235,7 +230,7 @@ struct TerminalTransport {
     // cooperative executor, including on devices with a small thread pool.
     async let message: String? = withCheckedContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        continuation.resume(returning: connection.run(worker, target: target))
+        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2))
       }
     }
     let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -248,6 +243,7 @@ struct TerminalTransport {
       switch error {
       case "snapshot unsupported": throw RelayError("远端代理不支持读取窗格，请更新 tmux-link-agent。")
       case "snapshot pane in mode": throw RelayError("请先退出 tmux 的复制或选择模式，再读取当前窗格。")
+      case "snapshot exceeds capture limit": throw RelayError("这个窗格的数据量超出节点读取上限。请进入会话，点「决策」读取当前画面。")
       case "snapshot unavailable": throw RelayError("无法读取所选窗格，会话可能已经关闭或切换。")
       default: throw RelayError(error)
       }
@@ -256,10 +252,10 @@ struct TerminalTransport {
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.
-  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false) -> String? {
+  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false) -> String? {
     let der = identity?.certificate ?? Data()
     let pkcs8 = identity?.privateKey ?? Data()
-    let open = fitInitialGrid ? tl_open_secure_fitted : tl_open_secure
+    let open = snapshotV2 ? tl_snapshot_v2_secure : (fitInitialGrid ? tl_open_secure_fitted : tl_open_secure)
     let error = seed.withUnsafeBytes { (seedBytes: UnsafeRawBufferPointer) in
       der.withUnsafeBytes { (cert: UnsafeRawBufferPointer) in
         pkcs8.withUnsafeBytes { (key: UnsafeRawBufferPointer) in

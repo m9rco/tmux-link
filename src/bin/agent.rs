@@ -51,6 +51,21 @@ fn page(request: &str) -> Result<()> {
     Ok(())
 }
 
+fn print_snapshot(request: &str, detailed: bool) -> Result<()> {
+    ensure!(
+        !request.is_empty() && request.bytes().all(|b| b.is_ascii_digit()),
+        "invalid snapshot ID"
+    );
+    let id = request.parse()?;
+    let json = if detailed {
+        serde_json::to_string(&snapshot::read_v2(id)?)?
+    } else {
+        serde_json::to_string(&snapshot::read(id)?)?
+    };
+    println!("{json}");
+    Ok(())
+}
+
 // Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
@@ -61,16 +76,10 @@ fn attach() -> Result<()> {
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-page ")) {
         return page(request);
     }
-    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-snapshot ")) {
-        ensure!(
-            !request.is_empty() && request.bytes().all(|b| b.is_ascii_digit()),
-            "invalid snapshot ID"
-        );
-        println!(
-            "{}",
-            serde_json::to_string(&snapshot::read(request.parse()?)?)?
-        );
-        return Ok(());
+    if let Some((snapshot, request)) = command.and_then(|c| c.split_once(' '))
+        && matches!(snapshot, "tmux-link-snapshot" | "tmux-link-snapshot-v2")
+    {
+        return print_snapshot(request, snapshot == "tmux-link-snapshot-v2");
     }
     if let Some(id) = command.and_then(|c| c.strip_prefix("tmux-link-attach ")) {
         let id: u64 = id.parse()?;
@@ -116,7 +125,7 @@ fn attach() -> Result<()> {
                 let directory = path.status.success().then(|| {
                     String::from_utf8_lossy(&path.stdout).trim_end_matches('\n').to_owned()
                 });
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory, "snapshot": true}))
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory, "snapshot": true, "snapshotVersion": 2}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);
@@ -154,7 +163,18 @@ fn attach() -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [op] if matches!(op.as_str(), "--version" | "-V") => {
+            println!("tmux-link-agent {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         [op] if op == "attach" => attach(),
+        [op, flag] if op == "snapshot" && matches!(flag.as_str(), "--help" | "-h") => {
+            println!(
+                "tmux-link-agent snapshot SESSION_ID\nPrint a read-only JSON snapshot of the session's active pane and compacted history. Use the numeric session ID without '$'."
+            );
+            Ok(())
+        }
+        [op, id] if op == "snapshot" => print_snapshot(id, true),
         [op, options @ ..] if op == "import-link" => import_link::print(options),
         #[cfg(all(feature = "tls", feature = "ssh-probe"))]
         [op, options @ ..] if op == "pair" => pair::command(options),
@@ -194,7 +214,7 @@ fn main() -> Result<()> {
                 .into())
         }
         _ => bail!(
-            "usage: agent attach | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
+            "usage: agent attach | agent snapshot SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
         ),
     }
 }

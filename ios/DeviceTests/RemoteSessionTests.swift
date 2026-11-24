@@ -20,6 +20,7 @@ final class RemoteSessionTests: XCTestCase {
     let hasHistoryFixture: Bool?
     let benchmarkSessionID: Int64?
     let decisionFixtureIDs: [Int64]?
+    let snapshotFixtureID: Int64?
   }
 
   func configuration() throws -> Connection {
@@ -30,6 +31,32 @@ final class RemoteSessionTests: XCTestCase {
       throw XCTSkip("Copy tmux-link-e2e.json to the app Documents folder to run the live test.")
     }
     return try JSONDecoder().decode(Connection.self, from: Data(contentsOf: file))
+  }
+
+  func testHostSnapshotRetainsEarlierConstraint() async throws {
+    let config = try configuration()
+    guard let id = config.snapshotFixtureID else { throw XCTSkip("No isolated decision pane configured") }
+    let client = ClientProfile(name: "Snapshot fixture", host: config.host, port: config.port,
+                               user: config.user, pin: config.fingerprint)
+    let directory = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(directory.first { $0.id == id && $0.name == "ios-decision-fixture" })
+    XCTAssertEqual(session.negotiatedSnapshotVersion, .v2)
+    let snapshot = try await SessionDirectory.snapshot(session, client: client)
+    let metadata = try XCTUnwrap(snapshot.capture)
+    XCTAssertEqual(metadata.columns, 32)
+    XCTAssertEqual(metadata.rows, 24)
+    XCTAssertEqual(metadata.historyRowsScanned, 5000)
+    XCTAssertTrue(metadata.historyTruncated)
+    XCTAssertTrue(metadata.historyCompacted)
+    XCTAssertFalse(snapshot.context?.contains("Outside the scan window.") == true)
+    let brief = snapshot.prepared()
+    XCTAssertTrue(brief.blocks.contains {
+      $0.source == .current && $0.kind == .question && $0.text == "Should we publish the validated catalog for review?"
+    })
+    XCTAssertTrue(brief.blocks.contains {
+      $0.source == .history && $0.kind == .constraint && $0.text.contains("retain the signed catalog")
+    })
+    XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
   }
 
   func roundtrip(_ config: Connection, command: String, expected: String) throws {

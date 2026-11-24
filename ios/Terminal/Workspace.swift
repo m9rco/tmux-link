@@ -45,28 +45,16 @@ struct ClientProfile: Codable, Hashable, Identifiable {
   }
 }
 
-struct RemoteSession: Codable, Hashable, Identifiable {
-  let id: Int64
-  let name: String
-  var touchPaging: Bool? = nil
-  var directory: String? = nil
-  var snapshot: Bool? = nil
-}
-
 enum SessionDirectory {
   static func fetch(_ client: ClientProfile) async throws -> [RemoteSession] {
     try await TerminalTransport.list(client)
   }
 
   static func snapshot(_ candidate: RemoteSession, client: ClientProfile) async throws -> DecisionSnapshot {
-    guard candidate.snapshot == true else {
+    guard let version = candidate.negotiatedSnapshotVersion else {
       throw RelayError("请升级这台机器的 agent 以批量读取。也可进入会话，在右侧快捷栏点「决策」。")
     }
-    let pane = try await TerminalTransport.snapshot(client, sessionID: candidate.id)
-    guard pane.id == candidate.id, pane.name == candidate.name else {
-      throw RelayError("会话已更名或关闭，请刷新列表。")
-    }
-    return DecisionSnapshot(id: pane.id, name: pane.name, text: pane.text, context: pane.context)
+    return try await TerminalTransport.snapshot(client, session: candidate, version: version)
   }
 }
 

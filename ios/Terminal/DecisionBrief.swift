@@ -52,8 +52,9 @@ extension DecisionBrief {
     let screen = clean(snapshot.text)
     let widget = TerminalChoiceMenu.read(rows: screen)
     let menu = widget?.menu
-    let history = Self.extract(clean(snapshot.context ?? ""), source: .history)
-    let current = Self.extract(screen, source: .current, skip: widget?.occupied ?? [])
+    let logicalLines = snapshot.capture != nil
+    let history = Self.extract(clean(snapshot.context ?? ""), source: .history, logicalLines: logicalLines)
+    let current = Self.extract(screen, source: .current, logicalLines: logicalLines, skip: widget?.occupied ?? [])
     var candidates = history + current
 
     // When a question names a specific plan item, other items in that plan are not answers.
@@ -94,17 +95,40 @@ extension DecisionBrief {
       let key = Rules.progress.test(item.block.text) ? Rules.number.replace(in: item.block.text, with: "#") : item.block.text
       latest[key] = index
     }
-    let lastCurrent = latest.values.filter { candidates[$0].block.source == .current }.max()
+    let currentIndices = latest.values.filter { candidates[$0].block.source == .current }
+    let lastCurrent = currentIndices.max()
+    let lastState = currentIndices.filter { candidates[$0].block.kind == .state }.max()
+    var support = [Int: Int]()
+    if snapshot.capture != nil, !history.isEmpty, !questions.isEmpty || menu != nil {
+      let prompt = questions.map { $0.block.text } + (menu?.visibleTexts ?? [])
+      let references = Self.references(in: prompt.joined(separator: "\n"))
+      // Choose one representative of each supporting kind. Prefer the same file, ticket, or revision
+      // as the current prompt, then the later row. Unrelated history facts stay at their usual priority.
+      let matches = latest.values.compactMap { index -> (index: Int, matches: Int)? in
+        let block = candidates[index].block
+        guard block.source == .history, block.kind != .question, block.kind != .choice else { return nil }
+        let overlap = references.isEmpty ? 0 : Self.references(in: block.text).intersection(references).count
+        guard overlap > 0 || [.rationale, .goal, .constraint].contains(block.kind) else { return nil }
+        return (index, overlap)
+      }.sorted { a, b in a.matches == b.matches ? a.index > b.index : a.matches > b.matches }
+      var kinds = Set<Kind>()
+      for (index, _) in matches where support.count < 4 && kinds.insert(candidates[index].block.kind).inserted {
+        support[index] = support.count
+      }
+    }
     func priority(_ i: Int) -> Int {
       let item = candidates[i]
       let current = item.block.source == .current
       if i == lastCurrent { return 125 }
       if preferred.contains(i) { return 110 }
+      if let rank = support[i] { return 99 - rank }
       switch item.block.kind {
       case .question: return current ? 120 : 25
       case .choice: return current ? 105 : 25
       case .rationale, .goal, .constraint: return current ? 95 : 88
-      case .state: return current ? 100 : 65
+      case .state:
+        guard current else { return 65 }
+        return support.isEmpty || i == lastState ? 100 : 94
       case .plan: return current ? 75 : 55
       case .fact: return current ? 70 : 35
       }
@@ -140,6 +164,21 @@ extension DecisionBrief {
     let number: Int?
   }
 
+  private static func references(in text: String) -> Set<String> {
+    let punctuation = CharacterSet(charactersIn: "._/-")
+    let words = text.split { !($0.isASCII && ($0.isLetter || $0.isNumber || "._/-".contains($0))) }
+    var references = Set<String>()
+    for word in words {
+      let literal = word.trimmingCharacters(in: punctuation)
+      guard (3...128).contains(literal.utf8.count), literal.contains(where: \.isLetter),
+            literal.contains(where: \.isNumber) || literal.rangeOfCharacter(from: punctuation) != nil else { continue }
+      references.insert(literal)
+      // A question may name a file while earlier output included its directory.
+      if let name = literal.split(separator: "/").last, name.contains(".") { references.insert(String(name)) }
+    }
+    return references
+  }
+
   private static func scopeLimit(in text: String) -> String? {
     // A later plan item can still set an important ownership or safety boundary.
     let clauses = text.components(separatedBy: CharacterSet(charactersIn: "（();；。"))
@@ -147,7 +186,7 @@ extension DecisionBrief {
     return limit.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "），,.")))
   }
 
-  private static func extract(_ rows: [String], source: Source, skip: Set<Int> = []) -> [Candidate] {
+  private static func extract(_ rows: [String], source: Source, logicalLines: Bool, skip: Set<Int> = []) -> [Candidate] {
     var paragraphs = [String]()
     var pending = ""
     func flush() {
@@ -160,8 +199,10 @@ extension DecisionBrief {
       }
       if pending.hasSuffix("[REDACTED]") && Rules.keyContinuation.test(line) { continue }
       let indent = rawLine.prefix(while: { $0.isWhitespace }).count
-      if !pending.isEmpty && isContinuation(line, indent: indent, after: pending) {
-        pending += separator(after: pending, before: line) + line
+      if !pending.isEmpty && isContinuation(line, indent: indent, after: pending, logicalLines: logicalLines) {
+        // tmux v2 joins its own soft wraps. An application may indent the next
+        // line in the same paragraph, but its explicit newline is part of the evidence.
+        pending += (logicalLines ? "\n" : separator(after: pending, before: line)) + line
       } else {
         flush()
         pending = line
@@ -258,7 +299,10 @@ extension DecisionBrief {
     return hidden
   }
 
-  private static func isContinuation(_ line: String, indent: Int, after previous: String) -> Bool {
+  private static func isContinuation(_ line: String, indent: Int, after previous: String, logicalLines: Bool) -> Bool {
+    if logicalLines && (Rules.questionLead.test(line) || (indent == 0 && !Rules.questionLead.test(previous))) {
+      return false
+    }
     guard !Rules.start.test(line), !Rules.prompt.test(line), !Rules.label.test(line),
           !Rules.response.test(line), !Rules.planHeading.test(line), !Rules.state.test(line),
           previous.last.map({ !".。?？!！:：".contains($0) }) == true else { return false }

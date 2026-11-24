@@ -65,6 +65,18 @@ def benchmark(device, tmp):
                         "#{session_id}", "-s", session, sys.executable,
                         ROOT / "scripts/terminal-latency-fixture.py", env=runtime_env)
     try:
+        # Put the constraint thousands of lines back and wrap the question on a narrow grid.
+        run("tmux", "set-option", "-g", "history-limit", "6500", env=runtime_env)
+        report = tmp / "catalog.txt"
+        report.write_text("Outside the scan window.\n" + "Previous batch finished.\n" * 450
+                          + "Constraint: retain the signed catalog.\n"
+                          + "".join(f"Sample {i} verified.\n" for i in range(4850))
+                          + "Should we publish the validated catalog for review?\n", encoding="utf-8")
+        snapshot_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
+                             "-x", "32", "-y", "24", "-s", "ios-decision-fixture",
+                             sys.executable, "-c", "import pathlib,sys,time; "
+                             "print(pathlib.Path(sys.argv[1]).read_text(), end='', flush=True); time.sleep(1800)",
+                             report, env=runtime_env)
         tmux_path = str(Path(shutil.which("tmux")).parent)
         command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}",
                               f"PATH={tmux_path}:/usr/bin:/bin", str(ROOT / "target/debug/agent"), "attach"])
@@ -89,10 +101,12 @@ def benchmark(device, tmp):
                 (docs / "tmux-link-e2e.json").write_text(json.dumps({
                     "host": "127.0.0.1", "port": port, "user": getpass.getuser(), "fingerprint": pin,
                     "sessionName": session, "benchmarkSessionID": int(session_id.removeprefix("$")),
+                    "snapshotFixtureID": int(snapshot_id.removeprefix("$")),
                 }))
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",

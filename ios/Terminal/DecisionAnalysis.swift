@@ -1,11 +1,6 @@
 import Foundation
 
-struct DecisionSnapshot: Codable, Equatable {
-  let id: Int64
-  let name: String
-  let text: String
-  var context: String? = nil
-
+extension DecisionSnapshot {
   func prepared() -> DecisionBrief { DecisionBrief(snapshot: self) }
 
   private static let secretPatterns = [
@@ -14,9 +9,10 @@ struct DecisionSnapshot: Codable, Equatable {
     // Common auth headers, explicit token and password assignments, and credentials in URLs.
     #"(?im)\b(?:proxy-authorization|authorization|cookie|set-cookie)[ \t]*:[^\n]*"#,
     #"(?i)\b(?:bearer|basic)[ \t]+[a-z0-9_./+=~-]+"#,
-    #"(?im)["']?\b[\w.-]*(?:api[._-]?key|pass(?:word|wd)|secret(?:[._-]?(?:key|access[._-]?key))?|token|access[._-]?key(?:[._-]?id)?|private[._-]?key)["']?[ \t]*[:=][ \t]*(?:"[^"\n]*(?:"|$)|'[^'\n]*(?:'|$)|[^\s,;}]+)"#,
+    // Start once per assignment name. Native tmux lines can hold a 32 KiB dotted identifier.
+    #"(?im)(?<![\w.-])["']?[\w.-]*(?:api[._-]?key|pass(?:word|wd)|secret(?:[._-]?(?:key|access[._-]?key))?|token|access[._-]?key(?:[._-]?id)?|private[._-]?key)["']?[ \t]*[:=][ \t]*(?:"[^"\n]*(?:"|$)|'[^'\n]*(?:'|$)|[^\s,;}]+)"#,
     #"(?im)--(?:password|passwd|api-key|token|client-secret)[ \t]+(?:"[^"\n]*(?:"|$)|'[^'\n]*(?:'|$)|[^\s]+)"#,
-    #"(?i)\b[a-z][a-z0-9+.\-]*://[^/\s@]+:[^/\s@]*@"#,
+    #"(?i)(?<![a-z0-9.+-])[0-9.+-]*+[a-z][a-z0-9.+-]*+://[^/\s@:]*+:[^/\s@]*+@"#,
     // Common standalone provider tokens, signed JWTs, and visible private-key body lines.
     #"(?i)\b(?:sk-[a-z0-9_-]{12,}|(?:sk|rk)_(?:live|test)_[a-z0-9]{12,}|gh[pousr]_[a-z0-9_]{12,}|github_pat_[a-z0-9_]{12,}|xox[baprs]-[a-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[a-z0-9_-]+\.eyJ[a-z0-9_-]+\.[a-z0-9_-]+)\b"#,
     #"(?m)^[A-Za-z0-9+/]{48,}={0,2}[ \t]*$"#,

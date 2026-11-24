@@ -11,6 +11,8 @@ char *tl_open(int fd, const char *host, uint16_t port, const char *user, const c
 char *tl_open_secure(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t target, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
 // The terminal UI replies to the "attaching" stage with its first measured resize.
 char *tl_open_secure_fitted(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t target, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
+// Read one v2 snapshot as unframed JSON, using the nonnegative session ID directly.
+char *tl_snapshot_v2_secure(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t session_id, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
 void tl_free_error(char *);
 // Returns NULL after approved host reports an outbound tunnel, otherwise an owned error string.
 char *tl_approve_pairing(const char *url, const char *id, const char *request_json, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);

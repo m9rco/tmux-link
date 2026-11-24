@@ -21,6 +21,10 @@ iPhone ── SSH over WSS ──► public center ◄── outbound WSS ──
 
 批量读取请在主机安装 v0.4.5 或更高版本的 agent。也可以在已打开的终端展开右侧快捷栏，点「决策」直接分析当前画面，这条路径兼容旧版 agent。
 
+iOS 0.4.6（Build 37）和 v0.4.6 节点支持在 Linux 或 Mac 上先筛选历史。批量读取时，节点扫描活动窗格最近最多 5000 个历史屏幕行，按 tmux 的软换行标记还原长行，优先保留决策原因、目标、约束、失败线索及近期输出。选出的原文按时间排序，与当前屏幕分开传输。历史摘录上限为 320 个逻辑行、32 KiB，当前屏幕上限为 256 个逻辑行、32 KiB。手机预览会提示历史是否经过筛选，筛选时会显示节点实际扫描的行数。发送给模型的决策摘要仍限制在每会话 4 KiB。备用屏幕只读取当前画面。旧版手机和 v0.4.5 节点均可继续使用原有摘录。
+
+可在节点运行 `tmux-link-agent snapshot 0` 查看同一份 JSON（将 `0` 换成会话编号）。`historyRowsScanned` 是实际读取的历史屏幕行数。若颜色和样式使一次原始读取超过 16 MiB，节点会缩小回看范围再读取。`historyCompacted` 表示节点已筛选历史，`historyTruncated` 表示 tmux 中还有更早的历史超出读取窗口。可用 `tmux display-message -p '#{history_size}/#{history_limit}'` 查看当前窗格已保留的行数和容量。如需为新窗格保留足够的历史，在 tmux 配置中设置 `set -g history-limit 5000` 或更高。
+
 iOS 0.4.5（Build 35）起，手机在本地过滤常见凭据、输入框边线、模型状态栏和重复进度，按当前问题、原因、目标、约束与相关步骤组织摘录。每个会话发送给 DeepSeek 的结构化内容最多 4 KiB，当前画面和历史保留来源。预览展示本次实际发送的内容。确认某个编号步骤时，答复围绕同意或暂缓该步。
 
 终端显示交互菜单时，预览直接展示可识别的单选或多选、选项原文、光标和勾选状态，以及屏幕给出的选择和提交方式。终端未说明的按键不会补写。选择和提交由用户回原终端操作。
@@ -48,6 +52,8 @@ curl -fsSL https://github.com/m9rco/tmux-link/releases/latest/download/install.s
 ```
 
 默认只安装客户端 `tmux-link-agent`。普通用户安装到 `~/.local/bin`，root 安装到 `/usr/local/bin`。把安装目录加入 PATH，已有终端可以直接执行 `export PATH="$HOME/.local/bin:$PATH"`。
+
+已配对的 Linux 或 Mac 以原安装用户重新运行上面的命令即可升级，再用 `tmux-link-agent --version` 核对安装版本。下次从手机读取会话时会使用新的节点程序，已有配对和 tmux 会话可继续使用。
 
 连接一台新机器时，以运行 tmux 的用户执行下面的安装配对命令。机器需要已运行的 OpenSSH 服务和 tmux。
 

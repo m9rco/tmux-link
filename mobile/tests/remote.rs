@@ -18,14 +18,21 @@ fn start_protocol(
     key_env: &str,
     secure_target: Option<i64>,
 ) -> (UnixStream, JoinHandle<Result<(), String>>) {
-    start_with_grid(pin, key_env, secure_target, false)
+    start_with(pin, key_env, secure_target, Request::Open)
 }
 
-fn start_with_grid(
+#[derive(Clone, Copy)]
+enum Request {
+    Open,
+    Fitted,
+    SnapshotV2,
+}
+
+fn start_with(
     pin: &str,
     key_env: &str,
     secure_target: Option<i64>,
-    fitted: bool,
+    request: Request,
 ) -> (UnixStream, JoinHandle<Result<(), String>>) {
     let get = |key| std::env::var(key).unwrap();
     let key = load_secret_key(get(key_env), None).unwrap();
@@ -47,10 +54,10 @@ fn start_with_grid(
         .unwrap();
     let worker = thread::spawn(move || unsafe {
         let error = if let Some(target) = secure_target {
-            let open = if fitted {
-                tmux_link_mobile::tl_open_secure_fitted
-            } else {
-                tmux_link_mobile::tl_open_secure
+            let open = match request {
+                Request::Open => tmux_link_mobile::tl_open_secure,
+                Request::Fitted => tmux_link_mobile::tl_open_secure_fitted,
+                Request::SnapshotV2 => tmux_link_mobile::tl_snapshot_v2_secure,
             };
             open(
                 core.into_raw_fd(),
@@ -142,7 +149,7 @@ fn requests_measured_pty_before_command_and_resizes_afterward() {
         }
     }
     let pin = std::env::var("TL_TEST_PIN").unwrap();
-    let (mut view, worker) = start_with_grid(&pin, "TL_TEST_KEY", Some(90027), true);
+    let (mut view, worker) = start_with(&pin, "TL_TEST_KEY", Some(90027), Request::Fitted);
     while read_frame(&mut view) != (1, b"attaching".to_vec()) {}
     send(&mut view, 1, &[0, 53, 0, 31]);
     expect_grid(&mut view, b"initial-grid 31 53");
@@ -361,6 +368,59 @@ fn reads_only_the_selected_pane_over_authenticated_ssh() {
     assert!(pane["text"].as_str().unwrap().contains("pane-左🙂右"));
 
     let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(i64::MIN));
+    data.clear();
+    view.read_to_end(&mut data).unwrap();
+    assert!(data.is_empty());
+    assert_eq!(worker.join().unwrap().unwrap_err(), "snapshot unavailable");
+}
+
+#[test]
+#[ignore = "requires a disposable sshd/tmux fixture"]
+fn reads_v2_snapshot_over_pinned_ssh_for_the_literal_listed_id() {
+    let pin = std::env::var("TL_TEST_PIN").unwrap();
+    let (mut view, worker) = start_protocol(&pin, "TL_TEST_KEY", Some(-2));
+    let mut data = Vec::new();
+    view.read_to_end(&mut data).unwrap();
+    worker.join().unwrap().unwrap();
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&data).unwrap();
+    let selected = list.iter().find(|s| s["name"] == "zz-中文🙂").unwrap();
+    assert_eq!(selected["snapshot"], true);
+    assert_eq!(selected["snapshotVersion"], 2);
+    let id = selected["id"].as_i64().unwrap();
+
+    for (requested_pin, key, expected) in [
+        ("SHA256:incorrect", "TL_TEST_KEY", "Unknown server key"),
+        (
+            pin.as_str(),
+            "TL_TEST_UNAUTHORIZED_KEY",
+            "phone key rejected",
+        ),
+    ] {
+        let (mut view, worker) = start_with(requested_pin, key, Some(id), Request::SnapshotV2);
+        data.clear();
+        view.read_to_end(&mut data).unwrap();
+        assert!(data.is_empty());
+        assert_eq!(worker.join().unwrap().unwrap_err(), expected);
+    }
+
+    let (mut view, worker) = start_with(&pin, "TL_TEST_KEY", Some(id), Request::SnapshotV2);
+    data.clear();
+    view.read_to_end(&mut data).unwrap();
+    worker.join().unwrap().unwrap();
+    let pane: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(pane["version"], 2);
+    assert_eq!(pane["id"], id);
+    assert_eq!(pane["name"], selected["name"]);
+    assert!(pane["paneId"].is_u64());
+    assert!(pane["columns"].as_u64().unwrap() > 0 && pane["rows"].as_u64().unwrap() > 0);
+    assert!(pane["text"].as_str().unwrap().contains("pane-左🙂右"));
+    assert_eq!(pane["screenTruncated"], false);
+    assert_eq!(pane["alternate"], false);
+    assert_eq!(pane["historyRowsScanned"], 0);
+    assert_eq!(pane["historyCompacted"], false);
+    assert_eq!(pane["historyTruncated"], false);
+
+    let (mut view, worker) = start_with(&pin, "TL_TEST_KEY", Some(i64::MAX), Request::SnapshotV2);
     data.clear();
     view.read_to_end(&mut data).unwrap();
     assert!(data.is_empty());

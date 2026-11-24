@@ -385,7 +385,7 @@ pub unsafe extern "C" fn tl_open(
     seed: *const u8,
     target: i64,
 ) -> *mut c_char {
-    unsafe { open_inner(fd, host, port, user, pin, seed, target, None, false) }
+    unsafe { open_inner(fd, host, port, user, pin, seed, target.into(), None, false) }
 }
 
 /// # Safety
@@ -407,7 +407,19 @@ pub unsafe extern "C" fn tl_open_secure(
     key_len: usize,
 ) -> *mut c_char {
     let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
-    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials, false) }
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            target.into(),
+            credentials,
+            false,
+        )
+    }
 }
 
 /// # Safety
@@ -429,7 +441,72 @@ pub unsafe extern "C" fn tl_open_secure_fitted(
     key_len: usize,
 ) -> *mut c_char {
     let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
-    unsafe { open_inner(fd, host, port, user, pin, seed, target, credentials, true) }
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            target.into(),
+            credentials,
+            true,
+        )
+    }
+}
+
+/// Reads the host-native, read-only v2 snapshot for a nonnegative tmux session ID.
+/// # Safety
+/// Same fd, pointer and identity requirements as tl_open_secure.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_snapshot_v2_secure(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    session_id: i64,
+    cert_der: *const u8,
+    cert_len: usize,
+    key_pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let credentials = Some((cert_der, cert_len, key_pkcs8, key_len));
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            Target::SnapshotV2(session_id),
+            credentials,
+            false,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    Terminal(Option<u64>),
+    List,
+    SnapshotV1(i64),
+    SnapshotV2(i64),
+}
+
+impl From<i64> for Target {
+    fn from(target: i64) -> Self {
+        match target {
+            -1 => Self::Terminal(None),
+            -2 => Self::List,
+            ..=-3 => Self::SnapshotV1(-3 - target),
+            id => Self::Terminal(Some(id as u64)),
+        }
+    }
 }
 
 type CredentialBuffers = (*const u8, usize, *const u8, usize);
@@ -442,12 +519,16 @@ unsafe fn open_inner(
     user: *const c_char,
     pin: *const c_char,
     seed: *const u8,
-    target: i64,
+    target: Target,
     credentials: Option<CredentialBuffers>,
     fit_initial_grid: bool,
 ) -> *mut c_char {
     let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     let result = (|| -> Result<()> {
+        ensure!(
+            !matches!(target, Target::SnapshotV2(id) if id < 0),
+            "invalid snapshot ID"
+        );
         let identity = match credentials {
             None => None,
             Some((cert, 0, key, 0)) if cert.is_null() && key.is_null() => None,
@@ -479,7 +560,7 @@ unsafe fn open_inner(
                 let (read, writer) = UnixStream::from_std(socket)?.into_split();
                 let mut output = Output {
                     writer,
-                    framed: credentials.is_some() && target >= -1,
+                    framed: credentials.is_some() && matches!(target, Target::Terminal(_)),
                 };
                 let peer = Peer {
                     host,
@@ -489,82 +570,70 @@ unsafe fn open_inner(
                     key: PrivateKey::from(key),
                     identity,
                 };
-                let key = (target != -1).then(|| handoff::PeerKey::from(&peer));
+                let key = (!matches!(target, Target::Terminal(None)))
+                    .then(|| handoff::PeerKey::from(&peer));
                 let connection = handoff::open_channel(&peer, key.as_ref(), &mut output).await?;
-                if target <= -2 {
-                    let (session, mut channel) = connection;
-                    let snapshot_id = (-3i64).checked_sub(target).filter(|id| *id >= 0);
-                    let command = snapshot_id.map_or_else(
-                        || String::from("tmux-link-list"),
-                        |id| format!("tmux-link-snapshot {id}"),
-                    );
-                    let limit = if snapshot_id.is_some() {
-                        128 * 1024
-                    } else {
-                        1024 * 1024
-                    };
-                    timeout(Duration::from_secs(15), async {
-                        channel.exec(true, command).await?;
-                        if snapshot_id.is_some() {
-                            channel.eof().await?;
-                        }
-                        let mut size = 0;
-                        let mut status = None;
-                        let mut error = Vec::new();
-                        while let Some(message) = channel.wait().await {
-                            match message {
-                                ChannelMsg::Data { data } => {
-                                    size += data.len();
-                                    ensure!(size <= limit, "remote response too large");
-                                    output.data(&data).await?;
-                                }
-                                ChannelMsg::ExtendedData { data, .. } if snapshot_id.is_some() => {
-                                    error.extend_from_slice(
-                                        &data[..data.len().min(256 - error.len())],
-                                    );
-                                }
-                                ChannelMsg::ExitStatus { exit_status } => {
-                                    status = Some(exit_status)
-                                }
-                                ChannelMsg::Failure if snapshot_id.is_some() => {
-                                    bail!("snapshot unsupported")
-                                }
-                                ChannelMsg::Failure => bail!("session list was refused"),
-                                _ => {}
-                            }
-                        }
-                        if snapshot_id.is_some() && status != Some(0) {
-                            let diagnostic = String::from_utf8_lossy(&error);
-                            if diagnostic.contains("unsupported request") {
-                                bail!("snapshot unsupported");
-                            }
-                            if diagnostic.contains("snapshot pane in mode") {
-                                bail!("snapshot pane in mode");
-                            }
-                            bail!("snapshot unavailable");
-                        }
-                        ensure!(
-                            status == Some(0),
-                            "session list unavailable; check the host agent"
-                        );
-                        Ok(())
-                    })
-                    .await??;
-                    if let Some(key) = key {
-                        handoff::offer(key, session);
+                let (command, limit) = match target {
+                    Target::Terminal(id) => {
+                        return run(connection, read, output, id, peer, fit_initial_grid).await;
                     }
+                    Target::List => (String::from("tmux-link-list"), 1024 * 1024),
+                    Target::SnapshotV1(id) => (format!("tmux-link-snapshot {id}"), 128 * 1024),
+                    // Two 32 KiB excerpts, plus room for JSON string escaping and metadata.
+                    Target::SnapshotV2(id) => (format!("tmux-link-snapshot-v2 {id}"), 512 * 1024),
+                };
+                let snapshot = !matches!(target, Target::List);
+                let (session, mut channel) = connection;
+                timeout(Duration::from_secs(15), async {
+                    channel.exec(true, command).await?;
+                    if snapshot {
+                        channel.eof().await?;
+                    }
+                    let mut size = 0;
+                    let mut status = None;
+                    let mut error = Vec::new();
+                    while let Some(message) = channel.wait().await {
+                        match message {
+                            ChannelMsg::Data { data } => {
+                                size += data.len();
+                                ensure!(size <= limit, "remote response too large");
+                                output.data(&data).await?;
+                            }
+                            ChannelMsg::ExtendedData { data, .. } if snapshot => {
+                                error.extend_from_slice(&data[..data.len().min(256 - error.len())]);
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                            ChannelMsg::Failure if snapshot => {
+                                bail!("snapshot unsupported")
+                            }
+                            ChannelMsg::Failure => bail!("session list was refused"),
+                            _ => {}
+                        }
+                    }
+                    if snapshot && status != Some(0) {
+                        let diagnostic = String::from_utf8_lossy(&error);
+                        if diagnostic.contains("unsupported request") {
+                            bail!("snapshot unsupported");
+                        }
+                        if diagnostic.contains("snapshot pane in mode") {
+                            bail!("snapshot pane in mode");
+                        }
+                        if diagnostic.contains("snapshot exceeds capture limit") {
+                            bail!("snapshot exceeds capture limit");
+                        }
+                        bail!("snapshot unavailable");
+                    }
+                    ensure!(
+                        status == Some(0),
+                        "session list unavailable; check the host agent"
+                    );
                     Ok(())
-                } else {
-                    run(
-                        connection,
-                        read,
-                        output,
-                        u64::try_from(target).ok(),
-                        peer,
-                        fit_initial_grid,
-                    )
-                    .await
+                })
+                .await??;
+                if let Some(key) = key {
+                    handoff::offer(key, session);
                 }
+                Ok(())
             })
     })();
     result.err().map_or(std::ptr::null_mut(), |err| {

@@ -19,6 +19,14 @@ struct AdvisorSelection {
 private struct PaneReading: Identifiable {
   let brief: DecisionBrief
   let readAt: Date
+  let capture: NativePaneCapture?
+
+  init(snapshot: DecisionSnapshot, readAt: Date) {
+    brief = snapshot.prepared()
+    self.readAt = readAt
+    capture = snapshot.capture
+  }
+
   var id: Int64 { brief.id }
   var hasCurrentContent: Bool { brief.menu != nil || brief.blocks.contains { $0.source == .current } }
 }
@@ -138,7 +146,13 @@ struct SessionAdvisorView: View {
         do {
           let snapshot = try await capture(source)
           guard snapshot.id == source.id else { throw RelayError("会话已更改，请刷新列表。") }
-          readings.append(PaneReading(brief: snapshot.prepared(), readAt: Date()))
+          guard !Task.isCancelled else { return }
+          let readAt = Date()
+          let prepared = await Task.detached(priority: .userInitiated) {
+            PaneReading(snapshot: snapshot, readAt: readAt)
+          }.value
+          guard !Task.isCancelled else { return }
+          readings.append(prepared)
         } catch {
           failures.append("\(source.name) · \(error.localizedDescription)")
         }
@@ -159,7 +173,7 @@ struct DecisionReviewView: View {
   @StateObject private var keyStatus = AdvisorKeyStatus()
 
   init(snapshot: DecisionSnapshot, readAt: Date = Date(), onClose: @escaping () -> Void) {
-    reading = PaneReading(brief: snapshot.prepared(), readAt: readAt)
+    reading = PaneReading(snapshot: snapshot, readAt: readAt)
     self.onClose = onClose
   }
 
@@ -269,6 +283,18 @@ private struct DecisionReviewContent: View {
 
   private func previewSection(_ reading: PaneReading) -> some View {
     return Section {
+      if let capture = reading.capture {
+        if capture.screenTruncated {
+          Text("当前屏幕较长，快照仅保留了末尾部分。").font(.footnote).foregroundStyle(.secondary)
+        }
+        if capture.historyCompacted {
+          Text("主机已筛选 \(capture.historyRowsScanned.formatted()) 行历史，仅返回相关片段。")
+            .font(.footnote).foregroundStyle(.secondary)
+        }
+        if capture.historyTruncated {
+          Text("更早的历史超出读取范围。").font(.footnote).foregroundStyle(.secondary)
+        }
+      }
       if !reading.hasCurrentContent {
         Text("过滤界面元素后，当前屏幕没有可分析的正文。").foregroundStyle(.secondary)
           .accessibilityIdentifier("advisor.empty.\(reading.id)")
