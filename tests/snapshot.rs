@@ -693,8 +693,8 @@ fn codemaker_pipe_export_allows_worker_to_append_to_large_existing_store() {
     ]}"#,
     )
     .unwrap();
-    // The exporter appends to its own sparse store while producing a tiny
-    // transcript. Its worker inherits stdout after the launcher exits.
+    // The worker appends at an explicit file offset like a database writer,
+    // then emits a tiny transcript through its inherited stdout.
     fs::write(
         server.0.join("codemaker"),
         r#"#!/bin/sh
@@ -702,7 +702,8 @@ test "$1/$2/$3" = '--pure/export/ses_fixture' || exit 2
 (
     if test -p /dev/fd/1; then mode=pipe; else mode=file; fi
     echo "$mode" >> "$HOME/captures"
-    printf x >> "$HOME/store" || exit 3
+    end=$(wc -c < "$HOME/store")
+    printf x | dd of="$HOME/store" bs=1 seek="$((end))" conv=notrunc 2>/dev/null || exit 3
     exec cat "$HOME/messages.json"
 ) &
 exit 0
