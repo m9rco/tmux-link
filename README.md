@@ -36,6 +36,8 @@ CodeMaker 全屏运行时通常使用 tmux 的备用屏幕。如果当前只有 
 
 第一条命令从 CodeMaker 的已有会话列表中让你选一次。已知应用会话 ID 时也可执行 `tmux-link-agent bind-session 1 ses_…`。每次读取会重新调用同一个 CodeMaker 程序导出已绑定的 ID。快照中的 `applicationContext.messages[0]` 是最近一条入选的可见消息，更早的消息排在后面。每条消息内部保留自然阅读顺序。节点最多返回 32 条、合计 32 KiB 的用户与助手正文，工具参数、内部推理及附件不参与摘录。备用屏幕的 `historyRowsScanned` 仍为 0。
 
+如果 v0.4.7 能列出会话，选择后却提示 `invalid CodeMaker session export for the requested ID`，请将 Linux 或 Mac 节点更新到 v0.4.8，再用选中的会话 ID 重试绑定。新版用匿名文件接收导出，避免部分 CLI 提前退出时截断大段 JSON。若仍有格式错误，绑定命令会报告出错的位置。已有 iOS Build 38 可直接读取新版节点。
+
 iOS 0.4.7（Build 38）的预览显示来源、角色和最近消息。识别到 CodeMaker 的执行状态栏时，预览会标明应用仍在运行。在同一个 CodeMaker 进程内切换对话时，请重新绑定。运行 `tmux-link-agent unbind-session 1` 可解除绑定。主机持久保存绑定信息，导出的对话仅在本次读取时处理。
 
 iOS 0.4.5（Build 35）起，手机在本地过滤常见凭据、输入框边线、模型状态栏和重复进度，按当前问题、原因、目标、约束与相关步骤组织摘录。每个会话发送给 DeepSeek 的结构化内容最多 4 KiB，当前画面和历史保留来源。预览展示本次实际发送的内容。确认某个编号步骤时，答复围绕同意或暂缓该步。

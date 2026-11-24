@@ -2,7 +2,7 @@
 use serde_json::Value;
 use std::{
     fs,
-    os::unix::fs::DirBuilderExt,
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::PathBuf,
     process::{Command, Output},
     thread::sleep,
@@ -64,6 +64,38 @@ impl Server {
             .env("SSH_ORIGINAL_COMMAND", command)
             .output()
             .unwrap()
+    }
+
+    fn codemaker(case: &str) -> Self {
+        let server = Server::new(case);
+        server.session(
+            "review",
+            "108",
+            "12",
+            "printf '\\033[?1049hBOUND-READY'; exec sleep 90",
+        );
+        server.wait_for("$0:", "BOUND-READY");
+        let script = server.0.join("codemaker");
+        fs::write(&script, "#!/bin/sh\ntest \"$1/$2/$3\" = '--pure/export/ses_fixture' || exit 7\ncat \"$HOME/messages.json\"\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        server
+    }
+
+    fn codemaker_agent(&self, args: &[&str], forced: Option<&str>) -> Output {
+        let path = std::env::join_paths(
+            std::iter::once(self.0.clone())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let mut cmd = self.cmd(env!("CARGO_BIN_EXE_agent"));
+        cmd.env("HOME", &self.0)
+            .env("PATH", path)
+            .env_remove("SSH_ORIGINAL_COMMAND")
+            .args(args);
+        if let Some(request) = forced {
+            cmd.env("SSH_ORIGINAL_COMMAND", request);
+        }
+        cmd.output().unwrap()
     }
 
     fn json(&self, command: &str) -> Value {
@@ -488,18 +520,7 @@ fn scans_five_thousand_history_rows_and_compacts_decision_evidence_on_the_host()
 
 #[test]
 fn explicitly_bound_pane_reads_fresh_codemaker_messages_newest_first() {
-    use std::os::unix::fs::PermissionsExt;
-    let server = Server::new("transcript");
-    server.session(
-        "review",
-        "108",
-        "12",
-        "printf '\\033[?1049hBOUND-READY'; exec sleep 90",
-    );
-    server.wait_for("$0:", "BOUND-READY");
-    let script = server.0.join("codemaker");
-    fs::write(&script, "#!/bin/sh\ntest \"$1/$2/$3\" = '--pure/export/ses_fixture' || exit 7\ncat \"$HOME/messages.json\"\n").unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let server = Server::codemaker("transcript");
     let make_turn = |id: usize, role: &str, text: &str| {
         serde_json::json!({
             "info": {"id": format!("msg_{id}"), "role":role, "sessionID":"ses_fixture",
@@ -522,22 +543,7 @@ fn explicitly_bound_pane_reads_fresh_codemaker_messages_newest_first() {
         .unwrap()
     };
     export(&messages);
-    let path = std::env::join_paths(
-        std::iter::once(server.0.clone())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let agent = |args: &[&str], forced: Option<&str>| {
-        let mut cmd = server.cmd(env!("CARGO_BIN_EXE_agent"));
-        cmd.env("HOME", &server.0)
-            .env("PATH", &path)
-            .env_remove("SSH_ORIGINAL_COMMAND")
-            .args(args);
-        if let Some(command) = forced {
-            cmd.env("SSH_ORIGINAL_COMMAND", command);
-        }
-        cmd.output().unwrap()
-    };
+    let agent = |args: &[&str], forced: Option<&str>| server.codemaker_agent(args, forced);
     let capture = || {
         let result = agent(&["attach"], Some("tmux-link-snapshot-v2 0"));
         assert!(
@@ -605,4 +611,67 @@ fn explicitly_bound_pane_reads_fresh_codemaker_messages_newest_first() {
     );
     assert!(agent(&["unbind-session", "0"], None).status.success());
     assert_eq!(capture()["applicationContextStatus"], "unbound");
+}
+
+#[test]
+fn bound_codemaker_ignores_heterogeneous_parts_and_keeps_diagnostics_private() {
+    use serde_json::json;
+    let server = Server::codemaker("parts");
+    let session = "ses_fixture";
+    let reply = "请保留 TP 原始结果。\n  输出格式用 JSON。";
+    let private = "PRIVATE-TOOL-PAYLOAD";
+    let mut export = json!({
+        "info": {"id":session},
+        "messages": [
+            {"info":{"id":"msg_review","sessionID":session,"role":"assistant","time":{"created":1,"completed":2}},
+             "parts":[
+                 {"type":"tool","tool":"read","callID":"call_review","text":{"log":private},
+                  "state":{"status":"completed","input":{},"output":private}},
+                 {"type":"retry","attempt":1,"error":{"name":"APIError"},"reason":{"detail":private},
+                  "time":{"created":2}},
+                 {"type":"vendor-event","time":1234,"text":[private]},
+                 {"type":"text","text":"Which format?"}]},
+            {"info":{"id":"msg_reply","sessionID":session,"role":"user","time":{"created":3}},
+             "parts":[{"type":"text","text":reply}]}
+        ]
+    });
+    let file = server.0.join("messages.json");
+    fs::write(&file, serde_json::to_vec(&export).unwrap()).unwrap();
+    let bind = || server.codemaker_agent(&["bind-session", "0", session], None);
+    let bound = bind();
+    assert!(
+        bound.status.success(),
+        "binding rejected an export with ignored parts"
+    );
+    let capture = server.codemaker_agent(&["attach"], Some("tmux-link-snapshot-v2 0"));
+    assert!(capture.status.success());
+    let snapshot: Value = serde_json::from_slice(&capture.stdout).unwrap();
+    assert_eq!(snapshot["text"], "BOUND-READY");
+    let context = &snapshot["applicationContext"];
+    assert_eq!(context["sessionID"], session);
+    assert_eq!(context["latestIsDisplayed"], true);
+    assert_eq!(
+        context["messages"],
+        json!([
+            {"role":"user","text":reply}, {"role":"assistant","text":"Which format?"}
+        ])
+    );
+    assert!(!String::from_utf8_lossy(&capture.stdout).contains(private));
+
+    // A rejected structural field can itself contain private text. Even local
+    // diagnostics must avoid interpolating that value or the pane's screen.
+    export["messages"][1]["info"]["time"]["created"] = json!("PRIVATE-INVALID-TIMESTAMP");
+    fs::write(&file, serde_json::to_vec(&export).unwrap()).unwrap();
+    let failed = bind();
+    assert!(!failed.status.success() && failed.stdout.is_empty() && !failed.stderr.is_empty());
+    let diagnostic = String::from_utf8_lossy(&failed.stderr);
+    assert!(diagnostic.contains("messages[1].info.time.created"));
+    for sensitive in [
+        private,
+        "PRIVATE-INVALID-TIMESTAMP",
+        "BOUND-READY",
+        "请保留 TP 原始结果。",
+    ] {
+        assert!(!diagnostic.contains(sensitive));
+    }
 }

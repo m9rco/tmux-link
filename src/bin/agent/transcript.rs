@@ -1,9 +1,10 @@
 //! Reduce the explicitly selected CodeMaker export to visible conversation text.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{IgnoredAny, MapAccess, Visitor},
 };
+use serde_json::value::RawValue;
 use std::collections::HashSet;
 
 pub(crate) const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
@@ -91,23 +92,62 @@ struct Time {
     completed: Option<u64>,
 }
 
-// Tool input, output, attachments, metadata and other unknown fields are skipped
-// by serde without constructing a JSON value for their (often very large) trees.
+// Part-specific fields can have unrelated types on tool, retry and extension events.
+// Read the discriminator and ownership first. Only decode content fields we use.
 #[derive(Deserialize)]
-struct Part {
+struct PartHeader {
     #[serde(rename = "type")]
     kind: String,
     #[serde(rename = "sessionID")]
     session: Option<String>,
     #[serde(rename = "messageID")]
     message: Option<String>,
+}
+
+struct Part {
+    header: PartHeader,
+    body: PartBody,
+}
+
+enum PartBody {
+    Text(TextPart),
+    Stop,
+    Other,
+}
+
+#[derive(Deserialize)]
+struct TextPart {
     text: Option<String>,
     #[serde(default)]
     synthetic: bool,
     #[serde(default)]
     ignored: bool,
-    reason: Option<String>,
     time: Option<PartTime>,
+}
+
+impl<'de> Deserialize<'de> for Part {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        struct StepFinish {
+            reason: Option<String>,
+        }
+        let raw = <&RawValue>::deserialize(deserializer)?.get();
+        let header: PartHeader = serde_json::from_str(raw).map_err(D::Error::custom)?;
+        let body = match header.kind.as_str() {
+            "text" => PartBody::Text(serde_json::from_str(raw).map_err(D::Error::custom)?),
+            "step-finish" => {
+                let finish: StepFinish = serde_json::from_str(raw).map_err(D::Error::custom)?;
+                if finish.reason.as_deref() == Some("stop") {
+                    PartBody::Stop
+                } else {
+                    PartBody::Other
+                }
+            }
+            _ => PartBody::Other,
+        };
+        Ok(Self { header, body })
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,21 +170,84 @@ pub(crate) fn from_bytes(raw: &[u8], expected_id: &str) -> Result<Transcript> {
         raw.len() <= MAX_EXPORT_BYTES,
         "session export exceeds limit"
     );
-    let mut export: Export = serde_json::from_slice(raw)?;
-    ensure!(export.info.id == expected_id, "export session mismatch");
+    let raw = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
+    let mut decoder = serde_json::Deserializer::from_slice(raw);
+    let mut export: Export = serde_path_to_error::deserialize(&mut decoder).map_err(|error| {
+        // Raw serde errors can contain the full offending string. Paths here only
+        // refer to schema fields and sequence indices, never terminal values.
+        const FIELDS: &[&str] = &[
+            "info",
+            "id",
+            "messages",
+            "parts",
+            "role",
+            "time",
+            "created",
+            "completed",
+            "sessionID",
+            "finish",
+            "ignored",
+            "synthetic",
+            "summary",
+        ];
+        let mut path = String::from("$");
+        for segment in error.path() {
+            match segment {
+                serde_path_to_error::Segment::Seq { index } => path.push_str(&format!("[{index}]")),
+                serde_path_to_error::Segment::Map { key } if FIELDS.contains(&key.as_str()) => {
+                    path.push('.');
+                    path.push_str(key);
+                }
+                _ => break,
+            }
+        }
+        let inner = error.inner();
+        anyhow!(
+            "CodeMaker export {:?} error at {path} (line {}, column {})",
+            inner.classify(),
+            inner.line(),
+            inner.column()
+        )
+    })?;
+    decoder.end().map_err(|e| {
+        anyhow!(
+            "unexpected data after CodeMaker export (line {}, column {})",
+            e.line(),
+            e.column()
+        )
+    })?;
+    ensure!(
+        export.info.id == expected_id,
+        "export info.id does not match selected session"
+    );
     let mut ids = HashSet::new();
-    for turn in &export.messages {
+    for (index, turn) in export.messages.iter().enumerate() {
         ensure!(
-            !turn.info.id.is_empty()
-                && ids.insert(&turn.info.id)
-                && turn.info.session == expected_id
-                && turn.parts.iter().all(|p| p
+            !turn.info.id.is_empty() && ids.insert(&turn.info.id),
+            "empty or duplicate ID at messages[{index}].info.id"
+        );
+        ensure!(
+            turn.info.session == expected_id,
+            "session mismatch at messages[{index}].info.sessionID"
+        );
+        for (part, value) in turn.parts.iter().enumerate() {
+            ensure!(
+                value
+                    .header
                     .session
                     .as_deref()
-                    .is_none_or(|id| id == expected_id)
-                    && p.message.as_deref().is_none_or(|id| id == turn.info.id)),
-            "inconsistent message identities in session export"
-        );
+                    .is_none_or(|id| id == expected_id),
+                "session mismatch at messages[{index}].parts[{part}].sessionID"
+            );
+            ensure!(
+                value
+                    .header
+                    .message
+                    .as_deref()
+                    .is_none_or(|id| id == turn.info.id),
+                "message mismatch at messages[{index}].parts[{part}].messageID"
+            );
+        }
     }
     // Creation time is authoritative. CodeMaker's sortable IDs break ties the
     // same way for an out-of-order export as for a chronological one.
@@ -166,7 +269,12 @@ pub(crate) fn from_bytes(raw: &[u8], expected_id: &str) -> Result<Transcript> {
         if !turn.displayed_role() {
             continue;
         }
-        let (text, complete) = visible(&turn, private)?;
+        let (text, complete) = visible(&turn, private).with_context(|| {
+            format!(
+                "could not clean visible terminal text in newest-first message {}",
+                index + 1
+            )
+        })?;
         if text.trim().is_empty() {
             continue;
         }
@@ -203,10 +311,9 @@ impl Turn {
 
 impl Part {
     fn displayed_text(&self) -> Option<&str> {
-        if self.kind == "text" && !self.synthetic && !self.ignored {
-            self.text.as_deref()
-        } else {
-            None
+        match &self.body {
+            PartBody::Text(part) if !part.synthetic && !part.ignored => part.text.as_deref(),
+            _ => None,
         }
     }
 }
@@ -259,13 +366,13 @@ fn visible(turn: &Turn, in_private_key: bool) -> Result<(String, bool)> {
     let mut ends_in_text = false;
     let mut all_text_complete = true;
     for part in &turn.parts {
-        if part.kind == "step-finish" && part.reason.as_deref() == Some("stop") {
+        if matches!(part.body, PartBody::Stop) {
             continue;
         }
         ends_in_text = false;
         if let Some(text) = part.displayed_text().filter(|s| !s.trim().is_empty()) {
             texts.push(text);
-            ends_in_text = part.time.as_ref().is_none_or(|t| t.end.is_some());
+            ends_in_text = matches!(&part.body, PartBody::Text(p) if p.time.as_ref().is_none_or(|t| t.end.is_some()));
             all_text_complete &= ends_in_text;
         }
     }
@@ -329,6 +436,23 @@ mod tests {
 
     fn read(turns: &[Value]) -> Value {
         serde_json::to_value(from_bytes(&bytes(turns), ID).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn accepts_a_utf8_bom_and_rejects_partial_or_multiple_documents() {
+        let json = bytes(&[]);
+        let prefixed = [b"\xef\xbb\xbf".as_slice(), &json].concat();
+        assert!(from_bytes(&prefixed, ID).is_ok());
+        assert!(
+            from_bytes(&json[..json.len() - 1], ID)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Eof")
+        );
+        let extra = [json.as_slice(), b"\n{}", b"PRIVATE-DATA"].concat();
+        let error = from_bytes(&extra, ID).err().unwrap().to_string();
+        assert!(error.contains("after CodeMaker export") && !error.contains("PRIVATE-DATA"));
     }
 
     #[test]
