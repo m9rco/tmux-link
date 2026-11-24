@@ -20,15 +20,16 @@ private struct PaneReading: Identifiable {
   let brief: DecisionBrief
   let readAt: Date
   let capture: NativePaneCapture?
+  let sourceNotice: String?
 
-  init(snapshot: DecisionSnapshot, readAt: Date) {
+  init(snapshot: DecisionSnapshot, readAt: Date, sourceNotice: String? = nil) {
     brief = snapshot.prepared()
     self.readAt = readAt
     capture = snapshot.capture
+    self.sourceNotice = sourceNotice
   }
 
   var id: Int64 { brief.id }
-  var hasCurrentContent: Bool { brief.menu != nil || brief.blocks.contains { $0.source == .current } }
 }
 
 @MainActor
@@ -168,19 +169,58 @@ struct SessionAdvisorView: View {
 // Entry point for a terminal that is already open. Only dismissing the review returns to it.
 @MainActor
 struct DecisionReviewView: View {
-  private let reading: PaneReading
+  private let local: DecisionSnapshot
+  private let readAt: Date
+  private let hostRead: (() async throws -> DecisionSnapshot)?
+  @State private var reading: PaneReading?
   let onClose: () -> Void
   @StateObject private var keyStatus = AdvisorKeyStatus()
 
-  init(snapshot: DecisionSnapshot, readAt: Date = Date(), onClose: @escaping () -> Void) {
-    reading = PaneReading(snapshot: snapshot, readAt: readAt)
+  init(snapshot: DecisionSnapshot, readAt: Date = Date(), alternate: Bool = false,
+       hostRead: (() async throws -> DecisionSnapshot)? = nil, onClose: @escaping () -> Void) {
+    local = snapshot
+    self.readAt = readAt
+    self.hostRead = hostRead
+    let notice = alternate ? "来源为手机当前画面，此连接未提供应用对话记录。" : nil
+    _reading = State(initialValue: hostRead == nil ? PaneReading(snapshot: snapshot, readAt: readAt, sourceNotice: notice) : nil)
     self.onClose = onClose
   }
 
   var body: some View {
     NavigationStack {
-      DecisionReviewContent(readings: [reading], failures: [], openLabel: "返回原终端",
-                            open: { _ in onClose(); return true }, close: onClose)
+      if let reading {
+        DecisionReviewContent(readings: [reading], failures: [], openLabel: "返回原终端",
+                              open: { _ in onClose(); return true }, close: onClose)
+      } else {
+        ProgressView("正在读取主机活动窗格…")
+          .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消", action: onClose) } }
+          .task {
+            guard let hostRead else { return }
+            let snapshot: DecisionSnapshot, time: Date, notice: String?
+            do {
+              let host = try await hostRead()
+              if host.capture?.alternate == true {
+                snapshot = host
+                time = Date()
+                notice = "来源为主机读取时的活动窗格。"
+              } else {
+                // tmux itself can occupy xterm's alternate buffer even for an ordinary shell pane.
+                snapshot = local
+                time = readAt
+                notice = nil
+              }
+            } catch {
+              snapshot = local
+              time = readAt
+              notice = "主机活动窗格读取失败（\(error.localizedDescription)）。当前显示点击「决策」时的手机画面。"
+            }
+            guard !Task.isCancelled else { return }
+            let prepared = await Task.detached(priority: .userInitiated) {
+              PaneReading(snapshot: snapshot, readAt: time, sourceNotice: notice)
+            }.value
+            if !Task.isCancelled { reading = prepared }
+          }
+      }
     }.environmentObject(keyStatus)
   }
 }
@@ -204,7 +244,7 @@ private struct DecisionReviewContent: View {
   @State private var task: Task<Void, Never>?
 
   private var included: [PaneReading] {
-    readings.filter { !excluded.contains($0.id) && $0.hasCurrentContent }
+    readings.filter { !excluded.contains($0.id) && $0.brief.canAnalyze }
   }
 
   var body: some View {
@@ -283,7 +323,27 @@ private struct DecisionReviewContent: View {
 
   private func previewSection(_ reading: PaneReading) -> some View {
     return Section {
+      if let notice = reading.sourceNotice { Text(verbatim: notice).font(.footnote).foregroundStyle(.secondary) }
       if let capture = reading.capture {
+        if capture.alternate {
+          if capture.reportsRunning {
+            Label("全屏程序正在执行任务", systemImage: "hourglass")
+              .accessibilityIdentifier("advisor.running.\(reading.id)")
+          }
+          if let app = capture.applicationContext {
+            Text(app.messages.isEmpty
+                 ? "已绑定的应用对话 · \(app.sessionID) · 暂无可显示的对话文字。"
+                 : "已绑定的应用对话 · \(app.sessionID) · 最近 \(app.messages.count) 条消息，从新到旧摘录。")
+              .font(.footnote).foregroundStyle(.secondary)
+            if reading.brief.blocks.contains(where: { $0.source == .latestAssistant }) {
+              Text("提问来自已绑定对话的最新助手消息，是否仍待答可回原终端核对。")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+          } else {
+            Text("全屏程序使用备用屏幕，tmux 无法读取它的滚动历史。\(capture.missingTranscriptReason)")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+        }
         if capture.screenTruncated {
           Text("当前屏幕较长，快照仅保留了末尾部分。").font(.footnote).foregroundStyle(.secondary)
         }
@@ -295,8 +355,8 @@ private struct DecisionReviewContent: View {
           Text("更早的历史超出读取范围。").font(.footnote).foregroundStyle(.secondary)
         }
       }
-      if !reading.hasCurrentContent {
-        Text("过滤界面元素后，当前屏幕没有可分析的正文。").foregroundStyle(.secondary)
+      if !reading.brief.canAnalyze {
+        Text(reading.capture?.alternate == true ? "此次快照没有可确认的待答问题，已跳过分析。" : "过滤界面元素后，当前屏幕没有可分析的正文。").foregroundStyle(.secondary)
           .accessibilityIdentifier("advisor.empty.\(reading.id)")
       } else {
         Toggle("纳入分析", isOn: Binding(
@@ -307,11 +367,15 @@ private struct DecisionReviewContent: View {
           }))
           .disabled(operation != nil)
           .accessibilityIdentifier("advisor.include.\(reading.id)")
-        if !reading.brief.blocks.isEmpty { BriefPreview(brief: reading.brief) }
-        if let menu = reading.brief.menu {
-          TerminalMenuPreview(menu: menu)
-          openButton(reading.id, identifier: "advisor.open.menu.\(reading.id)")
-        }
+      }
+      if !reading.brief.blocks.isEmpty, reading.brief.canAnalyze || reading.capture?.alternate == true {
+        BriefPreview(brief: reading.brief)
+      }
+      if let menu = reading.brief.menu {
+        TerminalMenuPreview(menu: menu)
+        openButton(reading.id, identifier: "advisor.open.menu.\(reading.id)")
+      } else if reading.capture?.alternate == true {
+        openButton(reading.id, identifier: "advisor.open.\(reading.id)")
       }
     } header: {
       readingHeader(reading)
@@ -324,7 +388,11 @@ private struct DecisionReviewContent: View {
       Text(verbatim: decision.question).font(.headline).textSelection(.enabled)
         .accessibilityIdentifier("advisor.question.\(index)")
       VStack(alignment: .leading, spacing: 6) {
-        Label("屏幕摘录", systemImage: "quote.opening").font(.caption).foregroundStyle(.secondary)
+        let fromTranscript = source?.brief.blocks.contains {
+          $0.source == .latestAssistant && $0.text.contains(decision.evidence)
+        } == true
+        Label(fromTranscript ? "已绑定的应用对话摘录 · 待核实" : "屏幕摘录", systemImage: "quote.opening")
+          .font(.caption).foregroundStyle(.secondary)
         Text(verbatim: decision.evidence).font(.callout.monospaced()).textSelection(.enabled)
       }.privacySensitive()
       ForEach(decision.options.indices, id: \.self) { optionIndex in
@@ -429,11 +497,19 @@ private struct BriefPreview: View {
   let brief: DecisionBrief
 
   var body: some View {
-    let questions = brief.blocks.filter { $0.source == .current && $0.kind == .question }
-    let context = brief.blocks.filter { !($0.source == .current && $0.kind == .question) }
+    let questions = brief.blocks.filter { ($0.source == .current || $0.source == .latestAssistant) && $0.kind == .question }
+    let context = brief.blocks.filter { !questions.contains($0) }
     // Lead with the live question. Keep the original order within the supporting excerpts.
     blockRows(questions)
-    if context.count > 4 {
+    if context.contains(where: { $0.source == .transcriptAssistant || $0.source == .transcriptUser }) {
+      // Keep transcript turns in the same newest-first order the model receives.
+      let shown = context.filter { $0.source == .current } + context.filter { $0.source != .current }
+      blockRows(Array(shown.prefix(4)))
+      if shown.count > 4 {
+        DisclosureGroup("更多上下文（\(shown.count - 4)）") { blockRows(Array(shown.dropFirst(4))) }
+          .font(.subheadline)
+      }
+    } else if context.count > 4 {
       let priority: [DecisionBrief.Kind] = [.rationale, .goal, .constraint, .plan, .choice]
       let primary = priority.compactMap { kind in
         context.firstIndex { $0.kind == kind && $0.source == .current } ?? context.firstIndex { $0.kind == kind }
@@ -456,12 +532,22 @@ private struct BriefPreview: View {
     ForEach(blocks.indices, id: \.self) { index in
       let block = blocks[index]
       VStack(alignment: .leading, spacing: 4) {
-        Text(verbatim: title(block.kind) + (block.source == .history ? " · 历史" : " · 当前"))
+        Text(verbatim: title(block.kind) + " · " + sourceTitle(block.source))
           .font(.caption.weight(.medium)).foregroundStyle(.secondary)
         Text(verbatim: block.text).font(block.kind == .question ? .headline : .subheadline)
           .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
       }
       .privacySensitive()
+    }
+  }
+
+  private func sourceTitle(_ source: DecisionBrief.Source) -> String {
+    switch source {
+    case .current: return "当前屏幕"
+    case .history: return "tmux 历史"
+    case .transcriptUser: return "应用对话 · 用户"
+    case .transcriptAssistant: return "应用对话 · 助手"
+    case .latestAssistant: return "应用对话 · 最新助手消息"
     }
   }
 

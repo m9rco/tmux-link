@@ -21,6 +21,8 @@ final class RemoteSessionTests: XCTestCase {
     let benchmarkSessionID: Int64?
     let decisionFixtureIDs: [Int64]?
     let snapshotFixtureID: Int64?
+    let conversationFixtureID: Int64?
+    let conversationFixturePane: UInt64?
   }
 
   func configuration() throws -> Connection {
@@ -57,6 +59,42 @@ final class RemoteSessionTests: XCTestCase {
       $0.source == .history && $0.kind == .constraint && $0.text.contains("retain the signed catalog")
     })
     XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
+  }
+
+  func testBoundConversationUsesLatestReply() async throws {
+    let config = try configuration()
+    guard let id = config.conversationFixtureID, let pane = config.conversationFixturePane else {
+      throw XCTSkip("No isolated CodeMaker conversation configured")
+    }
+    let client = ClientProfile(name: "Bound conversation", host: config.host, port: config.port,
+                               user: config.user, pin: config.fingerprint)
+    let directory = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(directory.first { $0.id == id && $0.name == "ios-bound-conversation" })
+    XCTAssertEqual(session.negotiatedSnapshotVersion, .v2)
+    let snapshot = try await SessionDirectory.snapshot(session, client: client)
+    let capture = try XCTUnwrap(snapshot.capture)
+    XCTAssertEqual(capture.paneId, pane)
+    XCTAssertTrue(capture.alternate)
+    XCTAssertEqual(capture.historyRowsScanned, 0)
+    XCTAssertNil(snapshot.context)
+    XCTAssertTrue(snapshot.text.isEmpty)
+    let app = try XCTUnwrap(capture.applicationContext)
+    XCTAssertEqual(app.source, "transcript")
+    XCTAssertEqual(app.sessionID, "ses_simulator_catalog")
+    XCTAssertEqual(app.order, "newestFirst")
+    XCTAssertTrue(app.latestIsDisplayed)
+    let question = "Should I publish the signed catalog?"
+    let reply = "Yes, publish the signed catalog."
+    XCTAssertEqual(app.messages.map(\.role), [.user, .assistant, .user])
+    XCTAssertEqual(app.messages.map(\.text), [reply, question, "Keep the signed catalog."])
+    let brief = snapshot.prepared()
+    XCTAssertTrue(brief.blocks.contains { $0.source == .transcriptUser && $0.text == reply })
+    XCTAssertTrue(brief.blocks.contains { $0.source == .transcriptAssistant && $0.text == question })
+    XCTAssertFalse(brief.canAnalyze)
+    let encoded = String(decoding: try JSONEncoder().encode(brief), as: UTF8.self)
+    for marker in ["PRIVATE-TOOL-FIXTURE", "PRIVATE-METADATA-FIXTURE", "PRIVATE-HISTORY-FIXTURE"] {
+      XCTAssertFalse(encoded.contains(marker))
+    }
   }
 
   func roundtrip(_ config: Connection, command: String, expected: String) throws {
@@ -436,9 +474,10 @@ final class RemoteSessionTests: XCTestCase {
       return [normal.text.includes('Proceed? [y/n]'), !normal.text.includes('EARLIER-GOAL'),
               normal.context.includes('EARLIER-GOAL'), !normal.text.includes('hidden-cell'),
               alternate.text.includes('Choose format'), alternate.context === '',
+              normal.bufferType === 'normal', alternate.bufferType === 'alternate',
               tall.text.includes('WHY-KEEP-THIS-' + 'X'.repeat(30)), tall.text.includes('Approve?')];
       """#, arguments: [:], in: nil, contentWorld: .page) as? [Bool]
-    XCTAssertEqual(checks, Array(repeating: true, count: 8))
+    XCTAssertEqual(checks, Array(repeating: true, count: 10))
   }
 
   @MainActor

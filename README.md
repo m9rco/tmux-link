@@ -25,6 +25,19 @@ iOS 0.4.6（Build 37）和 v0.4.6 节点支持在 Linux 或 Mac 上先筛选历�
 
 可在节点运行 `tmux-link-agent snapshot 0` 查看同一份 JSON（将 `0` 换成会话编号）。`historyRowsScanned` 是实际读取的历史屏幕行数。若颜色和样式使一次原始读取超过 16 MiB，节点会缩小回看范围再读取。`historyCompacted` 表示节点已筛选历史，`historyTruncated` 表示 tmux 中还有更早的历史超出读取窗口。可用 `tmux display-message -p '#{history_size}/#{history_limit}'` 查看当前窗格已保留的行数和容量。如需为新窗格保留足够的历史，在 tmux 配置中设置 `set -g history-limit 5000` 或更高。
 
+### 读取已有 CodeMaker 对话
+
+CodeMaker 全屏运行时通常使用 tmux 的备用屏幕。如果当前只有 `esc interrupt`、模型统计和一截命令，更早的对话需要从 CodeMaker 自己的会话记录读取。v0.4.7 起，在节点上打开另一个 shell，以运行 CodeMaker 的用户执行下面两行。示例中的 `1` 是正在运行 CodeMaker 的 tmux 会话编号。
+
+```sh
+~/.local/bin/tmux-link-agent bind-session 1
+~/.local/bin/tmux-link-agent snapshot 1
+```
+
+第一条命令从 CodeMaker 的已有会话列表中让你选一次。已知应用会话 ID 时也可执行 `tmux-link-agent bind-session 1 ses_…`。每次读取会重新调用同一个 CodeMaker 程序导出已绑定的 ID。快照中的 `applicationContext.messages[0]` 是最近一条入选的可见消息，更早的消息排在后面。每条消息内部保留自然阅读顺序。节点最多返回 32 条、合计 32 KiB 的用户与助手正文，工具参数、内部推理及附件不参与摘录。备用屏幕的 `historyRowsScanned` 仍为 0。
+
+iOS 0.4.7（Build 38）的预览显示来源、角色和最近消息。识别到 CodeMaker 的执行状态栏时，预览会标明应用仍在运行。在同一个 CodeMaker 进程内切换对话时，请重新绑定。运行 `tmux-link-agent unbind-session 1` 可解除绑定。主机持久保存绑定信息，导出的对话仅在本次读取时处理。
+
 iOS 0.4.5（Build 35）起，手机在本地过滤常见凭据、输入框边线、模型状态栏和重复进度，按当前问题、原因、目标、约束与相关步骤组织摘录。每个会话发送给 DeepSeek 的结构化内容最多 4 KiB，当前画面和历史保留来源。预览展示本次实际发送的内容。确认某个编号步骤时，答复围绕同意或暂缓该步。
 
 终端显示交互菜单时，预览直接展示可识别的单选或多选、选项原文、光标和勾选状态，以及屏幕给出的选择和提交方式。终端未说明的按键不会补写。选择和提交由用户回原终端操作。

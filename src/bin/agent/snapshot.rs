@@ -8,6 +8,10 @@ use std::{
 const HEADER: &str = "#{session_id} #{pane_id} #{alternate_on} #{pane_in_mode} #{pane_width} #{pane_height} #{history_size} #{session_name}";
 #[path = "snapshot_history.rs"]
 mod history;
+#[path = "snapshot_screen.rs"]
+mod screen;
+#[path = "transcript.rs"]
+pub(super) mod transcript;
 
 const V1_RAW_LIMIT: usize = 4 * 1024 * 1024;
 const V2_RAW_LIMIT: usize = 16 * 1024 * 1024;
@@ -32,6 +36,12 @@ pub(super) struct SnapshotV2 {
     columns: usize,
     rows: usize,
     alternate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application_context: Option<transcript::Transcript>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application_context_status: Option<&'static str>,
     screen_truncated: bool,
     history_truncated: bool,
     history_rows_scanned: usize,
@@ -77,7 +87,13 @@ pub(super) fn read_v2(id: u64) -> Result<SnapshotV2> {
     let separator = format!("tmux-link-section-{nonce:016x}");
     for window in [HISTORY_ROWS, 1250, 320, 1] {
         if let Some(raw) = capture_v2(&target, &separator, window)? {
-            return decode_v2(id, &raw, &separator, window);
+            let mut pane = decode_v2(id, &raw, &separator, window)?;
+            if pane.alternate {
+                let (context, status) = crate::codemaker::context(id, pane.pane_id);
+                pane.application_context = context;
+                pane.application_context_status = status;
+            }
+            return Ok(pane);
         }
     }
     anyhow::bail!("snapshot exceeds capture limit (16 MiB with a one-row history window)")
@@ -273,10 +289,17 @@ fn decode_v2(id: u64, raw: &str, separator: &str, window: usize) -> Result<Snaps
     for row in prior.iter_mut().chain(screen.iter_mut()) {
         *row = row.trim_end_matches(' ');
     }
+    let activity = if pane.alternate {
+        screen::clean(&mut screen)
+    } else {
+        None
+    };
     let (text, screen_truncated) = tail(&screen, 256, SECTION_BYTES);
     let (context, history_compacted) = history::compact(&prior, &text);
     Ok(SnapshotV2 {
         version: 2,
+        application_context: None,
+        application_context_status: None,
         snapshot: Snapshot {
             id,
             name: pane.name.to_owned(),
@@ -287,6 +310,7 @@ fn decode_v2(id: u64, raw: &str, separator: &str, window: usize) -> Result<Snaps
         columns: pane.columns,
         rows: pane.rows,
         alternate: pane.alternate,
+        activity,
         screen_truncated,
         history_truncated: !pane.alternate && pane.history > history_rows_scanned,
         history_rows_scanned,

@@ -310,6 +310,98 @@ final class DecisionAnalysisTests: XCTestCase {
     XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
   }
 
+  private func alternate(_ screen: String = "", activity: String? = nil, messages: [[String: String]]? = nil,
+                         latestIsDisplayed: Bool = true) throws -> DecisionSnapshot {
+    var payload: [String: Any] = [
+      "id": 4, "name": "review", "version": 2, "paneId": 17, "columns": 100, "rows": 24,
+      "alternate": true, "text": screen, "context": NSNull(), "screenTruncated": false,
+      "historyTruncated": false, "historyRowsScanned": 0, "historyCompacted": false,
+    ]
+    payload["activity"] = activity
+    if let messages {
+      payload["applicationContext"] = ["source": "transcript", "sessionID": "ses_fixture", "order": "newestFirst",
+                                       "latestIsDisplayed": latestIsDisplayed, "messages": messages] as [String: Any]
+    }
+    return try PaneSnapshotVersion.v2.decode(JSONSerialization.data(withJSONObject: payload),
+                                             for: RemoteSession(id: 4, name: "review"))
+  }
+
+  func testRunningAlternatePaneStaysInPreviewAndOutOfMixedRequests() async throws {
+    let fragment = "done' 2>&1 | tail -30"
+    let messages = [["role": "assistant", "text": "Which color for the chart?"]]
+    let snapshot = try alternate(fragment, activity: "running", messages: messages)
+    let brief = snapshot.prepared()
+    XCTAssertEqual(snapshot.capture?.reportsRunning, true)
+    XCTAssertNil(snapshot.context)
+    XCTAssertTrue(brief.blocks.contains(.init(source: .current, kind: .fact, text: fragment)))
+    XCTAssertTrue(brief.blocks.contains { $0.source == .transcriptAssistant })
+    XCTAssertFalse(brief.canAnalyze)
+    XCTAssertFalse(try alternate("echo $?", activity: "running").prepared().canAnalyze)
+    XCTAssertFalse(try alternate("Which chart?\n> Use the bar chart.\n" + fragment, activity: "running").prepared().canAnalyze)
+    XCTAssertTrue(try alternate("Overwrite the report? [y/n]", activity: "running").prepared().canAnalyze)
+    let menu = try alternate(Self.checksMenu.text, activity: "running").prepared()
+    XCTAssertTrue(menu.canAnalyze)
+    XCTAssertEqual(menu.menu?.items.count, 3)
+    final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody()) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let content = try XCTUnwrap(messages.last?["content"])
+        let sent = try JSONDecoder().decode([DecisionBrief].self, from: Data(content.utf8))
+        XCTAssertEqual(sent.map(\.id), [37])
+        return (200, try completion(#"{"decisions":[]}"#))
+      }
+    }
+    let session = Endpoint.session()
+    defer { session.invalidateAndCancel() }
+    let skipped = try await SessionAdvisor.analyze([snapshot], key: Self.key, session: session)
+    XCTAssertTrue(skipped.isEmpty)
+    _ = try await SessionAdvisor.analyze([snapshot, Self.example], key: Self.key, session: session)
+  }
+
+  func testTranscriptRolesRecencyAndDecisionEvidence() throws {
+    let newest = "Should we publish report-r42.json?"
+    let messages = [["role": "assistant", "text": newest],
+                    ["role": "user", "text": "Constraint: retain report-r42.json.\nAPI_KEY=test-secret"],
+                    ["role": "assistant", "text": "Use the old layout?"]]
+    let brief = try alternate(messages: messages).prepared()
+    XCTAssertTrue(brief.canAnalyze)
+    XCTAssertEqual(brief.blocks.first?.source, .latestAssistant)
+    XCTAssertEqual(brief.blocks.last?.source, .transcriptAssistant)
+    XCTAssertTrue(brief.blocks.contains { $0.source == .transcriptUser && $0.text.contains("report-r42") })
+    let wire = String(decoding: try JSONEncoder().encode(brief), as: UTF8.self)
+    XCTAssertFalse(wire.contains("test-secret"))
+    XCTAssertFalse(wire.contains("ses_fixture"))
+    XCTAssertLessThanOrEqual(wire.utf8.count, DecisionBrief.maxEncodedBytes)
+    func answer(_ quote: String) -> SessionDecision {
+      SessionDecision(sessionID: 4, question: "是否发出报告？", evidence: quote,
+                      options: [.init(reply: "发布", tradeoff: "立即发布"), .init(reply: "暂缓", tradeoff: "保留复核时间")],
+                      recommendedIndex: nil, reason: "")
+    }
+    XCTAssertEqual(try SessionAdvisor.validatedDecisions([answer(newest)], screens: [brief]).count, 1)
+    XCTAssertThrowsError(try SessionAdvisor.validatedDecisions([answer("Use the old layout?")], screens: [brief]))
+    XCTAssertFalse(try alternate(messages: messages, latestIsDisplayed: false).prepared().canAnalyze)
+    XCTAssertFalse(try alternate("Build finished.", messages: messages).prepared().canAnalyze)
+    XCTAssertFalse(try alternate(messages: [["role": "user", "text": "Yes, publish it."]] + messages).prepared().canAnalyze)
+    XCTAssertFalse(try alternate(messages: [], latestIsDisplayed: false).prepared().canAnalyze)
+    XCTAssertThrowsError(try alternate(messages: [["role": "tool", "text": "sample"]]))
+    XCTAssertThrowsError(try alternate(messages: [["role": "user", "text": String(repeating: "界", count: 1400)]]))
+    XCTAssertThrowsError(try alternate(messages: Array(repeating: messages[0], count: 33)))
+  }
+
+  func testTranscriptDedupKeepsTheNewestTurnAndItsRole() throws {
+    let repeated = "Which catalog should I publish?"
+    let turns = [["role": "assistant", "text": repeated],
+                 ["role": "user", "text": "Retain both copies for review."],
+                 ["role": "assistant", "text": "Earlier export completed.\n" + repeated]]
+    let blocks = try alternate(messages: turns).prepared().blocks
+    XCTAssertEqual(blocks.map(\.text), [repeated, "Retain both copies for review.", "Earlier export completed."])
+    XCTAssertEqual(blocks.map(\.source), [.latestAssistant, .transcriptUser, .transcriptAssistant])
+    let echoed = try alternate(messages: [["role": "user", "text": repeated]] + turns).prepared()
+    XCTAssertFalse(echoed.canAnalyze)
+    XCTAssertEqual(echoed.blocks.filter { $0.text == repeated }.map(\.source), [.transcriptUser])
+  }
+
   func testNativeLongIdentifierKeepsSeparateQuestionAndRedactsAssignmentsAndURLs() throws {
     let longName = String(repeating: "build-system.v3-", count: 2_000)
     let question = "Should I change the data/\nstore?"

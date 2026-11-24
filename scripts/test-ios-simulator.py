@@ -36,6 +36,40 @@ def simulator():
     raise SystemExit("Install an iOS simulator runtime with an available iPhone first")
 
 
+def bound_conversation(tmp, runtime_env):
+    application_id = "ses_simulator_catalog"
+    def turn(number, role, text):
+        return {"info": {"id": f"msg_{number}", "sessionID": application_id, "role": role,
+                         "time": {"created": number, "completed": number + 1}},
+                "parts": [{"type": "text", "text": text}]}
+
+    question = turn(2, "assistant", "Should I publish the signed catalog?")
+    question["parts"].insert(0, {"type": "tool", "state": {"output": "PRIVATE-TOOL-FIXTURE"}})
+    export = {"info": {"id": application_id, "title": "PRIVATE-METADATA-FIXTURE"},
+              "messages": [question, turn(1, "user", "Keep the signed catalog."),
+                           turn(3, "user", "Yes, publish the signed catalog.")]}
+    (tmp / "export.json").write_text(json.dumps(export), encoding="utf-8")
+    cli = tmp / "codemaker"
+    cli.write_text('#!/bin/sh\n[ "$#" = 3 ] && [ "$1/$2/$3" = "--pure/export/ses_simulator_catalog" ] || exit 2\n'
+                   'exec /bin/cat "$HOME/export.json"\n', encoding="utf-8")
+    cli.chmod(0o700)
+    session, pane = output("tmux", "-f", "/dev/null", "new-session", "-d", "-P", "-F",
+                           "#{session_id} #{pane_id}", "-s", "ios-bound-conversation", "-c", tmp,
+                           sys.executable, "-c", "import time; print('PRIVATE-HISTORY-FIXTURE\\n' * 50 "
+                           "+ '\\x1b[?1049h\\x1b[2J\\x1b[H', end='', flush=True); time.sleep(1800)",
+                           env=runtime_env).split()
+    for _ in range(100):
+        if output("tmux", "display-message", "-p", "-t", pane, "#{alternate_on}", env=runtime_env) == "1":
+            break
+        time.sleep(.05)
+    else:
+        raise RuntimeError("CodeMaker fixture did not enter the alternate screen")
+    bind_env = dict(runtime_env, HOME=str(tmp), PATH=str(tmp) + os.pathsep + runtime_env["PATH"])
+    bind_env.pop("SSH_ORIGINAL_COMMAND", None)
+    run(ROOT / "target/debug/agent", "bind-session", session[1:], application_id, env=bind_env)
+    return int(session[1:]), int(pane[1:])
+
+
 def benchmark(device, tmp):
     sim = ["xcrun", "simctl"]
     derived = ROOT / "target/xcode-simulator-tests"
@@ -77,8 +111,9 @@ def benchmark(device, tmp):
                              sys.executable, "-c", "import pathlib,sys,time; "
                              "print(pathlib.Path(sys.argv[1]).read_text(), end='', flush=True); time.sleep(1800)",
                              report, env=runtime_env)
+        conversation_id, conversation_pane = bound_conversation(tmp, runtime_env)
         tmux_path = str(Path(shutil.which("tmux")).parent)
-        command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}",
+        command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}", f"HOME={tmp}",
                               f"PATH={tmux_path}:/usr/bin:/bin", str(ROOT / "target/debug/agent"), "attach"])
         (tmp / "sshd.conf").write_text(
             f"ListenAddress 127.0.0.1\nPort {port}\nHostKey {tmp}/host\nPidFile {tmp}/pid\n"
@@ -102,11 +137,13 @@ def benchmark(device, tmp):
                     "host": "127.0.0.1", "port": port, "user": getpass.getuser(), "fingerprint": pin,
                     "sessionName": session, "benchmarkSessionID": int(session_id.removeprefix("$")),
                     "snapshotFixtureID": int(snapshot_id.removeprefix("$")),
+                    "conversationFixtureID": conversation_id, "conversationFixturePane": conversation_pane,
                 }))
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testBoundConversationUsesLatestReply",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",

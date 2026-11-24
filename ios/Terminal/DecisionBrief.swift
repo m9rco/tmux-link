@@ -1,8 +1,8 @@
 import Foundation
 
-/// An extractive brief. Source order is significant: a later response may settle an earlier question.
+/// Screen and scrollback excerpts retain source order. App transcript turns are newest first.
 struct DecisionBrief: Codable, Equatable {
-  enum Source: String, Codable { case current, history }
+  enum Source: String, Codable { case current, history, transcriptUser, transcriptAssistant, latestAssistant }
   enum Kind: String, Codable { case question, rationale, goal, constraint, fact, plan, choice, state }
   struct Block: Codable, Equatable {
     let source: Source
@@ -14,6 +14,16 @@ struct DecisionBrief: Codable, Equatable {
   let name: String
   let blocks: [Block]
   var menu: TerminalChoiceMenu? = nil
+  // Local eligibility is shared by the preview and transport. Only previewed excerpts go on the wire.
+  var requiresExplicitQuestion = false
+  private enum CodingKeys: String, CodingKey { case id, name, blocks, menu }
+
+  var canAnalyze: Bool {
+    menu != nil || blocks.contains {
+      ($0.source == .current && (!requiresExplicitQuestion || $0.kind == .question))
+        || ($0.source == .latestAssistant && $0.kind == .question)
+    }
+  }
 
   static let maxEncodedBytes = 4096
   static let maxHistoryBytes = 1152
@@ -53,8 +63,37 @@ extension DecisionBrief {
     let widget = TerminalChoiceMenu.read(rows: screen)
     let menu = widget?.menu
     let logicalLines = snapshot.capture != nil
-    let history = Self.extract(clean(snapshot.context ?? ""), source: .history, logicalLines: logicalLines)
-    let current = Self.extract(screen, source: .current, logicalLines: logicalLines, skip: widget?.occupied ?? [])
+    let app = snapshot.capture?.applicationContext
+    let explicitOnly = snapshot.capture?.reportsRunning == true || app != nil
+    var current = Self.extract(screen, source: .current, logicalLines: logicalLines, skip: widget?.occupied ?? [])
+    if explicitOnly, let reply = current.lastIndex(where: { Rules.response.test($0.block.text) }) {
+      for index in current.indices where index < reply && current[index].block.kind == .question {
+        current[index].block = Block(source: .current, kind: .fact, text: current[index].block.text)
+      }
+    }
+    var history = Self.extract(clean(snapshot.context ?? ""), source: .history, logicalLines: logicalLines)
+    var turns = [Int]()
+    if let app {
+      for (turn, message) in app.messages.enumerated().reversed() {
+        let source: Source = message.role == .user ? .transcriptUser : .transcriptAssistant
+        let rows = clean(message.text)
+        var excerpts = Self.extract(rows, source: source, logicalLines: true)
+        // A transcript may include answered questions. Only the latest complete assistant turn
+        // can supply a question, and only when the live screen is empty or corroborates that turn.
+        if turn == 0, app.latestIsDisplayed, message.role == .assistant,
+           snapshot.capture?.reportsRunning != true, menu == nil,
+           let question = excerpts.lastIndex(where: { $0.block.kind == .question }),
+           excerpts.suffix(from: question + 1).allSatisfy({ $0.block.kind == .choice }) {
+          let messageText = rows.joined(separator: "\n")
+          if current.allSatisfy({ messageText.contains($0.block.text) }) {
+            let quoted = excerpts[question].block
+            excerpts[question].block = Block(source: .latestAssistant, kind: .question, text: quoted.text)
+          }
+        }
+        history.append(contentsOf: excerpts)
+        turns.append(contentsOf: repeatElement(turn, count: excerpts.count))
+      }
+    }
     var candidates = history + current
 
     // When a question names a specific plan item, other items in that plan are not answers.
@@ -78,6 +117,7 @@ extension DecisionBrief {
       preferred.insert(target)
       if let group = item.group {
         for (index, other) in candidates.enumerated() where other.block.source == item.block.source &&
+          (target >= turns.count || (index < turns.count && turns[index] == turns[target])) &&
           other.group == group && other.number != nil && other.number != number {
           if let limit = Self.scopeLimit(in: other.block.text) {
             candidates[index] = Candidate(block: Block(source: other.block.source, kind: .constraint, text: limit),
@@ -99,14 +139,15 @@ extension DecisionBrief {
     let lastCurrent = currentIndices.max()
     let lastState = currentIndices.filter { candidates[$0].block.kind == .state }.max()
     var support = [Int: Int]()
-    if snapshot.capture != nil, !history.isEmpty, !questions.isEmpty || menu != nil {
-      let prompt = questions.map { $0.block.text } + (menu?.visibleTexts ?? [])
+    let prompt = questions.map { $0.block.text } + (menu?.visibleTexts ?? [])
+      + history.filter { $0.block.source == .latestAssistant }.map { $0.block.text }
+    if snapshot.capture != nil, !history.isEmpty, !prompt.isEmpty {
       let references = Self.references(in: prompt.joined(separator: "\n"))
       // Choose one representative of each supporting kind. Prefer the same file, ticket, or revision
       // as the current prompt, then the later row. Unrelated history facts stay at their usual priority.
       let matches = latest.values.compactMap { index -> (index: Int, matches: Int)? in
         let block = candidates[index].block
-        guard block.source == .history, block.kind != .question, block.kind != .choice else { return nil }
+        guard block.source != .current, block.kind != .question, block.kind != .choice else { return nil }
         let overlap = references.isEmpty ? 0 : Self.references(in: block.text).intersection(references).count
         guard overlap > 0 || [.rationale, .goal, .constraint].contains(block.kind) else { return nil }
         return (index, overlap)
@@ -119,9 +160,11 @@ extension DecisionBrief {
     func priority(_ i: Int) -> Int {
       let item = candidates[i]
       let current = item.block.source == .current
+      if item.block.source == .latestAssistant { return 122 }
       if i == lastCurrent { return 125 }
       if preferred.contains(i) { return 110 }
       if let rank = support[i] { return 99 - rank }
+      if i < turns.count { return 93 - turns[i] }
       switch item.block.kind {
       case .question: return current ? 120 : 25
       case .choice: return current ? 105 : 25
@@ -147,18 +190,25 @@ extension DecisionBrief {
       guard let size = try? encoder.encode(block).count else { continue }
       let cost = size + (selected.isEmpty ? 0 : 1)
       guard bytes + cost <= Self.maxEncodedBytes else { continue }
-      if block.source == .history {
-        guard historyBytes + cost <= Self.maxHistoryBytes else { continue }
+      if block.source != .current {
+        // A full-screen pane may have only application history. Use the available preview space.
+        let limit = app == nil ? Self.maxHistoryBytes : Self.maxEncodedBytes
+        guard historyBytes + cost <= limit else { continue }
         historyBytes += cost
       }
       bytes += cost
       selected.insert(i)
     }
-    self.init(id: snapshot.id, name: label, blocks: selected.sorted().map { candidates[$0].block }, menu: menu)
+    let ordered = selected.sorted { lhs, rhs in
+      if lhs < turns.count, rhs < turns.count, turns[lhs] != turns[rhs] { return turns[lhs] < turns[rhs] }
+      return lhs < rhs
+    }
+    self.init(id: snapshot.id, name: label, blocks: ordered.map { candidates[$0].block }, menu: menu)
+    requiresExplicitQuestion = explicitOnly
   }
 
   private struct Candidate {
-    let block: Block
+    var block: Block
     let order: Int
     let group: Int?
     let number: Int?
@@ -253,6 +303,7 @@ extension DecisionBrief {
   private static func classify(_ text: String) -> Kind {
     // A transcript often shows the answered question immediately above the reply and a running spinner.
     if Rules.response.test(text) { return .state }
+    if Rules.shell.test(text) { return .fact }
     if text.hasSuffix("?") || text.hasSuffix("？") || Rules.prompt.test(text) { return .question }
     if Rules.rationale.test(text) { return .rationale }
     if Rules.goal.test(text) { return .goal }
@@ -348,6 +399,7 @@ extension DecisionBrief {
     static let prompt = Rule(#"(?i)^(?:(?:please\s+)?(?:choose|select|confirm|enter|pick)\b|请选择|请确认|请问|是否要)|\[(?:y/n|yes/no)\]\s*[:：]?\s*$"#)
     static let questionLead = Rule(#"(?i)^(?:要我|要先|要不要|我们要|需要我|可以先|是否|你想|你希望|请|should|shall|would|which|what|can I|do you|how|why)"#)
     static let response = Rule(#"(?i)^(?:[>❯›]\s+|(?:user|you|answer|reply|回答|用户|已选择|已确认)\s*[:：])"#)
+    static let shell = Rule(#"^(?:[$%]\s+|(?:echo|printf)\s+)|\$\?$"#)
     static let bareHeading = Rule(#"(?i)^(?:[●•#-]\s*)?(?:当前(?:线上)?状态|背景|现状|current status|background)\s*[:：]?$"#)
     static let planGoal = Rule(#"(?i)[,，;；]\s*((?:以便|目标[为是：:]|希望|验证[^，,；;。]*[0-9]|so that\b|aiming (?:for|to)\b).+)$"#)
     static let planHeading = Rule(#"(?i)^(?:[●•#-]\s*)?(?:建议的下一步|下一步(?:计划|建议)|后续(?:安排|计划|步骤)|(?:建议|执行|实施)步骤|(?:proposed |suggested )?next steps\b|(?:implementation |proposed |execution )?plan(?:\s*[:：(（]|$))"#)

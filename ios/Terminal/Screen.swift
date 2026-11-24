@@ -87,6 +87,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   static let surface = UIColor(red: 10 / 255, green: 20 / 255, blue: 26 / 255, alpha: 1)
   let client: ClientProfile
   let target: Int64
+  private let session: RemoteSession?
   private let touchPaging: Bool
   private let heading: String
   private let status = UILabel()
@@ -124,6 +125,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   ) {
     self.leave = leave
     self.client = client
+    self.session = session
     self.navigationStatus = navigationStatus
     touchPaging = session?.touchPaging == true
     target = session?.id ?? -1
@@ -234,7 +236,15 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       // Legacy interactive connections have one visible terminal, without a numeric session ID.
       let snapshot = DecisionSnapshot(id: max(0, self.target), name: self.heading,
                                       text: text, context: lines["context"])
-      let review = DecisionReviewView(snapshot: snapshot) { [weak self] in self?.dismiss(animated: true) }
+      let alternate = lines["bufferType"] == "alternate"
+      var hostRead: (() async throws -> DecisionSnapshot)?
+      if alternate, let session = self.session, session.negotiatedSnapshotVersion == .v2 {
+        let client = self.client
+        hostRead = { try await SessionDirectory.snapshot(session, client: client) }
+      }
+      let review = DecisionReviewView(snapshot: snapshot, alternate: alternate, hostRead: hostRead) { [weak self] in
+        self?.dismiss(animated: true)
+      }
       self.present(UIHostingController(rootView: review.preferredColorScheme(.dark)), animated: true)
     }
   }

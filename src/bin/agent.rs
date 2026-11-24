@@ -10,6 +10,10 @@ use std::{
 #[path = "agent/import_link.rs"]
 mod import_link;
 
+#[path = "agent/codemaker.rs"]
+mod codemaker;
+#[path = "agent/codemaker_export.rs"]
+mod codemaker_export;
 #[path = "agent/snapshot.rs"]
 mod snapshot;
 
@@ -168,9 +172,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         [op] if op == "attach" => attach(),
+        [op, rest @ ..] if op == "bind-session" || op == "unbind-session" => {
+            codemaker::configure(op, rest)
+        }
         [op, flag] if op == "snapshot" && matches!(flag.as_str(), "--help" | "-h") => {
             println!(
-                "tmux-link-agent snapshot SESSION_ID\nPrint a read-only JSON snapshot of the session's active pane and compacted history. Use the numeric session ID without '$'."
+                "tmux-link-agent snapshot SESSION_ID\nPrint the active pane, compacted tmux history and any bound CodeMaker transcript (newest messages first). Use the numeric tmux ID without '$'. See bind-session --help."
             );
             Ok(())
         }
@@ -214,7 +221,7 @@ fn main() -> Result<()> {
                 .into())
         }
         _ => bail!(
-            "usage: agent attach | agent snapshot SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
+            "usage: agent attach | agent snapshot SESSION_ID | agent bind-session --help | agent unbind-session SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
         ),
     }
 }

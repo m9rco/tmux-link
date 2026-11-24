@@ -25,6 +25,20 @@ struct DecisionSnapshot: Codable, Equatable {
 }
 
 struct NativePaneCapture: Decodable, Equatable {
+  struct ApplicationContext: Decodable, Equatable {
+    struct Message: Decodable, Equatable {
+      enum Role: String, Decodable { case user, assistant }
+      let role: Role
+      let text: String
+    }
+
+    let source: String
+    let sessionID: String
+    let order: String
+    let latestIsDisplayed: Bool
+    let messages: [Message]
+  }
+
   let version: Int
   let paneId: UInt64
   let columns: Int
@@ -34,6 +48,19 @@ struct NativePaneCapture: Decodable, Equatable {
   let historyTruncated: Bool
   let historyRowsScanned: Int
   let historyCompacted: Bool
+  var activity: String? = nil
+  var applicationContext: ApplicationContext? = nil
+  var applicationContextStatus: String? = nil
+
+  var reportsRunning: Bool { alternate && activity == "running" }
+  var missingTranscriptReason: String {
+    switch applicationContextStatus {
+    case "unbound": return "此窗格尚未绑定应用对话。"
+    case "unavailable": return "主机暂时无法读取已绑定的应用对话。"
+    case "changed": return "窗格或前台程序已更改，需要重新绑定应用对话。"
+    default: return "主机未提供应用对话记录。"
+    }
+  }
 }
 
 enum PaneSnapshotVersion {
@@ -55,6 +82,16 @@ enum PaneSnapshotVersion {
             (0...5000).contains(capture.historyRowsScanned),
             capture.historyRowsScanned > 0 || historyAbsent,
             !capture.alternate || capture.historyRowsScanned == 0 else { throw SnapshotError.invalid }
+      if let app = capture.applicationContext {
+        let suffix = app.sessionID.utf8.dropFirst(4)
+        guard capture.alternate, app.source == "transcript", app.sessionID.hasPrefix("ses_"),
+              (1...120).contains(suffix.count),
+              suffix.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }),
+              app.order == "newestFirst", app.messages.count <= 32, !app.latestIsDisplayed || !app.messages.isEmpty,
+              app.messages.allSatisfy({ !$0.text.isEmpty && $0.text.utf8.count <= 4096 }),
+              app.messages.reduce(0, { $0 + $1.text.utf8.count }) <= 32 * 1024
+        else { throw SnapshotError.invalid }
+      }
       value.capture = capture
       snapshot = value
     }

@@ -219,6 +219,52 @@ fn selected_pane_snapshot_separates_history_preserves_grid_and_never_attaches() 
 }
 
 #[test]
+fn codemaker_alternate_screen_reports_running_and_keeps_the_shell_fragment() {
+    let server = Server::new("codemaker");
+    server.session(
+        "build",
+        "120",
+        "24",
+        r#"printf 'private-primary-history\n'
+        i=0; while [ "$i" -lt 30 ]; do echo primary-row; i=$((i+1)); done
+        printf 'private-primary-screen'
+        tput smcup; tput clear
+        printf "  ┃    done' 2>&1 | tail -30\n  ┃\n\n"
+        printf '     \033[38;5;81m▣  Build · Deepseek Flash · Avg TTFT 512ms · Avg TPS 120.8 tok/s · 64 LLM calls\033[0m\n\n'
+        printf '  ┃\n  ┃\n  ┃\n  ┃  Build · Deepseek Flash example-codemaker\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'
+        printf '   \033[33m⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                           182.4K (19%%) · ¥1.05  ctrl+p commands\033[0m'
+        exec sleep 60"#,
+    );
+    server.wait_for("$0:", "ctrl+p commands");
+    let snapshot = server.json("tmux-link-snapshot-v2 0");
+    assert_eq!(snapshot["alternate"], true);
+    assert_eq!(snapshot["text"], "done' 2>&1 | tail -30");
+    assert_eq!(snapshot["activity"], "running");
+    assert_eq!(snapshot["context"], Value::Null);
+    assert_eq!(snapshot["historyRowsScanned"], 0);
+    assert!(!snapshot.to_string().contains("private-primary"));
+}
+
+#[test]
+fn alternate_screen_preserves_menu_options_that_describe_models_and_key_bindings() {
+    let server = Server::new("alt-menu");
+    let menu = concat!(
+        "选择帮助主题\n",
+        "  1) esc interrupt — 何时中断当前任务？\n",
+        "  2) ctrl+p commands — 打开命令列表\n",
+        "  3) Build · Deepseek Flash — compare model speed in tok/s\n",
+        "  4) Explain how esc interrupt and ctrl+p commands interact"
+    );
+    let script = format!("tput smcup; tput clear; cat <<'MENU'\n{menu}\nMENU\nexec sleep 60");
+    server.session("help", "96", "16", &script);
+    server.wait_for("$0:", "commands interact");
+    let snapshot = server.json("tmux-link-snapshot-v2 0");
+    assert_eq!(snapshot["alternate"], true);
+    assert_ne!(snapshot["activity"], "running");
+    assert_eq!(snapshot["text"], menu);
+}
+
+#[test]
 fn detailed_snapshot_joins_soft_wraps_and_preserves_hard_breaks_and_menu_rows() {
     let server = Server::new("wrap");
     server.session(
@@ -438,4 +484,125 @@ fn scans_five_thousand_history_rows_and_compacts_decision_evidence_on_the_host()
     assert_eq!(exact["historyRowsScanned"], 5000);
     assert_eq!(exact["historyCompacted"], true);
     assert_eq!(exact["historyTruncated"], false);
+}
+
+#[test]
+fn explicitly_bound_pane_reads_fresh_codemaker_messages_newest_first() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::new("transcript");
+    server.session(
+        "review",
+        "108",
+        "12",
+        "printf '\\033[?1049hBOUND-READY'; exec sleep 90",
+    );
+    server.wait_for("$0:", "BOUND-READY");
+    let script = server.0.join("codemaker");
+    fs::write(&script, "#!/bin/sh\ntest \"$1/$2/$3\" = '--pure/export/ses_fixture' || exit 7\ncat \"$HOME/messages.json\"\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let make_turn = |id: usize, role: &str, text: &str| {
+        serde_json::json!({
+            "info": {"id": format!("msg_{id}"), "role":role, "sessionID":"ses_fixture",
+                "time":{"created":id,"completed":id+1}, "finish":"stop"},
+            "parts":[{"type":"text","text":text}]
+        })
+    };
+    let mut messages = vec![
+        make_turn(2, "assistant", "Which output should we use?"),
+        make_turn(1, "user", "Keep the signed catalog."),
+    ];
+    let export = |messages: &[Value]| {
+        fs::write(
+            server.0.join("messages.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"info":{"id":"ses_fixture"},"messages":messages}),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    export(&messages);
+    let path = std::env::join_paths(
+        std::iter::once(server.0.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let agent = |args: &[&str], forced: Option<&str>| {
+        let mut cmd = server.cmd(env!("CARGO_BIN_EXE_agent"));
+        cmd.env("HOME", &server.0)
+            .env("PATH", &path)
+            .env_remove("SSH_ORIGINAL_COMMAND")
+            .args(args);
+        if let Some(command) = forced {
+            cmd.env("SSH_ORIGINAL_COMMAND", command);
+        }
+        cmd.output().unwrap()
+    };
+    let capture = || {
+        let result = agent(&["attach"], Some("tmux-link-snapshot-v2 0"));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    assert_eq!(capture()["applicationContextStatus"], "unbound");
+    assert!(
+        !agent(&["attach"], Some("bind-session 0 ses_fixture"))
+            .status
+            .success()
+    );
+    let bound = agent(&["bind-session", "0", "ses_fixture"], None);
+    assert!(
+        bound.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bound.stderr)
+    );
+    let pane = capture();
+    let transcript = &pane["applicationContext"];
+    assert_eq!(pane["historyRowsScanned"], 0);
+    assert_eq!(transcript["sessionID"], "ses_fixture");
+    assert_eq!(transcript["order"], "newestFirst");
+    assert_eq!(
+        transcript["messages"][0]["text"],
+        "Which output should we use?"
+    );
+    assert_eq!(
+        transcript["messages"][1]["text"],
+        "Keep the signed catalog."
+    );
+    messages.push(make_turn(3, "user", "Use JSON."));
+    export(&messages);
+    assert_eq!(
+        capture()["applicationContext"]["messages"][0]["text"],
+        "Use JSON."
+    );
+    server.tmux(&[
+        "split-window",
+        "-t",
+        "$0:",
+        "sh",
+        "-c",
+        "printf '\\033[?1049hSIBLING'; exec sleep 90",
+    ]);
+    server.wait_for("$0:", "SIBLING");
+    let sibling = capture();
+    assert!(sibling.get("applicationContext").is_none());
+    server.tmux(&["select-pane", "-t", "%0"]);
+    fs::write(
+        server.0.join("messages.json"),
+        r#"{"info":{"id":"ses_other"},"messages":[]}"#,
+    )
+    .unwrap();
+    let unavailable = capture();
+    assert_eq!(unavailable["applicationContextStatus"], "unavailable");
+    assert!(
+        unavailable["text"]
+            .as_str()
+            .unwrap()
+            .contains("BOUND-READY")
+    );
+    assert!(agent(&["unbind-session", "0"], None).status.success());
+    assert_eq!(capture()["applicationContextStatus"], "unbound");
 }

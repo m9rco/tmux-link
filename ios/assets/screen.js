@@ -142,7 +142,7 @@ function decisionScreen() {
   const top = buffer.baseY;
   const text = lines(top, top + term.rows);
   const context = buffer.type === 'normal' ? lines(Math.max(0, top - 120), top) : '';
-  return {text, context};
+  return {text, context, bufferType: buffer.type};
 }
 
 function requestTerminalKeyboard() {
