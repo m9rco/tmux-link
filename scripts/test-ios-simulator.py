@@ -112,6 +112,10 @@ def benchmark(device, tmp):
                              "print(pathlib.Path(sys.argv[1]).read_text(), end='', flush=True); time.sleep(1800)",
                              report, env=runtime_env)
         conversation_id, conversation_pane = bound_conversation(tmp, runtime_env)
+        question_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
+                             "-s", "tmux-link-managed-question-simulator", sys.executable, "-c",
+                             "import time; print('What audience should the draft address?', flush=True); time.sleep(1800)",
+                             env=runtime_env)
         tmux_path = str(Path(shutil.which("tmux")).parent)
         command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}", f"HOME={tmp}",
                               f"PATH={tmux_path}:/usr/bin:/bin", str(ROOT / "target/debug/agent"), "attach"])
@@ -137,6 +141,7 @@ def benchmark(device, tmp):
                     "host": "127.0.0.1", "port": port, "user": getpass.getuser(), "fingerprint": pin,
                     "sessionName": session, "benchmarkSessionID": int(session_id.removeprefix("$")),
                     "snapshotFixtureID": int(snapshot_id.removeprefix("$")),
+                    "managedQuestionFixtureID": int(question_id.removeprefix("$")),
                     "conversationFixtureID": conversation_id, "conversationFixturePane": conversation_pane,
                 }))
                 run(*sim, "terminate", device, bundle)
@@ -145,6 +150,7 @@ def benchmark(device, tmp):
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testBoundConversationUsesLatestReply",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testManagedStatusUsesPinnedSessionWithoutEnablingIt",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testForegroundPhoneCompletesAnIsolatedQuestion",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",

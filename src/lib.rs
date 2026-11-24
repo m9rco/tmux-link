@@ -17,23 +17,35 @@ pub fn valid_managed_action(action: &str) -> bool {
         && matches!(style, "cautious" | "balanced" | "concise")
 }
 
+pub const MAX_ADVICE_RESPONSE: usize = 64 * 1024;
+
+pub fn valid_managed_instance(token: &str) -> bool {
+    let mut parts = token.split('-');
+    token.len() <= 96
+        && (0..4).all(|i| {
+            let raw = parts.next().unwrap_or("");
+            let field = if i == 2 {
+                raw.strip_prefix('%').unwrap_or("")
+            } else {
+                raw
+            };
+            !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit())
+        })
+        && parts.next().is_none()
+}
+
+pub fn valid_advice_ticket(ticket: &str) -> bool {
+    ticket.len() == 16
+        && ticket
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
 /// Pin remote changes to the tmux lifetime and pane shown in the phone's listing.
 pub fn managed_remote_action(request: &str) -> Option<(&str, Option<&str>)> {
     let (action, instance) = match request.split_once('@') {
         Some((action, token)) => {
-            let mut parts = token.split('-');
-            let valid = token.len() <= 96
-                && (0..4).all(|i| {
-                    let raw = parts.next().unwrap_or("");
-                    let field = if i == 2 {
-                        raw.strip_prefix('%').unwrap_or("")
-                    } else {
-                        raw
-                    };
-                    !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit())
-                })
-                && parts.next().is_none();
-            if !valid {
+            if !valid_managed_instance(token) {
                 return None;
             }
             (action, Some(token))

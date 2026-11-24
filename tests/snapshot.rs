@@ -166,7 +166,7 @@ fn selected_pane_snapshot_separates_history_preserves_grid_and_never_attaches() 
             .unwrap()
             .iter()
             .all(|s| s["snapshot"] == true
-                && s["managedVersion"] == 1
+                && s["managedVersion"] == 2
                 && s["snapshotVersion"] == 2
                 && s.get("text").is_none()
                 && s.get("context").is_none())
@@ -788,7 +788,7 @@ fn managed_forced_command_is_session_scoped_and_has_a_closed_vocabulary() {
     );
     let status: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(status["enabled"], false);
-    assert_eq!(status["keyReady"], false);
+    assert!(status.get("keyReady").is_none());
     assert_eq!(status["callsToday"], 0);
     assert_eq!(status["records"], serde_json::json!([]));
     for invalid in [

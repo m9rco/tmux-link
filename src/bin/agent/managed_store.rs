@@ -14,6 +14,7 @@ use std::{
 
 const DAY: u64 = 86_400;
 pub(super) const MAX_CALLS: usize = 12;
+const LEASE_SECONDS: u64 = 120;
 
 pub(super) fn now() -> u64 {
     SystemTime::now()
@@ -160,6 +161,14 @@ struct Charge {
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Pending {
     pub id: u64,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub frame_hash: String,
+    #[serde(default)]
+    pub fingerprint: String,
+    // Filled from the verified live frame only when recording the result.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub question: String,
     pub mode: String,
     pub style: String,
@@ -169,6 +178,11 @@ pub(super) struct Pending {
 #[derive(Deserialize, Serialize)]
 pub(super) struct State {
     pub binding: Binding,
+    // An old detached worker requires its own "enabled" field to deserialize this file.
+    // Dropping that field on migration also invalidates work already in flight.
+    #[serde(default, rename = "enabled", skip_serializing)]
+    pub legacy_enabled: Option<bool>,
+    #[serde(default, rename = "phone_enabled")]
     pub enabled: bool,
     pub mode: String,
     pub style: String,
@@ -187,7 +201,6 @@ pub(super) struct State {
 pub(super) struct Status<'a> {
     pub enabled: bool,
     pub state: &'a str,
-    pub key_ready: bool,
     pub calls_today: usize,
     pub tokens_today: u64,
     pub mode: &'a str,
@@ -200,6 +213,7 @@ impl State {
     pub fn new(binding: Binding) -> Self {
         Self {
             binding,
+            legacy_enabled: None,
             enabled: false,
             mode: "menu".into(),
             style: "balanced".into(),
@@ -220,11 +234,24 @@ impl State {
     pub fn save(&self, path: &Path) -> Result<()> {
         write(path, &serde_json::to_vec(self)?)
     }
-    pub fn expire(&mut self, at: u64) {
+    pub fn expire(&mut self, at: u64) -> bool {
+        let previous_count = self.charges.len();
+        let mut changed = false;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.sending || at < p.created_at || at - p.created_at >= LEASE_SECONDS)
+        {
+            self.cancel("手机请求已中断或过期，请核对原会话。");
+            self.state = "needsConfirmation".into();
+            changed = true;
+        }
         self.charges.retain(|c| at.saturating_sub(c.at) < DAY);
         if self.state == "budgetReached" && self.charges.len() < MAX_CALLS {
             self.state = "watching".into();
+            changed = true;
         }
+        changed || self.charges.len() != previous_count
     }
     pub fn reset_memory(&mut self) {
         self.memory_records = 0;
@@ -263,11 +290,10 @@ impl State {
             .collect::<Vec<_>>();
         self.memory = notes.join("\n").chars().take(480).collect();
     }
-    pub fn status(&self, key_ready: bool) -> Status<'_> {
+    pub fn status(&self) -> Status<'_> {
         Status {
             enabled: self.enabled,
             state: &self.state,
-            key_ready,
             calls_today: self.charges.len(),
             tokens_today: self
                 .charges
@@ -279,7 +305,12 @@ impl State {
             records: &self.records,
         }
     }
-    pub fn begin(&mut self, at: u64, fingerprint: &str, question: &str) -> Result<Option<Pending>> {
+    pub fn begin(
+        &mut self,
+        at: u64,
+        fingerprint: &str,
+        frame_hash: &str,
+    ) -> Result<Option<Pending>> {
         self.expire(at);
         if !self.enabled || self.pending.is_some() || self.seen.iter().any(|f| f == fingerprint) {
             return Ok(None);
@@ -290,7 +321,10 @@ impl State {
         }
         let p = Pending {
             id: nonce()?,
-            question: question.chars().take(500).collect(),
+            created_at: at,
+            frame_hash: frame_hash.into(),
+            fingerprint: fingerprint.into(),
+            question: String::new(),
             mode: self.mode.clone(),
             style: self.style.clone(),
             sending: false,
@@ -308,10 +342,19 @@ impl State {
         self.state = "analyzing".into();
         Ok(Some(p))
     }
-    pub fn usage(&mut self, id: u64, tokens: u64) {
-        if let Some(charge) = self.charges.iter_mut().find(|c| c.id == id) {
+    pub fn has_charge(&self, id: u64) -> bool {
+        self.charges.iter().any(|c| c.id == id)
+    }
+    pub fn usage(&mut self, id: u64, tokens: u64) -> bool {
+        if let Some(charge) = self
+            .charges
+            .iter_mut()
+            .find(|c| c.id == id && c.tokens == 0)
+        {
             charge.tokens = tokens;
+            return true;
         }
+        false
     }
     pub fn record(
         &mut self,
@@ -328,7 +371,7 @@ impl State {
             0,
             Record {
                 at,
-                question: p.question.clone(),
+                question: p.question.chars().take(500).collect(),
                 choice: choice.clone(),
                 reason,
                 outcome: outcome.into(),

@@ -119,6 +119,19 @@ for bin in agent center; do
         fi
     fi
 done
+if [ "$role" != center ]; then
+    # An older paired daemon may stay up across a binary replacement. Retire its
+    # session markers under the same locks before the upgrade returns.
+    case "$version" in
+        v0.[0-4].*|v0.5.0) ;;
+        *)
+            for marker in "$HOME/.config/tmux-link/managed"/session-*.on; do
+                [ -f "$marker" ] || continue
+                "$prefix/bin/tmux-link-agent" migrate-managed
+                break
+            done ;;
+    esac
+fi
 cp -R "$tmp/unpack/share/tmux-link/." "$prefix/share/tmux-link/"
 echo "Installed $role to $prefix/bin"
 echo "Deployment templates and setup guide: $prefix/share/tmux-link"

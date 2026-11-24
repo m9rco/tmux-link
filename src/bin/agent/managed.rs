@@ -1,21 +1,14 @@
 //! Host-side decisions. No pane content is sampled without a persistent, explicit per-session enable.
 use crate::{codemaker::Pane, managed_decision as decision, snapshot};
 use anyhow::{Context, Result, bail, ensure};
-use fs2::FileExt;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
-    env, fs,
-    io::{self, BufRead, IsTerminal, Read},
-    os::{
-        fd::AsRawFd,
-        unix::{fs::MetadataExt, process::CommandExt},
-    },
-    path::{Path, PathBuf},
+    fs,
+    io::{self, Read},
+    os::unix::fs::MetadataExt,
+    path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
 };
 #[path = "managed_store.rs"]
 mod store;
@@ -89,75 +82,39 @@ fn inspect(binding: &Binding) -> Result<Pane> {
     Ok(pane)
 }
 
-fn key(root: &Path) -> Result<Option<String>> {
-    store::read(&root.join("api-key"), 512)?
-        .map(|bytes| String::from_utf8(bytes).context("节点 API Key 格式无效"))
-        .transpose()
-}
-pub(super) fn set_key() -> Result<()> {
-    ensure!(
-        env::var_os("SSH_ORIGINAL_COMMAND").is_none(),
-        "请在节点本机配置 API Key"
-    );
-    struct Echo(libc::termios);
-    impl Drop for Echo {
-        fn drop(&mut self) {
-            unsafe {
-                libc::tcsetattr(0, libc::TCSANOW, &self.0);
-            }
-            eprintln!();
-        }
+fn remove_marker(path: &Path) -> Result<()> {
+    match fs::remove_file(path.with_extension("on")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => Ok(result?),
     }
-    let input = io::stdin();
-    let echo = if input.is_terminal() {
-        eprint!("DeepSeek API Key: ");
-        let mut saved = std::mem::MaybeUninit::uninit();
-        ensure!(
-            unsafe { libc::tcgetattr(input.as_raw_fd(), saved.as_mut_ptr()) } == 0,
-            "无法安全读取终端输入"
-        );
-        let saved = unsafe { saved.assume_init() };
-        let mut hidden = saved;
-        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL);
-        ensure!(
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &hidden) } == 0,
-            "无法关闭输入回显"
-        );
-        Some(Echo(saved))
-    } else {
-        None
-    };
-    let mut value = String::new();
-    input.lock().take(515).read_line(&mut value)?;
-    drop(echo);
-    let value = value.trim_end_matches(['\n', '\r']);
-    ensure!(
-        (1..=512).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic()),
-        "密钥格式无效"
-    );
-    store::write(&store::root()?.join("api-key"), value.as_bytes())?;
-    println!("节点 DeepSeek API Key 已保存。");
-    Ok(())
 }
 
-fn marker(path: &Path, on: bool) -> Result<()> {
-    let flag = path.with_extension("on");
-    if on {
-        store::write(&flag, b"")
-    } else {
-        match fs::remove_file(flag) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other.map_err(Into::into),
+// Every caller holds the session lock, including during the one-time format migration.
+fn load(path: &Path) -> Result<Option<State>> {
+    let Some(mut state) = State::load(path)? else {
+        return Ok(None);
+    };
+    if let Some(was_enabled) = state.legacy_enabled.take() {
+        if was_enabled || state.pending.is_some() {
+            state.cancel("托管已升级为手机前台分析，请重新启用。");
+            state.state = "disabled".into();
         }
+        state.enabled = false;
+        state.save(path)?;
+        remove_marker(path)?;
     }
+    if state.expire(store::now()) {
+        state.save(path)?;
+    }
+    Ok(Some(state))
 }
+
 fn disarm(state: &mut State, path: &Path, reason: &str) -> Result<()> {
     state.cancel(reason);
     state.reset_memory();
     state.enabled = false;
     state.state = "needsConfirmation".into();
-    state.save(path)?;
-    marker(path, false)
+    state.save(path)
 }
 
 pub(super) fn control(action: &str, id: u64, expected_instance: Option<&str>) -> Result<()> {
@@ -174,23 +131,10 @@ pub(super) fn control(action: &str, id: u64, expected_instance: Option<&str>) ->
     );
     let session = session(id, &pane)?;
     let path = session.path(&root)?;
-    let ready = key(&root)?.is_some();
-    if action == "status" && path.with_extension("on").try_exists()? {
-        let _gate = store::lock(&root.join("lifecycle.lock"))?;
-        start_worker(&root)?;
-    }
-    let lifecycle = if config.is_some() {
-        Some(store::lock(&root.join("lifecycle.lock"))?)
-    } else {
-        None
-    };
     let guard = store::lock(&path.with_extension("lock"))?;
-    let mut state =
-        State::load(&path)?.unwrap_or_else(|| State::new(unbound(session.clone(), &pane)));
+    let mut state = load(&path)?.unwrap_or_else(|| State::new(unbound(session.clone(), &pane)));
     ensure!(state.binding.session == session, "托管会话身份已更改");
-    state.expire(store::now());
     if let Some((mode, style)) = config {
-        ensure!(ready, "请先在此节点配置 DeepSeek API Key");
         let current = bind(session, &pane)?;
         if !state.enabled || state.mode != mode || state.style != style || state.binding != current
         {
@@ -204,23 +148,13 @@ pub(super) fn control(action: &str, id: u64, expected_instance: Option<&str>) ->
             state.state = "watching".into();
             state.mode = mode.into();
             state.style = style.into();
-            marker(&path, true)?;
             state.save(&path)?;
-        }
-        if let Err(error) = start_worker(&root) {
-            state.enabled = false;
-            state.cancel("后台进程启动失败。");
-            state.state = "error".into();
-            state.save(&path)?;
-            marker(&path, false)?;
-            return Err(error);
         }
     } else if action == "disable" {
         state.cancel("用户已停止托管。");
         state.enabled = false;
         state.state = "disabled".into();
         state.save(&path)?;
-        marker(&path, false)?;
     } else if action == "forget" {
         state.forget();
         state.save(&path)?;
@@ -228,97 +162,48 @@ pub(super) fn control(action: &str, id: u64, expected_instance: Option<&str>) ->
         && (!matches_pane(&state.binding, &pane)?
             || bind(session, &pane).ok().as_ref() != Some(&state.binding))
     {
-        disarm(&mut state, &path, "活动窗格或前台程序已更改；请重新启用。")?;
+        disarm(&mut state, &path, "活动窗格或前台程序已更改，请重新启用。")?;
     }
-    let output = serde_json::to_string(&state.status(ready))?;
+    let output = serde_json::to_string(&state.status())?;
     drop(guard);
-    drop(lifecycle);
     println!("{output}");
     Ok(())
 }
 
-fn active(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for e in fs::read_dir(root)? {
-        let path = e?.path();
-        if path.extension().is_some_and(|s| s == "on")
+// A v0.5 background supervisor exits when its last marker disappears. Rewriting the
+// state under its own lock first also invalidates any model reply that is still in flight.
+pub(super) fn retire_legacy() -> Result<()> {
+    let root = store::root()?;
+    let _gate = store::lock(&root.join("lifecycle.lock"))?;
+    let mut first_error = None;
+    for item in fs::read_dir(&root)? {
+        let path = item?.path();
+        if path.extension().is_some_and(|ext| ext == "on")
             && path
                 .file_stem()
-                .and_then(|s| s.to_str())
+                .and_then(|stem| stem.to_str())
                 .and_then(|s| s.strip_prefix("session-"))
                 .is_some_and(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
         {
-            paths.push(path.with_extension("json"));
+            let result = retire_marker(&path.with_extension("json"));
+            if let Err(err) = result {
+                first_error.get_or_insert(err);
+            }
         }
     }
-    paths.sort();
-    Ok(paths)
+    first_error.map_or(Ok(()), Err)
 }
 
-// Caller serializes startup against other enables and the worker's idle shutdown.
-fn start_worker(root: &Path) -> Result<()> {
-    let lease = store::lock_file(&root.join("worker.lock"))?;
-    match lease.try_lock_exclusive() {
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-        r => r?,
-    }
-    FileExt::unlock(&lease)?;
-    let mut cmd = Command::new(env::current_exe()?);
-    cmd.arg("managed-worker")
-        .current_dir("/")
-        .env_remove("SSH_ORIGINAL_COMMAND")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Mark unexpected inherited descriptors close-on-exec; std's child-error pipe
-    // must remain usable until exec itself. Only async-signal-safe calls run here.
-    let maxfd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            for fd in 3..maxfd.min(i32::MAX as _) as i32 {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().context("不能启动节点托管进程")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child.try_wait()?.is_some() {
-            bail!("节点托管进程提前退出");
-        }
-        match lease.try_lock_exclusive() {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Ok(()) => FileExt::unlock(&lease)?,
-            Err(e) => return Err(e.into()),
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("节点托管进程启动超时");
-        }
-        thread::sleep(Duration::from_millis(30));
-    }
-    thread::spawn(move || child.wait());
-    Ok(())
+fn retire_marker(path: &Path) -> Result<()> {
+    let _guard = store::lock(&path.with_extension("lock"))?;
+    load(path)?;
+    remove_marker(path)
 }
 
+#[cfg(all(feature = "tls", feature = "ssh-probe"))]
 pub(super) fn resume() {
-    let result = (|| -> Result<()> {
-        let root = store::root()?;
-        let _guard = store::lock(&root.join("lifecycle.lock"))?;
-        if !active(&root)?.is_empty() {
-            start_worker(&root)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        eprintln!("无法恢复节点托管进程。");
+    if retire_legacy().is_err() {
+        eprintln!("无法停用旧版托管进程。");
     }
 }
 
@@ -514,152 +399,160 @@ fn checked_digit(binding: &Binding, screen: &Frame, digit: u8) -> Result<bool> {
     Ok(reply.status.success() && reply.stdout == b"tmux-link-managed-applied\n")
 }
 
-fn tick(root: &Path, path: &Path) -> Result<bool> {
-    let lock_path = path.with_extension("lock");
-    let binding = {
-        let _lock = store::lock(&lock_path)?;
-        let Some(mut state) = State::load(path)? else {
-            marker(path, false)?;
-            return Ok(false);
-        };
-        ensure!(
-            state.binding.session.path(root)? == path,
-            "托管身份和记录不符"
-        );
-        if !state.enabled {
-            marker(path, false)?;
-            return Ok(false);
+impl Frame {
+    fn digest(&self, alternate: bool) -> String {
+        let mut digest = Sha256::new();
+        for n in [self.width, self.height, self.cursor_x, self.cursor_y] {
+            digest.update(n.to_be_bytes());
         }
-        if state.pending.is_some() {
-            state.cancel("节点进程已重启，先前请求的执行结果须人工核对。");
-            state.state = "needsConfirmation".into();
-            state.save(path)?;
-        }
-        state.binding
-    };
-    let pane = match inspect(&binding) {
+        digest.update([alternate as u8]);
+        digest.update(self.text.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
+}
+
+fn prompt(screen: &Frame, alternate: bool) -> Option<(decision::Prompt, bool)> {
+    if let Some(p) = decision::detect(&screen.text) {
+        return Some((p, true));
+    }
+    alternate
+        .then(|| snapshot::clean_for_advisor(&screen.text))
+        .flatten()
+        .and_then(|text| decision::detect(&text))
+        .map(|p| (p, false))
+}
+
+fn fingerprint(prompt: &decision::Prompt) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(prompt)?)))
+}
+
+fn claim_current(state: &mut State, path: &Path) -> Result<Option<Value>> {
+    if !state.enabled || state.pending.is_some() || state.state == "budgetReached" {
+        return Ok(None);
+    }
+    let pane = match inspect(&state.binding) {
         Ok(pane) => pane,
         Err(_) => {
-            let _lock = store::lock(&lock_path)?;
-            if let Some(mut state) = State::load(path)?
-                && state.enabled
-                && state.binding == binding
-            {
-                disarm(&mut state, path, "会话、窗格或前台程序已更改，请重新启用。")?;
-            }
-            return Ok(false);
+            disarm(state, path, "活动窗格或前台程序已更改，请重新启用。")?;
+            return Ok(None);
         }
     };
-    let screen = sample(&binding)?;
-    let direct = decision::detect(&screen.text);
-    let whole_menu = direct.is_some();
-    // Recognized app decorations may be stripped for a recommendation. Input
-    // requires the actual full frame to pass the local menu policy.
-    let Some(prompt) = direct.or_else(|| {
-        pane.alternate
-            .then(|| snapshot::clean_for_advisor(&screen.text))
-            .flatten()
-            .and_then(|text| decision::detect(&text))
-    }) else {
-        return Ok(false);
+    let screen = sample(&state.binding)?;
+    let Some((prompt, _)) = prompt(&screen, pane.alternate) else {
+        return Ok(None);
     };
-    let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&prompt)?));
-    let (p, memory, key) = {
-        let _lock = store::lock(&lock_path)?;
-        let mut state = State::load(path)?.context("托管记录已删除")?;
-        if !state.enabled || state.binding != binding {
-            return Ok(false);
-        }
-        let Some(key) = key(root)? else {
-            state.enabled = false;
-            state.state = "error".into();
+    let fingerprint = fingerprint(&prompt)?;
+    let prior = state.state.clone();
+    let Some(p) = state.begin(store::now(), &fingerprint, &screen.digest(pane.alternate))? else {
+        if prior != state.state {
             state.save(path)?;
-            marker(path, false)?;
-            return Ok(false);
-        };
-        // Never transmit the API credential as pane content or recalled memory.
-        if serde_json::to_string(&prompt)?.contains(&key) || state.memory.contains(&key) {
-            return Ok(false);
         }
-        let prior = state.state.clone();
-        let Some(p) = state.begin(store::now(), &fingerprint, &prompt.question)? else {
-            if prior != state.state {
-                state.save(path)?;
-            }
-            return Ok(false);
-        };
-        state.save(path)?; // Claim this prompt and charge before the network request.
-        (p, state.memory, key)
+        return Ok(None);
     };
-    let result = decision::decide(&key, &prompt, &memory, &p.mode, &p.style);
-    let _lock = store::lock(&lock_path)?;
-    let Some(mut state) = State::load(path)? else {
-        return Ok(false);
+    let request = decision::request(&prompt, &state.memory, &p.mode, &p.style)?;
+    state.save(path)?;
+    Ok(Some(
+        json!({"ticket":format!("{:016x}",p.id),"request":request,"mode":p.mode,"style":p.style}),
+    ))
+}
+
+pub(super) fn claim(id: u64, instance: &str) -> Result<()> {
+    let unavailable = json!({"enabled":false,"claim":null});
+    let Ok(pane) = Pane::inspect(id) else {
+        println!("{unavailable}");
+        return Ok(());
     };
-    if let Ok(d) = &result {
-        state.usage(p.id, d.tokens);
+    if pane.instance() != instance {
+        println!("{unavailable}");
+        return Ok(());
     }
-    if !state.enabled
-        || state.binding != binding
-        || state.pending.as_ref().map(|p| p.id) != Some(p.id)
-    {
-        // A concurrent stop, forget or mode change cancelled authorization. Retain billing only.
-        state.save(path)?;
-        return Ok(false);
-    }
+    let session = session(id, &pane)?;
+    let path = session.path(&store::root()?)?;
+    let guard = store::lock(&path.with_extension("lock"))?;
+    let Some(mut state) = load(&path)? else {
+        println!("{unavailable}");
+        return Ok(());
+    };
+    ensure!(state.binding.session == session, "托管会话身份已更改");
+    let claim = claim_current(&mut state, &path)?;
+    drop(guard);
+    println!("{}", json!({"enabled":state.enabled,"claim":claim}));
+    Ok(())
+}
+
+fn complete(
+    state: &mut State,
+    path: &Path,
+    mut p: store::Pending,
+    reply: Option<&Value>,
+) -> Result<()> {
     let at = store::now();
-    let d = match result {
-        Ok(d) => d,
-        Err(err) => {
-            state.pending = None;
-            state.state = "error".into();
-            state.record(at, &p, "failed", &err.to_string(), None, None);
-            state.save(path)?;
-            return Ok(true);
-        }
-    };
-    let current = match inspect(&binding) {
-        Ok(current) => current,
-        Err(_) => {
-            disarm(&mut state, path, "分析后前台身份发生变化，已停止托管。")?;
-            return Ok(true);
-        }
-    };
-    if sample(&binding).ok().as_ref() != Some(&screen) {
+    let Some(envelope) = reply else {
         state.pending = None;
-        state.state = "watching".into();
+        state.state = "error".into();
         state.record(
             at,
             &p,
-            "interrupted",
-            "分析期间当前画面已变化，建议已撤回。",
+            "failed",
+            "未收到有效的手机模型响应，请核对原会话。",
             None,
             None,
         );
-        state.save(path)?;
-        return Ok(true);
+        return state.save(path);
+    };
+    let binding = &state.binding;
+    let Ok(current) = inspect(binding) else {
+        return disarm(state, path, "分析后前台身份发生变化，已停止托管。");
+    };
+    let verified = sample(binding)
+        .ok()
+        .filter(|frame| frame.digest(current.alternate) == p.frame_hash)
+        .and_then(|frame| {
+            let (prompt, whole) = prompt(&frame, current.alternate)?;
+            (fingerprint(&prompt).ok()? == p.fingerprint).then_some((frame, prompt, whole))
+        });
+    let Some((screen, prompt, whole_menu)) = verified else {
+        state.cancel("分析期间当前画面已变化，建议已撤回。");
+        state.state = "watching".into();
+        return state.save(path);
+    };
+    state.expire(store::now());
+    if state.pending.is_none() {
+        return state.save(path);
     }
+    p.question = prompt.question.clone();
+    let d = match decision::decode(envelope, &prompt) {
+        Ok(d) => d,
+        Err(_) => {
+            state.pending = None;
+            state.state = "error".into();
+            state.record(
+                at,
+                &p,
+                "failed",
+                "模型服务未返回有效的决策与用量。",
+                None,
+                None,
+            );
+            return state.save(path);
+        }
+    };
     let mut outcome = if p.mode == "observe" {
         "observed"
     } else {
         "needsConfirmation"
     };
+    let binding = &state.binding;
     let mut reason = d.reason.clone();
     if whole_menu
         && p.mode != "observe"
-        && let Some(decision::Action::Digit(digit)) = decision::action(
-            &prompt,
-            &d,
-            &binding.command,
-            current.alternate && pane.alternate,
-            &p.mode,
-        )
+        && let Some(decision::Action::Digit(digit)) =
+            decision::action(&prompt, &d, &binding.command, current.alternate, &p.mode)
     {
-        // Commit an at-most-once intent before sending. A crash at any later line
-        // creates an interrupted audit record on restart; it never replays the key.
-        state.pending.as_mut().unwrap().sending = true;
+        // Commit intent before sending. An interrupted commit can never replay a key.
+        state.pending.as_mut().context("手机请求已取消")?.sending = true;
         state.save(path)?;
-        if checked_digit(&binding, &screen, digit).unwrap_or(false) {
+        if checked_digit(binding, &screen, digit).unwrap_or(false) {
             outcome = "applied";
         } else {
             reason.push_str(" 当前输入目标未通过最终核对，请在原会话选择。");
@@ -680,69 +573,56 @@ fn tick(root: &Path, path: &Path) -> Result<bool> {
         d.choice.as_deref(),
         d.draft.as_deref(),
     );
-    state.save(path)?;
-    Ok(true)
+    state.save(path)
 }
 
-pub(super) fn supervise() -> Result<()> {
+pub(super) fn finish(id: u64, instance: &str, ticket: &str, outcome: Option<&[u8]>) -> Result<()> {
+    ensure!(tmux_link::valid_advice_ticket(ticket), "无效的手机请求");
     ensure!(
-        env::var_os("SSH_ORIGINAL_COMMAND").is_none(),
-        "worker 只能在节点本机运行"
+        outcome.is_none_or(|b| b.len() <= tmux_link::MAX_ADVICE_RESPONSE),
+        "手机响应过大"
     );
-    let root = store::root()?;
-    let lease = store::lock_file(&root.join("worker.lock"))?;
-    match lease.try_lock_exclusive() {
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-        r => r?,
+    let ticket = u64::from_str_radix(ticket, 16)?;
+    let pane = Pane::inspect(id)?;
+    ensure!(pane.instance() == instance, "managed session changed");
+    let session = session(id, &pane)?;
+    let path = session.path(&store::root()?)?;
+    let guard = store::lock(&path.with_extension("lock"))?;
+    let mut state = load(&path)?.context("托管记录不存在")?;
+    ensure!(
+        state.binding.session == session && state.has_charge(ticket),
+        "未知或过期的手机请求"
+    );
+    let envelope = outcome.and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    let charged = envelope
+        .as_ref()
+        .and_then(decision::usage)
+        .is_some_and(|n| state.usage(ticket, n));
+    if let Some(p) = state
+        .pending
+        .clone()
+        .filter(|p| state.enabled && p.id == ticket)
+    {
+        complete(&mut state, &path, p, envelope.as_ref())?;
+    } else if charged {
+        // A late receipt for a cancelled or expired request can only settle usage.
+        state.save(&path)?;
     }
-    let (tx, rx) = mpsc::channel::<(PathBuf, bool)>();
-    let mut running = HashSet::new();
-    let mut schedule: HashMap<PathBuf, (Instant, u64)> = HashMap::new();
-    loop {
-        let paths = active(&root)?;
-        if paths.is_empty() && running.is_empty() {
-            let _gate = store::lock(&root.join("lifecycle.lock"))?;
-            if active(&root)?.is_empty() {
-                drop(lease);
-                return Ok(());
-            }
-            continue;
-        }
-        let now = Instant::now();
-        schedule.retain(|p, _| running.contains(p) || paths.contains(p));
-        for path in paths {
-            schedule.entry(path).or_insert((now, 2));
-        }
-        let mut ready = schedule
-            .iter()
-            .filter(|(p, (due, _))| *due <= now && !running.contains(*p))
-            .map(|(p, (due, _))| (*due, p.clone()))
-            .collect::<Vec<_>>();
-        ready.sort();
-        for (_, path) in ready.into_iter().take(4usize.saturating_sub(running.len())) {
-            running.insert(path.clone());
-            let root = root.clone();
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let worked = std::panic::catch_unwind(|| tick(&root, &path))
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or(false);
-                let _ = tx.send((path, worked));
-            });
-        }
-        if let Ok((path, worked)) = rx.recv_timeout(Duration::from_secs(1)) {
-            running.remove(&path);
-            let previous = schedule.get(&path).map_or(2, |(_, n)| *n);
-            let delay = if worked { 2 } else { (previous * 2).min(20) };
-            schedule.insert(path, (Instant::now() + Duration::from_secs(delay), delay));
-        }
-    }
+    let output = serde_json::to_string(&state.status())?;
+    drop(guard);
+    println!("{output}");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        env,
+        path::PathBuf,
+        thread,
+        time::{Duration, Instant},
+    };
     fn state() -> State {
         let s = Session {
             id: 2,
@@ -766,28 +646,28 @@ mod tests {
     #[test]
     fn reserves_once_before_analysis_and_charges_actual_usage() {
         let mut s = state();
-        let p = s.begin(100, "original", "Example?").unwrap().unwrap();
-        assert!(s.begin(101, "other", "Other?").unwrap().is_none());
+        let p = s.begin(100, "original", "frame-a").unwrap().unwrap();
+        assert!(s.begin(101, "other", "frame-b").unwrap().is_none());
         let mut s: State = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         s.cancel("restart");
         s.usage(p.id, 439);
-        assert!(s.begin(101, "original", "Example?").unwrap().is_none());
-        assert_eq!(s.status(true).tokens_today, 439);
+        assert!(s.begin(101, "original", "frame-a").unwrap().is_none());
+        assert_eq!(s.status().tokens_today, 439);
         for i in 1..12 {
-            s.begin(100 + i, &format!("q-{i}"), "Question?")
+            s.begin(100 + i, &format!("q-{i}"), "frame")
                 .unwrap()
                 .unwrap();
             s.pending = None;
         }
-        assert!(s.begin(200, "over", "Over?").unwrap().is_none());
+        assert!(s.begin(200, "over", "frame").unwrap().is_none());
         assert_eq!(s.state, "budgetReached");
-        assert!(s.begin(86_500, "new", "New?").unwrap().is_some());
-        assert_eq!(s.status(true).calls_today, 12);
+        assert!(s.begin(86_500, "new", "frame").unwrap().is_some());
+        assert_eq!(s.status().calls_today, 12);
     }
     #[test]
     fn forget_cancels_in_flight_releases_content_and_retains_dedup_and_budget() {
         let mut s = state();
-        let p = s.begin(100, "p", "Format?").unwrap().unwrap();
+        let p = s.begin(100, "p", "frame").unwrap().unwrap();
         s.record(
             100,
             &p,
@@ -800,9 +680,82 @@ mod tests {
         s.forget();
         assert!(s.records.is_empty() && s.memory.is_empty() && s.pending.is_none());
         s.usage(p.id, 123);
-        assert_eq!(s.status(true).tokens_today, 123);
-        assert!(s.begin(101, "p", "Format?").unwrap().is_none());
+        assert_eq!(s.status().tokens_today, 123);
+        assert!(s.begin(101, "p", "frame").unwrap().is_none());
     }
+    #[test]
+    fn expired_and_uncertain_sends_do_not_reissue_or_replay() {
+        let mut s = state();
+        let p = s
+            .begin(100, "prompt-digest", "frame-digest")
+            .unwrap()
+            .unwrap();
+        let saved = serde_json::to_value(s.pending.as_ref().unwrap()).unwrap();
+        assert!(saved.get("question").is_none());
+        assert!(!s.expire(219));
+        assert!(s.expire(220));
+        assert!(s.pending.is_none());
+        assert!(
+            s.begin(221, "prompt-digest", "another-frame")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(s.records[0].outcome, "interrupted");
+        assert!(s.usage(p.id, 731));
+        assert!(!s.usage(p.id, 963));
+        assert_eq!(s.status().tokens_today, 731);
+
+        s.begin(222, "next-prompt", "next-frame").unwrap().unwrap();
+        s.pending.as_mut().unwrap().sending = true;
+        let mut recovered: State =
+            serde_json::from_value(serde_json::to_value(s).unwrap()).unwrap();
+        assert!(recovered.expire(222));
+        assert!(recovered.records[0].reason.contains("提交意图"));
+        assert!(
+            recovered
+                .begin(223, "next-prompt", "next-frame")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retiring_legacy_authorization_preserves_records_and_disarms_old_workers() {
+        let dir = env::temp_dir().join(format!("managed-migrate-{:016x}", store::nonce().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("session-fixture.json");
+        let mut s = state();
+        let now = store::now();
+        let mut p = s.begin(now, "abc", "digest").unwrap().unwrap();
+        p.question = "Previous safe question?".into();
+        s.record(now, &p, "applied", "Previous reason", Some("CSV"), None);
+        s.usage(p.id, 42);
+        s.pending = None;
+        s.begin(now, "ghi", "digest").unwrap().unwrap();
+        let mut legacy = serde_json::to_value(&s).unwrap();
+        legacy.as_object_mut().unwrap().remove("phone_enabled");
+        legacy["enabled"] = json!(true);
+        legacy["pending"]["question"] = json!("Legacy in-flight question?");
+        for field in ["created_at", "frame_hash", "fingerprint"] {
+            legacy["pending"].as_object_mut().unwrap().remove(field);
+        }
+        store::write(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        store::write(&path.with_extension("on"), b"").unwrap();
+        let recovered = load(&path).unwrap().unwrap();
+        assert!(!recovered.enabled && recovered.pending.is_none());
+        assert_eq!(recovered.records[0].outcome, "interrupted");
+        assert_eq!(recovered.records[1].question, "Previous safe question?");
+        assert!(recovered.memory.contains("Previous reason"));
+        assert_eq!(recovered.status().calls_today, 2);
+        assert_eq!(recovered.status().tokens_today, 42);
+        assert!(!path.with_extension("on").exists());
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("enabled").is_none());
+        assert_eq!(saved["phone_enabled"], false);
+        assert_eq!(load(&path).unwrap().unwrap().records.len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn session_number_reuse_and_other_servers_have_distinct_slots() {
         let s = state();
@@ -830,14 +783,14 @@ mod tests {
     #[test]
     fn memory_outlives_the_budget_window_and_never_resurrects_an_old_binding() {
         let mut s = state();
-        let mut p = s.begin(100, "abc", "Old question?").unwrap().unwrap();
+        let mut p = s.begin(100, "abc", "frame").unwrap().unwrap();
         for at in 100..180 {
             s.record(at, &p, "observed", "Old reason", Some("Old choice"), None);
         }
         s.expire(90_000);
         assert!(s.memory.contains("Old reason") && s.memory.contains("待人工核实"));
         assert_eq!(s.records.len(), 64);
-        assert_eq!(s.status(true).calls_today, 0);
+        assert_eq!(s.status().calls_today, 0);
         s.reset_memory();
         p.question = "New question?".into();
         s.record(

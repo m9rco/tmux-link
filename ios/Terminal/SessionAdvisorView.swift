@@ -699,7 +699,7 @@ private func failureSection(_ errors: [String]) -> some View {
   }
 }
 
-private final class AdvisorKeyStatus: ObservableObject {
+final class AdvisorKeyStatus: ObservableObject {
   @Published var saved = false
   @Published var errorMessage: String?
 
@@ -709,7 +709,7 @@ private final class AdvisorKeyStatus: ObservableObject {
   }
 }
 
-private struct AdvisorKeySection: View {
+struct AdvisorKeySection: View {
   @EnvironmentObject private var keyStatus: AdvisorKeyStatus
   @Binding var editing: Bool
   @FocusState private var focused: Bool

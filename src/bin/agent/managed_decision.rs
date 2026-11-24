@@ -1,11 +1,7 @@
 //! Recommendations are data. Only an index grounded in this exact prompt can become a local action.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    io::{Read, Write},
-    process::{Command, Stdio},
-};
 
 #[path = "managed_menu.rs"]
 mod menu;
@@ -15,7 +11,6 @@ pub(crate) struct Decision {
     pub choice: Option<String>,
     pub reason: String,
     pub draft: Option<String>,
-    pub tokens: u64,
     index: Option<usize>,
     prompt: Prompt,
 }
@@ -79,121 +74,6 @@ fn configuration(mode: &str, style: &str) -> Result<String> {
     ))
 }
 
-// curl parses config from a private pipe. Its argument list never contains credentials or pane data.
-fn curl_quote(value: &str) -> String {
-    let mut out = String::from("\"");
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-const MAX_RESPONSE: usize = 64 * 1024;
-
-fn call(key: &str, body: &str) -> Result<Vec<u8>> {
-    let config = format!(
-        "header = {}\ndata-binary = {}\n",
-        curl_quote(&format!("Authorization: Bearer {key}")),
-        curl_quote(body)
-    );
-    let mut curl = Command::new("/usr/bin/curl");
-    curl.env_clear().current_dir("/");
-    // Keep system proxy/CA settings, without passing agent credentials, loader hooks or TLS key logs.
-    for name in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        "NO_PROXY",
-        "no_proxy",
-        "CURL_CA_BUNDLE",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            curl.env(name, value);
-        }
-    }
-    let mut child = curl
-        .args([
-            "--disable",
-            "--silent",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--no-location",
-            "--max-redirs",
-            "0",
-            "--connect-timeout",
-            "8",
-            "--max-time",
-            "30",
-            "--max-filesize",
-            "65536",
-            "--header",
-            "Content-Type: application/json",
-            "--config",
-            "-",
-            "--write-out",
-            "\\n%{http_code}",
-            "--url",
-            "https://api.deepseek.com/chat/completions",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("无法启动 DeepSeek HTTPS 客户端")?;
-    let write = child
-        .stdin
-        .take()
-        .context("无法准备模型请求")?
-        .write_all(config.as_bytes());
-    let mut bytes = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .context("无法读取模型响应")?
-        .take((MAX_RESPONSE + 5) as u64)
-        .read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() > MAX_RESPONSE + 4 || write.is_err() {
-        let _ = child.kill();
-    }
-    let status = child.wait().context("模型请求未完成")?;
-    ensure!(
-        write.is_ok() && read.is_ok() && bytes.len() <= MAX_RESPONSE + 4,
-        "模型请求传输失败"
-    );
-    if status.code() == Some(28) {
-        bail!("DeepSeek 请求超时");
-    }
-    ensure!(status.success(), "DeepSeek 连接失败");
-    let split = bytes
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .context("模型服务响应无效")?;
-    match &bytes[split + 1..] {
-        b"200" => {
-            bytes.truncate(split);
-            Ok(bytes)
-        }
-        b"401" | b"403" => bail!("DeepSeek 密钥未获授权"),
-        b"402" => bail!("DeepSeek 账户余额不足"),
-        b"429" => bail!("DeepSeek 请求频率受限"),
-        b"408" | b"504" => bail!("DeepSeek 请求超时"),
-        _ => bail!("DeepSeek 服务暂不可用"),
-    }
-}
-
 #[derive(Deserialize)]
 struct Reply {
     choice: Option<usize>,
@@ -202,19 +82,19 @@ struct Reply {
     draft: Option<String>,
 }
 
-fn decode(bytes: &[u8], prompt: &Prompt, key: &str) -> Result<Decision> {
-    let envelope: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("模型服务响应无效"))?;
-    let tokens = envelope
-        .pointer("/usage/total_tokens")
-        .and_then(|v| v.as_u64())
-        .filter(|n| *n > 0)
-        .context("模型服务未返回真实 token 用量")?;
+pub(super) fn usage(envelope: &serde_json::Value) -> Option<u64> {
+    envelope
+        .pointer("/usage/total_tokens")?
+        .as_u64()
+        .filter(|n| (1..=1_000_000).contains(n))
+}
+
+pub(super) fn decode(envelope: &serde_json::Value, prompt: &Prompt) -> Result<Decision> {
+    usage(envelope).context("模型服务未返回真实 token 用量")?;
     let mut result = Decision {
         choice: None,
         reason: "模型回复不完整或未给出有效选项，请人工确认。".into(),
         draft: None,
-        tokens,
         index: None,
         prompt: prompt.clone(),
     };
@@ -231,16 +111,16 @@ fn decode(bytes: &[u8], prompt: &Prompt, key: &str) -> Result<Decision> {
     else {
         return Ok(result);
     };
-    if content.contains(key) {
-        return Ok(result);
-    }
     let Ok(reply) = serde_json::from_str::<Reply>(content) else {
         return Ok(result);
     };
     let reason = excerpt(&reply.reason, 160);
     if reason.is_empty()
-        || reply.reason.contains(key)
-        || reply.draft.as_ref().is_some_and(|d| d.contains(key))
+        || reply.reason.lines().any(menu::sensitive)
+        || reply
+            .draft
+            .as_ref()
+            .is_some_and(|d| d.lines().any(menu::sensitive))
     {
         return Ok(result);
     }
@@ -280,32 +160,23 @@ fn decode(bytes: &[u8], prompt: &Prompt, key: &str) -> Result<Decision> {
     Ok(result)
 }
 
-pub(crate) fn decide(
-    key: &str,
+pub(super) fn request(
     prompt: &Prompt,
     memory: &str,
     mode: &str,
     style: &str,
-) -> Result<Decision> {
-    ensure!(
-        !key.is_empty() && key.len() <= 512 && key.bytes().all(|b| (33..=126).contains(&b)),
-        "DeepSeek 密钥格式无效"
-    );
-    let memory = memory.chars().take(4096).collect::<String>();
-    ensure!(
-        !memory.contains(key)
-            && !prompt.question.contains(key)
-            && !prompt.background.iter().any(|s| s.contains(key))
-            && !prompt.options.iter().any(|s| s.contains(key)),
-        "输入含当前 API 密钥，已停止请求"
-    );
-    let user =
-        json!({"question":prompt.question,"options":prompt.options,"navigation":prompt.navigation,"current_background":prompt.background,"memory":excerpt(&memory, 480)})
-            .to_string();
-    let body = json!({"model":"deepseek-flash", "thinking":{"type":"disabled"}, "response_format":{"type":"json_object"},
-        "max_tokens":384, "messages":[{"role":"system","content":configuration(mode, style)?},{"role":"user","content":user}]}).to_string();
-    let bytes = call(key, &body)?;
-    decode(&bytes, prompt, key)
+) -> Result<serde_json::Value> {
+    let user = json!({
+        "question": prompt.question, "options": prompt.options, "navigation": prompt.navigation,
+        "current_background": prompt.background, "memory": excerpt(memory, 480)
+    });
+    Ok(json!({
+        "response_format": {"type": "json_object"}, "max_tokens": 384,
+        "messages": [
+            {"role": "system", "content": configuration(mode, style)?},
+            {"role": "user", "content": user.to_string()}
+        ]
+    }))
 }
 
 #[cfg(test)]
@@ -316,8 +187,8 @@ mod tests {
     const PREF: &str = "Which language should I use for my reply?\n1. 请用简体中文回复。\n2. 请用英文回复。\nPress 1-2 to submit";
     const OPEN: &str = "Which constraints should I account for?\n>\nEnter to submit";
 
-    fn envelope(content: serde_json::Value, finish: &str) -> Vec<u8> {
-        json!({"choices":[{"finish_reason":finish,"message":{"content":content.to_string()}}],"usage":{"total_tokens":273}}).to_string().into_bytes()
+    fn envelope(content: serde_json::Value, finish: &str) -> serde_json::Value {
+        json!({"choices":[{"finish_reason":finish,"message":{"content":content.to_string()}}],"usage":{"total_tokens":273}})
     }
 
     fn decision(prompt: &Prompt, choice: serde_json::Value) -> Decision {
@@ -325,7 +196,7 @@ mod tests {
             json!({"choice":choice,"reason":"符合显示要求。","draft":"这是一段待审核的文字。","action":"Enter","risk":"safe"}),
             "stop",
         );
-        decode(&bytes, prompt, "fixture-key").unwrap()
+        decode(&bytes, prompt).unwrap()
     }
 
     #[test]
@@ -333,7 +204,6 @@ mod tests {
         let p = detect(MENU).unwrap();
         let d = decision(&p, json!(2));
         assert_eq!(d.choice.as_deref(), Some("JSON"));
-        assert_eq!(d.tokens, 273);
         for mode in ["menu", "assist"] {
             assert_eq!(
                 action(&p, &d, "codex", true, mode),
@@ -447,17 +317,18 @@ mod tests {
             json!(["JSON"]),
         ] {
             let d = decision(&p, value);
-            assert_eq!((d.tokens, d.choice), (273, None));
+            assert!(d.choice.is_none());
         }
         let truncated = envelope(
             json!({"choice":1,"reason":"valid JSON but cut off"}),
             "length",
         );
-        let d = decode(&truncated, &p, "fixture-key").unwrap();
-        assert_eq!((d.tokens, d.choice), (273, None));
-        let echoed = envelope(json!({"choice":1,"reason":"fixture-key"}), "stop");
-        assert!(decode(&echoed, &p, "fixture-key").unwrap().choice.is_none());
-        assert!(decode(b"{}", &p, "fixture-key").is_err());
+        assert_eq!(usage(&truncated), Some(273));
+        let d = decode(&truncated, &p).unwrap();
+        assert!(d.choice.is_none());
+        let echoed = envelope(json!({"choice":1,"reason":"sk-secret-fixture"}), "stop");
+        assert!(decode(&echoed, &p).unwrap().choice.is_none());
+        assert!(decode(&json!({}), &p).is_err());
     }
 
     #[test]
@@ -503,7 +374,6 @@ mod tests {
         );
         assert!(configuration("unknown", "concise").is_err());
         assert!(configuration("menu", "unknown").is_err());
-        assert_eq!(curl_quote("a\"\nb\\c"), "\"a\\\"\\nb\\\\c\"");
     }
     #[test]
     fn advisory_navigation_keeps_focus_checks_and_only_grounded_multiple_choices() {
@@ -526,7 +396,6 @@ mod tests {
                     "stop",
                 ),
                 &p,
-                "fixture-key",
             )
             .unwrap()
         };

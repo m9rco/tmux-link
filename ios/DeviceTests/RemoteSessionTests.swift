@@ -21,6 +21,7 @@ final class RemoteSessionTests: XCTestCase {
     let benchmarkSessionID: Int64?
     let decisionFixtureIDs: [Int64]?
     let snapshotFixtureID: Int64?
+    let managedQuestionFixtureID: Int64?
     let conversationFixtureID: Int64?
     let conversationFixturePane: UInt64?
   }
@@ -61,27 +62,67 @@ final class RemoteSessionTests: XCTestCase {
     XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
   }
 
-  func testManagedStatusUsesPinnedSessionWithoutEnablingIt() async throws {
-    let config: Connection
+  private func managedConfiguration() throws -> Connection {
     if let fixture = ProcessInfo.processInfo.environment["TMUX_LINK_MANAGED_TEST_FIXTURE"] {
-      config = try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
-    } else {
-      config = try configuration()
+      return try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
     }
+    return try configuration()
+  }
+
+  func testManagedStatusUsesPinnedSessionWithoutEnablingIt() async throws {
+    let config = try managedConfiguration()
     guard let id = config.snapshotFixtureID else { throw XCTSkip("No isolated decision pane configured") }
     let client = ClientProfile(name: "Managed fixture", host: config.host, port: config.port,
                                user: config.user, pin: config.fingerprint)
     let directory = try await SessionDirectory.fetch(client)
     let fixture = config.sessionName.hasPrefix("tmux-link-managed-e2e-") ? config.sessionName : "ios-decision-fixture"
     let session = try XCTUnwrap(directory.first { $0.id == id && $0.name == fixture })
-    XCTAssertEqual(session.managedVersion, 1)
+    XCTAssertEqual(session.managedVersion, 2)
     let instance = try XCTUnwrap(session.managedInstance)
     let status = try await TerminalTransport.managed(client, sessionID: id, action: .status, instance: instance)
     XCTAssertFalse(status.enabled)
-    XCTAssertFalse(status.keyReady)
+    let idle = try await TerminalTransport.claim(client, sessionID: id, instance: instance)
+    XCTAssertFalse(idle.enabled)
+    XCTAssertNil(idle.claim)
     XCTAssertTrue(status.records.isEmpty)
     XCTAssertEqual(status.callsToday, 0)
     XCTAssertEqual(status.tokensToday, 0)
+  }
+
+  func testForegroundPhoneCompletesAnIsolatedQuestion() async throws {
+    let config = try managedConfiguration()
+    guard let id = config.managedQuestionFixtureID else { throw XCTSkip("No managed question fixture configured") }
+    let client = ClientProfile(name: "Phone advice fixture", host: config.host, port: config.port,
+                               user: config.user, pin: config.fingerprint)
+    let directory = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(directory.first {
+      $0.id == id && $0.name.hasPrefix("tmux-link-managed-question-") && $0.managedVersion == 2
+    })
+    let instance = try XCTUnwrap(session.managedInstance)
+    let enabled = try await TerminalTransport.managed(client, sessionID: id, action: .enable(.observe, .balanced), instance: instance)
+    XCTAssertTrue(enabled.enabled)
+    do {
+      let result = try await TerminalTransport.claim(client, sessionID: id, instance: instance)
+      let claim = try XCTUnwrap(result.claim)
+      let question = "What audience should the draft address?"
+      XCTAssertTrue(claim.request.messages.last?.content.contains(question) == true)
+      let provider = Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"reason\":\"The audience determines the wording.\",\"draft\":\"Write for new contributors.\"}"}}],"usage":{"total_tokens":31}}"#.utf8)
+      let envelope = try ManagedPhoneModel.sanitizedResponse(provider, key: "fixture-only-secret")
+      let done = try await TerminalTransport.finish(client, sessionID: id, instance: instance, ticket: claim.ticket, envelope: envelope)
+      XCTAssertEqual(done.callsToday, 1)
+      XCTAssertEqual(done.tokensToday, 31)
+      XCTAssertEqual(done.records.first?.question, question)
+      XCTAssertEqual(done.records.first?.outcome, "observed")
+      XCTAssertEqual(done.records.first?.draft, "Write for new contributors.")
+      XCTAssertFalse(done.memory.isEmpty)
+      let unchanged = try await TerminalTransport.claim(client, sessionID: id, instance: instance)
+      XCTAssertNil(unchanged.claim)
+    } catch {
+      _ = try? await TerminalTransport.managed(client, sessionID: id, action: .disable, instance: instance)
+      throw error
+    }
+    let paused = try await TerminalTransport.managed(client, sessionID: id, action: .disable, instance: instance)
+    XCTAssertFalse(paused.enabled)
   }
 
   func testBoundConversationUsesLatestReply() async throws {

@@ -35,12 +35,16 @@ final class App: UIResponder, UIApplicationDelegate {
 
 final class Scene: UIResponder, UIWindowSceneDelegate {
   var window: UIWindow?
+  private let activity = WorkspaceActivity()
   private let enrollment = EnrollmentStatus()
   private let clientLinks = ClientImportLinks()
 
   func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) {
     for context in contexts { clientLinks.open(context.url) }
   }
+
+  func sceneDidBecomeActive(_ scene: UIScene) { activity.isActive = true }
+  func sceneWillResignActive(_ scene: UIScene) { activity.isActive = false }
 
   func sceneWillEnterForeground(_ scene: UIScene) {
     do {
@@ -59,7 +63,7 @@ final class Scene: UIResponder, UIWindowSceneDelegate {
     for context in connectionOptions.urlContexts { clientLinks.open(context.url) }
     let window = UIWindow(windowScene: windowScene)
     window.rootViewController = UIHostingController(
-      rootView: Workspace(enrollment: enrollment, clientLinks: clientLinks))
+      rootView: Workspace(enrollment: enrollment, clientLinks: clientLinks, activity: activity))
     window.makeKeyAndVisible()
     self.window = window
   }

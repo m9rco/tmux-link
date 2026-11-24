@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     env,
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::process::CommandExt,
     process::Command,
 };
@@ -88,6 +88,38 @@ fn manage(action: &str, id: &str, instance: Option<&str>) -> Result<()> {
     managed::control(action, id.parse()?, instance)
 }
 
+fn phone_advice(request: &str) -> Result<()> {
+    let mut words = request.split(' ');
+    let action = words.next().context("invalid advisor request")?;
+    let id = words.next().context("missing session ID")?;
+    ensure!(
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        "invalid session ID"
+    );
+    let id = id.parse()?;
+    let instance = words.next().context("missing session instance")?;
+    ensure!(
+        tmux_link::valid_managed_instance(instance),
+        "invalid session instance"
+    );
+    match (action, words.next(), words.next()) {
+        ("claim", None, None) => managed::claim(id, instance),
+        ("finish", Some(ticket), None) if tmux_link::valid_advice_ticket(ticket) => {
+            let mut response = Vec::new();
+            io::stdin()
+                .take(tmux_link::MAX_ADVICE_RESPONSE as u64 + 1)
+                .read_to_end(&mut response)?;
+            ensure!(
+                !response.is_empty() && response.len() <= tmux_link::MAX_ADVICE_RESPONSE,
+                "invalid advice response size"
+            );
+            let envelope = (response != b"null").then_some(response.as_slice());
+            managed::finish(id, instance, ticket, envelope)
+        }
+        _ => bail!("invalid advisor request"),
+    }
+}
+
 // Both the session list and mobile PTY use UTF-8 even when sshd supplies no locale.
 fn attach() -> Result<()> {
     let command = env::var_os("SSH_ORIGINAL_COMMAND");
@@ -95,6 +127,9 @@ fn attach() -> Result<()> {
         .as_deref()
         .map(|v| v.to_str().context("invalid request"))
         .transpose()?;
+    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-advisor-v2 ")) {
+        return phone_advice(request);
+    }
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-managed-v1 ")) {
         let (action, id) = request.split_once(' ').context("invalid managed request")?;
         let (action, instance) =
@@ -153,7 +188,7 @@ fn attach() -> Result<()> {
                 let fields = String::from_utf8_lossy(&details.stdout);
                 let (instance, directory) = details.status.success()
                     .then(|| fields.strip_suffix('\n').and_then(|s| s.split_once('\n'))).flatten().unzip();
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 1, "managedInstance": instance}))
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 2, "managedInstance": instance}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);
@@ -196,12 +231,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         [op] if op == "attach" => attach(),
+        [op] if op == "migrate-managed" && env::var_os("SSH_ORIGINAL_COMMAND").is_none() => {
+            managed::retire_legacy()
+        }
         [op, action, id] if op == "managed" => manage(action, id, None),
         [op] if op == "managed-key" && env::var_os("SSH_ORIGINAL_COMMAND").is_none() => {
-            managed::set_key()
-        }
-        [op] if op == "managed-worker" && env::var_os("SSH_ORIGINAL_COMMAND").is_none() => {
-            managed::supervise()
+            bail!("请在 iPhone 的 Tmux Link 中设置模型 API Key。节点不接收模型密钥。")
         }
         [op, rest @ ..] if op == "bind-session" || op == "unbind-session" => {
             codemaker::configure(op, rest)
@@ -252,7 +287,7 @@ fn main() -> Result<()> {
                 .into())
         }
         _ => bail!(
-            "usage: agent attach | agent managed ACTION SESSION_ID | agent managed-key | agent snapshot SESSION_ID | agent bind-session --help | agent unbind-session SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
+            "usage: agent attach | agent managed ACTION SESSION_ID | agent snapshot SESSION_ID | agent bind-session --help | agent unbind-session SESSION_ID | agent tunnel SSH_HOST /absolute/tunnel.sock INNER_SSH_PORT | agent import-link --help | agent pair --center HOST"
         ),
     }
 }

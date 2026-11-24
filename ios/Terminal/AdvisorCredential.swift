@@ -2,6 +2,7 @@ import Foundation
 import Security
 
 enum AdvisorCredential {
+  static let changed = Notification.Name("TmuxLinkAdvisorCredentialChanged")
   private static let query: [String: Any] = [
     kSecClass as String: kSecClassGenericPassword,
     kSecAttrService as String: "dev.tmuxlink.session-advisor",
@@ -35,6 +36,7 @@ enum AdvisorCredential {
       status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     }
     guard status == errSecSuccess else { throw RelayError("无法将 API Key 保存到本机钥匙串。") }
+    NotificationCenter.default.post(name: changed, object: nil)
   }
 
   static func remove() throws {
@@ -42,5 +44,6 @@ enum AdvisorCredential {
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw RelayError("无法移除本机的 API Key。")
     }
+    NotificationCenter.default.post(name: changed, object: nil)
   }
 }

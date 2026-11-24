@@ -68,7 +68,6 @@ struct ManagedStatus: Codable {
 
   let enabled: Bool
   let state: String
-  let keyReady: Bool
   let mode: String
   let style: String
   let callsToday: Int
@@ -83,6 +82,9 @@ struct ManagedSessionView: View {
   let session: RemoteSession
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
+  @EnvironmentObject private var controller: ManagedSessionController
+  @StateObject private var keyStatus = AdvisorKeyStatus()
+  @State private var editingKey = false
   @State private var status: ManagedStatus?
   @State private var mode = ManagedMode.menu
   @State private var style = ManagedStyle.balanced
@@ -96,15 +98,20 @@ struct ManagedSessionView: View {
   private var polling: Bool { scenePhase == .active && status?.enabled == true }
   private var changing: Bool { pending != nil && pending != .status }
 
+  private var target: ManagedSessionController.Target {
+    .init(clientID: client.id, sessionID: session.id, name: session.name, instance: session.managedInstance ?? "")
+  }
+
   var body: some View {
     NavigationStack {
       Form {
-        if session.managedVersion != 1 {
+        if session.managedVersion != 2 {
           Section {
-            Text(session.managedVersion == nil ? "此节点尚未支持会话托管。请更新节点上的 tmux-link-agent。" : "节点的托管协议与此版本不兼容，请检查手机和节点更新。")
+            Text((session.managedVersion ?? 0) < 2 ? "手机托管需要节点协议 v2。请更新节点上的 tmux-link-agent，再刷新会话列表。" : "请更新手机 App 以使用此节点的托管协议。")
               .accessibilityIdentifier("managed.unsupported")
           }
         } else {
+          AdvisorKeySection(editing: $editingKey).environmentObject(keyStatus)
           if let errorMessage {
             Section {
               Text(verbatim: errorMessage).foregroundStyle(.orange).textSelection(.enabled)
@@ -127,7 +134,7 @@ struct ManagedSessionView: View {
         ToolbarItem(placement: .cancellationAction) {
           Button("关闭") { dismiss() }.accessibilityIdentifier("managed.close")
         }
-        if session.managedVersion == 1 {
+        if session.managedVersion == 2 {
           ToolbarItem(placement: .confirmationAction) {
             Button { request(.status) } label: { Image(systemName: "arrow.clockwise") }
               .disabled(pending != nil).accessibilityLabel("刷新托管状态")
@@ -153,20 +160,25 @@ struct ManagedSessionView: View {
       }
     }
     .onDisappear {
-      task?.cancel()
-      task = nil
-      pending = nil
       refreshPending = false
+      if pending == .status {
+        task?.cancel()
+        task = nil
+        pending = nil
+      }
     }
   }
 
   @ViewBuilder
   private func controls(_ status: ManagedStatus) -> some View {
     Section {
-      LabeledContent("本会话托管", value: status.enabled ? "已启用" : "已关闭")
+      LabeledContent("本会话托管", value: !status.enabled ? "已关闭" : (controller.targets.contains(target) ? "本机已启用" : "本机未接管"))
         .accessibilityIdentifier("managed.enabled")
       if status.state != "disabled" {
         LabeledContent("节点状态", value: stateTitle(status.state)).accessibilityIdentifier("managed.state")
+      }
+      if let notice = controller.notices[target] {
+        Text(notice).font(.footnote).foregroundStyle(.orange)
       }
       if let pending {
         ProgressView(pending == .status ? "正在读取节点状态…" : "正在更新节点…")
@@ -178,7 +190,7 @@ struct ManagedSessionView: View {
           .disabled(changing).accessibilityIdentifier("managed.disable")
       }
     } footer: {
-      Text("托管在节点上运行。手机锁屏或离开应用后，节点仍会处理这个会话。")
+      Text("打开 Tmux Link 时，iPhone 会处理本机启用的会话。锁屏或切到其他 App 时暂停，返回后继续。")
     }
 
     Section {
@@ -190,19 +202,16 @@ struct ManagedSessionView: View {
         ForEach(ManagedStyle.allCases, id: \.self) { Text($0.title).tag($0) }
       }.accessibilityIdentifier("managed.style")
       Text(style.explanation).font(.footnote).foregroundStyle(.secondary)
-      if !status.keyReady {
-        VStack(alignment: .leading, spacing: 6) {
-          Text("请在节点上为运行代理的用户配置 DeepSeek 密钥，再刷新本页。")
-          Text(verbatim: "tmux-link-agent managed-key").font(.callout.monospaced()).textSelection(.enabled)
-        }.accessibilityIdentifier("managed.key.setup")
+      Button(status.enabled ? (controller.targets.contains(target) ? "保存调整" : "在这部 iPhone 接管") : "启用本会话托管") {
+        request(.enable(mode, style))
       }
-      Button(status.enabled ? "保存调整" : "启用本会话托管") { request(.enable(mode, style)) }
-        .disabled(!status.keyReady || errorMessage != nil || (status.enabled && !hasChanges(status)))
+        .disabled(!keyStatus.saved || errorMessage != nil ||
+                  (status.enabled && controller.targets.contains(target) && !hasChanges(status)))
         .accessibilityIdentifier(status.enabled ? "managed.save" : "managed.enable")
     } header: {
       Text("托管设置")
     } footer: {
-      Text("启用后，节点使用自己的 API Key，将本会话筛选后的当前问题、候选项和最近的简短记忆发送给 DeepSeek。风格影响取舍和措辞，操作范围由模式决定。")
+      Text("iPhone 将当前问题、选项与简短记忆发送给 DeepSeek，密钥保存在本机钥匙串。节点记录选择与理由，并按所选模式处理。")
     }
     .disabled(changing)
   }
@@ -276,7 +285,7 @@ struct ManagedSessionView: View {
   }
 
   private func request(_ action: ManagedAction) {
-    guard session.managedVersion == 1 else { return }
+    guard session.managedVersion == 2 else { return }
     guard let instance = session.managedInstance, !instance.isEmpty else {
       errorMessage = "缺少会话实例标识，请返回会话列表刷新。"
       return
@@ -290,6 +299,7 @@ struct ManagedSessionView: View {
       if action == .status { refreshPending = true }
       return
     }
+    if action == .disable { controller.remove(target) }
     pending = action
     errorMessage = nil
     task = Task {
@@ -297,7 +307,7 @@ struct ManagedSessionView: View {
         if action != .status {
           let current = try await SessionDirectory.fetch(client)
           guard current.contains(where: {
-            $0.id == session.id && $0.name == session.name && $0.managedVersion == 1 && $0.managedInstance == instance
+            $0.id == session.id && $0.name == session.name && $0.managedVersion == 2 && $0.managedInstance == instance
           }) else {
             throw RelayError("此会话已关闭、更名或实例已更换，请返回会话列表刷新。")
           }
@@ -310,6 +320,9 @@ struct ManagedSessionView: View {
           style = ManagedStyle(rawValue: fresh.style) ?? .balanced
         }
         status = fresh
+        if fresh.enabled {
+          if case .enable = action { controller.enable(target) }
+        } else { controller.remove(target) }
         if action == .forget { copiedDraft = nil }
       } catch {
         guard !Task.isCancelled else { return }

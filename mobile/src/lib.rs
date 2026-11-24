@@ -530,6 +530,58 @@ pub unsafe extern "C" fn tl_managed_secure(
     }
 }
 
+/// Claim a question or return a model reply through the pinned SSH channel.
+/// # Safety
+/// Same ownership and identity requirements as tl_managed_secure. Supply a valid
+/// instance C string. For finish, provide a ticket and a readable JSON buffer.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_advice_secure(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    session_id: i64,
+    instance: *const c_char,
+    ticket: *const c_char,
+    payload: *const u8,
+    size: usize,
+    cert_der: *const u8,
+    cert_len: usize,
+    key_pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let instance = if instance.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(instance) }.to_str().unwrap_or("")
+    };
+    let ticket =
+        (!ticket.is_null()).then(|| unsafe { CStr::from_ptr(ticket) }.to_str().unwrap_or(""));
+    let data = match (payload.is_null(), size) {
+        (true, 0) => Some(&[][..]),
+        (false, 1..=tmux_link::MAX_ADVICE_RESPONSE) => {
+            Some(unsafe { std::slice::from_raw_parts(payload, size) })
+        }
+        _ => None,
+    };
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            Target::Advice(session_id, instance, ticket, data),
+            Some((cert_der, cert_len, key_pkcs8, key_len)),
+            false,
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Target<'a> {
     Terminal(Option<u64>),
@@ -537,6 +589,7 @@ enum Target<'a> {
     SnapshotV1(i64),
     SnapshotV2(i64),
     Managed(i64, &'a str),
+    Advice(i64, &'a str, Option<&'a str>, Option<&'a [u8]>),
 }
 
 impl From<i64> for Target<'_> {
@@ -574,6 +627,20 @@ unsafe fn open_inner(
             ensure!(
                 id >= 0 && tmux_link::managed_remote_action(action).is_some(),
                 "invalid managed request"
+            );
+        }
+        if let Target::Advice(id, instance, ticket, body) = target {
+            ensure!(
+                id >= 0 && tmux_link::valid_managed_instance(instance),
+                "invalid managed request"
+            );
+            let data = body.context("invalid advice payload")?;
+            ensure!(
+                match ticket {
+                    None => data.is_empty(),
+                    Some(t) => tmux_link::valid_advice_ticket(t) && !data.is_empty(),
+                },
+                "invalid advice request"
             );
         }
         let identity = match credentials {
@@ -624,6 +691,13 @@ unsafe fn open_inner(
                     Target::Terminal(id) => {
                         return run(connection, read, output, id, peer, fit_initial_grid).await;
                     }
+                    Target::Advice(id, instance, ticket, _) => {
+                        let command = match ticket {
+                            None => format!("tmux-link-advisor-v2 claim {id} {instance}"),
+                            Some(t) => format!("tmux-link-advisor-v2 finish {id} {instance} {t}"),
+                        };
+                        (command, 1024 * 1024)
+                    }
                     Target::List => (String::from("tmux-link-list"), 1024 * 1024),
                     Target::Managed(id, action) => {
                         (format!("tmux-link-managed-v1 {action} {id}"), 1024 * 1024)
@@ -633,10 +707,13 @@ unsafe fn open_inner(
                     Target::SnapshotV2(id) => (format!("tmux-link-snapshot-v2 {id}"), 512 * 1024),
                 };
                 let capture = !matches!(target, Target::List);
-                let managed = matches!(target, Target::Managed(..));
+                let managed = matches!(target, Target::Managed(..) | Target::Advice(..));
                 let (session, mut channel) = connection;
                 timeout(Duration::from_secs(15), async {
                     channel.exec(true, command).await?;
+                    if let Target::Advice(_, _, Some(_), Some(data)) = target {
+                        channel.data(data).await?;
+                    }
                     if capture {
                         channel.eof().await?;
                     }

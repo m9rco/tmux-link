@@ -60,8 +60,8 @@ final class SessionAdvisorTests: XCTestCase {
     let decoder = JSONDecoder()
     let old = try decoder.decode(RemoteSession.self, from: Data(#"{"id":7,"name":"work"}"#.utf8))
     XCTAssertNil(old.managedVersion)
-    let current = try decoder.decode(RemoteSession.self, from: Data(#"{"id":7,"name":"work","managedVersion":1}"#.utf8))
-    XCTAssertEqual(current.managedVersion, 1)
+    let current = try decoder.decode(RemoteSession.self, from: Data(#"{"id":7,"name":"work","managedVersion":2}"#.utf8))
+    XCTAssertEqual(current.managedVersion, 2)
     XCTAssertEqual(ManagedAction.status.wireValue, "status")
     XCTAssertEqual(ManagedAction.disable.wireValue, "disable")
     XCTAssertEqual(ManagedAction.forget.wireValue, "forget")
@@ -71,7 +71,7 @@ final class SessionAdvisorTests: XCTestCase {
       }
     }
     let payload = """
-      {"enabled":true,"state":"needsConfirmation","keyReady":true,"mode":"assist","style":"concise",
+      {"enabled":true,"state":"needsConfirmation","mode":"assist","style":"concise",
        "callsToday":2,"tokensToday":700,"memory":"Prefer short replies","records":[
          {"at":100,"question":"Language?","choice":null,"reason":"Needs keyboard input",
           "outcome":"needsConfirmation","mode":"assist","style":"concise","draft":"English"},
@@ -86,6 +86,185 @@ final class SessionAdvisorTests: XCTestCase {
     XCTAssertEqual(status.records[0].draft, "English")
     XCTAssertEqual(status.records[1].choice, "Compact")
     XCTAssertNil(status.records[1].draft)
+  }
+
+  private func foregroundClaim() throws -> ManagedClaim {
+    let body = #"""
+      {"ticket":"0123456789abcdef","mode":"assist","style":"concise","request":{
+        "model":"untrusted","url":"https://invalid.example","headers":{"Authorization":"node-value"},
+        "max_tokens":384,"messages":[{"role":"system","content":"Return JSON."},{"role":"user","content":"Choose A or B."}]}}
+      """#
+    return try JSONDecoder().decode(ManagedClaim.self, from: Data(body.utf8))
+  }
+
+  func testManagedPhonePinsModelAndReturnsOnlyDecisionAndUsage() async throws {
+    final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        XCTAssertEqual(request.url?.absoluteString, "https://api.deepseek.com/chat/completions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-phone-secret")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: requestBody()) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "deepseek-flash")
+        XCTAssertEqual(body["max_tokens"] as? Int, 384)
+        XCTAssertNil(body["headers"])
+        XCTAssertNil(body["url"])
+        return (200, Data(#"""
+          {"id":"provider-metadata","usage":{"total_tokens":90},"choices":[{"finish_reason":"stop","message":{
+            "reasoning_content":"private-thought","content":"{\"choice\":1,\"reason\":\"Matches the requested format.\",\"action\":\"Enter\"}"}}]}
+          """#.utf8))
+      }
+    }
+    let data = try await ManagedPhoneModel.complete(foregroundClaim(), key: "fixture-phone-secret", session: Endpoint.session())
+    let text = String(decoding: data, as: UTF8.self)
+    XCTAssertTrue(text.contains("Matches the requested format."))
+    XCTAssertTrue(text.contains("total_tokens"))
+    for forbidden in ["fixture-phone-secret", "provider-metadata", "private-thought", "action", "Enter"] {
+      XCTAssertFalse(text.contains(forbidden))
+    }
+  }
+
+  func testManagedPhoneFiltersCredentialEchoAndRejectsOversizedResponses() throws {
+    let raw = Data(#"""
+      {"usage":{"total_tokens":8},"choices":[{"finish_reason":"stop","message":{"content":"{\"reason\":\"fixture-phone-secret\"}"}}]}
+      """#.utf8)
+    let filtered = try ManagedPhoneModel.sanitizedResponse(raw, key: "fixture-phone-secret")
+    let text = String(decoding: filtered, as: UTF8.self)
+    XCTAssertTrue(text.contains("total_tokens"))
+    XCTAssertFalse(text.contains("fixture-phone-secret"))
+    XCTAssertFalse(text.contains("message"))
+    XCTAssertThrowsError(try ManagedPhoneModel.sanitizedResponse(Data(repeating: 32, count: 65537), key: "fixture"))
+  }
+
+  @MainActor
+  func testManagedControllerRequiresActiveSceneAndKeyAndPrunesRemovedClients() async throws {
+    let suite = "managed-test-" + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let target = ManagedSessionController.Target(clientID: UUID(), sessionID: 7, name: "work", instance: "instance")
+    let client = ClientProfile(id: target.clientID, name: "node", host: "private.example")
+    let keyMissing = expectation(description: "checked local credential")
+    let delivered = expectation(description: "returned ticket")
+    let fixture = try foregroundClaim()
+    var services = ManagedSessionController.Services()
+    var key: String?
+    var claims = 0
+    var decisions = 0
+    services.key = {
+      if key == nil { keyMissing.fulfill() }
+      return key
+    }
+    services.claim = { profile, id, instance in
+      XCTAssertEqual(profile.id, target.clientID)
+      XCTAssertEqual(id, target.sessionID)
+      XCTAssertEqual(instance, target.instance)
+      claims += 1
+      return ManagedClaimResponse(enabled: true, claim: fixture)
+    }
+    services.model = { _, secret in
+      XCTAssertEqual(secret, "phone-only-value")
+      decisions += 1
+      return Data("decision".utf8)
+    }
+    services.finish = { _, _, _, ticket, data in
+      XCTAssertEqual(ticket, fixture.ticket)
+      XCTAssertEqual(data, Data("decision".utf8))
+      delivered.fulfill()
+    }
+    let controller = ManagedSessionController(defaults: defaults, services: services)
+    controller.updateClients([client])
+    controller.enable(target)
+    controller.enable(target)
+    XCTAssertEqual(controller.targets.count, 1)
+    await Task.yield()
+    XCTAssertEqual(claims, 0)
+    controller.setActive(true)
+    await fulfillment(of: [keyMissing], timeout: 2)
+    XCTAssertEqual(claims, 0)
+    key = "phone-only-value"
+    controller.credentialChanged()
+    await fulfillment(of: [delivered], timeout: 2)
+    controller.setActive(false)
+    XCTAssertEqual(claims, 1)
+    XCTAssertEqual(decisions, 1)
+    let persisted = try XCTUnwrap(defaults.data(forKey: "managed.foreground.targets.v2"))
+    let stored = try XCTUnwrap((try JSONSerialization.jsonObject(with: persisted) as? [[String: Any]])?.first)
+    XCTAssertEqual(Set(stored.keys), ["clientID", "sessionID", "name", "instance"])
+    let resumed = ManagedSessionController(defaults: defaults, services: services)
+    XCTAssertEqual(resumed.targets, [target])
+    resumed.updateClients([])
+    XCTAssertTrue(resumed.targets.isEmpty)
+    XCTAssertTrue(ManagedSessionController(defaults: defaults, services: services).targets.isEmpty)
+  }
+
+  @MainActor
+  func testManagedControllerRetriesReceiptWithoutAnotherModelCall() async throws {
+    let suite = "managed-retry-" + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let target = ManagedSessionController.Target(clientID: UUID(), sessionID: 4, name: "work", instance: "instance")
+    let lost = expectation(description: "first receipt lost")
+    let received = expectation(description: "same receipt retried")
+    let fixture = try foregroundClaim()
+    var claims = 0
+    var decisions = 0
+    var attempts = 0
+    var services = ManagedSessionController.Services()
+    services.key = { "fixture" }
+    services.claim = { _, _, _ in
+      claims += 1
+      return ManagedClaimResponse(enabled: true, claim: fixture)
+    }
+    services.model = { _, _ in decisions += 1; return Data("answer".utf8) }
+    services.finish = { _, _, _, ticket, data in
+      attempts += 1
+      XCTAssertEqual(ticket, fixture.ticket)
+      XCTAssertEqual(data, Data("answer".utf8))
+      if attempts == 1 {
+        lost.fulfill()
+        throw URLError(.networkConnectionLost)
+      }
+      received.fulfill()
+    }
+    let controller = ManagedSessionController(defaults: defaults, services: services)
+    controller.updateClients([ClientProfile(id: target.clientID)])
+    controller.enable(target)
+    controller.setActive(true)
+    await fulfillment(of: [lost], timeout: 2)
+    controller.setActive(false)
+    controller.setActive(true)
+    await fulfillment(of: [received], timeout: 3)
+    controller.setActive(false)
+    XCTAssertEqual(claims, 1)
+    XCTAssertEqual(decisions, 1)
+    XCTAssertEqual(attempts, 2)
+  }
+
+  @MainActor
+  func testManagedControllerDropsPendingDecisionWhenPhoneLocks() async throws {
+    let suite = "managed-pause-" + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let target = ManagedSessionController.Target(clientID: UUID(), sessionID: 4, name: "work", instance: "instance")
+    let started = expectation(description: "began model request")
+    let stopped = expectation(description: "cancelled request on lock")
+    let claim = try foregroundClaim()
+    var services = ManagedSessionController.Services()
+    services.key = { "fixture" }
+    services.claim = { _, _, _ in ManagedClaimResponse(enabled: true, claim: claim) }
+    services.model = { _, _ in
+      started.fulfill()
+      defer { stopped.fulfill() }
+      try await Task.sleep(for: .seconds(30))
+      return Data()
+    }
+    services.finish = { _, _, _, _, _ in XCTFail("must not return a decision while inactive") }
+    let controller = ManagedSessionController(defaults: defaults, services: services)
+    controller.updateClients([ClientProfile(id: target.clientID)])
+    controller.enable(target)
+    controller.setActive(true)
+    await fulfillment(of: [started], timeout: 2)
+    controller.setActive(false)
+    await fulfillment(of: [stopped], timeout: 2)
+    XCTAssertEqual(controller.targets, [target])
   }
 
   func testRequestSendsOnlySessionLabelsAndRanksKnownIDsOnce() async throws {

@@ -164,6 +164,12 @@ enum RelayIdentity {
   }
 }
 
+struct PhoneAdviceExchange {
+  let instance: String
+  var ticket: String?
+  var payload = Data()
+}
+
 struct TerminalTransport {
   let endpoint: String
   let port: UInt16
@@ -226,7 +232,18 @@ struct TerminalTransport {
     return try JSONDecoder().decode(ManagedStatus.self, from: data)
   }
 
-  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil) async throws -> Data {
+  static func claim(_ client: ClientProfile, sessionID: Int64, instance: String) async throws -> ManagedClaimResponse {
+    let data = try await read(client, target: sessionID, advice: PhoneAdviceExchange(instance: instance))
+    return try JSONDecoder().decode(ManagedClaimResponse.self, from: data)
+  }
+
+  static func finish(_ client: ClientProfile, sessionID: Int64, instance: String, ticket: String, envelope: Data?) async throws -> ManagedStatus {
+    let exchange = PhoneAdviceExchange(instance: instance, ticket: ticket, payload: envelope ?? Data("null".utf8))
+    let data = try await read(client, target: sessionID, advice: exchange)
+    return try JSONDecoder().decode(ManagedStatus.self, from: data)
+  }
+
+  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil) async throws -> Data {
     let connection = try TerminalTransport(client)
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
@@ -238,7 +255,7 @@ struct TerminalTransport {
     // cooperative executor, including on devices with a small thread pool.
     async let message: String? = withCheckedContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2, managedAction: managedAction))
+        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2, managedAction: managedAction, advice: advice))
       }
     }
     let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -263,7 +280,7 @@ struct TerminalTransport {
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.
-  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false, managedAction: String? = nil) -> String? {
+  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil) -> String? {
     let der = identity?.certificate ?? Data()
     let pkcs8 = identity?.privateKey ?? Data()
     let open = snapshotV2 ? tl_snapshot_v2_secure : (fitInitialGrid ? tl_open_secure_fitted : tl_open_secure)
@@ -273,6 +290,13 @@ struct TerminalTransport {
           let seedPointer = seedBytes.bindMemory(to: UInt8.self).baseAddress!
           let certificate = der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress
           let privateKey = pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress
+          if let advice {
+            return advice.payload.withUnsafeBytes { (payload: UnsafeRawBufferPointer) in
+              tl_advice_secure(fd, endpoint, port, user, pin, seedPointer, target, advice.instance, advice.ticket,
+                               payload.isEmpty ? nil : payload.bindMemory(to: UInt8.self).baseAddress,
+                               payload.count, certificate, cert.count, privateKey, key.count)
+            }
+          }
           if let managedAction {
             return tl_managed_secure(fd, endpoint, port, user, pin, seedPointer, target, managedAction,
                                      certificate, cert.count, privateKey, key.count)

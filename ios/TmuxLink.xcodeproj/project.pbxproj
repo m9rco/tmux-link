@@ -35,6 +35,7 @@
 		F50BDE06B8684FFC8E99FDF2 /* SessionAdvisorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963B40480207CD65B4AB9F1E /* SessionAdvisorView.swift */; };
 		F7F0BB6B3B3F1DCF3251E2D2 /* TerminalStatusWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE7AA1458B56112D4FE78CB0 /* TerminalStatusWidget.swift */; };
 		FB110C7810D8AD195384B44E /* DecisionAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9349CDA9AC878F8A63147117 /* DecisionAnalysis.swift */; };
+		FD2B32B18591959CC4974522 /* ManagedSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D86133008E33FE92BE686BE0 /* ManagedSessionController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -94,6 +95,7 @@
 		C232CC9E44B2E4FA94E300B5 /* TerminalActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalActivity.swift; sourceTree = "<group>"; };
 		D04BA079F6170AF2C112D38A /* RelayIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayIdentity.swift; sourceTree = "<group>"; };
 		D4AC8B585736A80747E1EDD3 /* TmuxLink.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TmuxLink.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D86133008E33FE92BE686BE0 /* ManagedSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedSessionController.swift; sourceTree = "<group>"; };
 		E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionBrief.swift; sourceTree = "<group>"; };
 		E2C1D3D17608FFE8B023AF9D /* ShortcutDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutDrawer.swift; sourceTree = "<group>"; };
 		E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyboard.swift; sourceTree = "<group>"; };
@@ -160,6 +162,7 @@
 				E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */,
 				41FCFFF9214E39BAAD8876FB /* HostPairing.swift */,
 				5E17E7A33DF530425EC38227 /* Identity.swift */,
+				D86133008E33FE92BE686BE0 /* ManagedSessionController.swift */,
 				AFA0DBB6E46E8D8747C65EB9 /* ManagedSessionView.swift */,
 				26696F51ADAFACAE760211B2 /* PaneSnapshot.swift */,
 				D04BA079F6170AF2C112D38A /* RelayIdentity.swift */,
@@ -331,6 +334,7 @@
 				B5EAFB8D266F9AF61649BDE3 /* DecisionBrief.swift in Sources */,
 				BEDB8B4F79C210230FF55FD8 /* HostPairing.swift in Sources */,
 				C24030632CB36AF220E8422F /* Identity.swift in Sources */,
+				FD2B32B18591959CC4974522 /* ManagedSessionController.swift in Sources */,
 				82246769212E3A36953F4391 /* ManagedSessionView.swift in Sources */,
 				0873F55C97EC28DE0E04510C /* PaneSnapshot.swift in Sources */,
 				21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */,
@@ -370,7 +374,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 40;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -383,7 +387,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.5.1;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -423,7 +427,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 40;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -433,7 +437,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -472,7 +476,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 40;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -485,7 +489,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.5.1;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -558,7 +562,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 40;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -568,7 +572,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;

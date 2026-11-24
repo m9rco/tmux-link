@@ -99,6 +99,10 @@ private let mint = Color(red: 0.47, green: 0.91, blue: 0.79)
 private let ink = Color(red: 0.045, green: 0.08, blue: 0.10)
 private let panel = Color(red: 0.08, green: 0.13, blue: 0.15)
 
+final class WorkspaceActivity: ObservableObject {
+  @Published var isActive = false
+}
+
 final class EnrollmentStatus: ObservableObject {
   @Published var error: String?
 }
@@ -139,7 +143,9 @@ final class ClientImportLinks: ObservableObject {
 struct Workspace: View {
   @ObservedObject var enrollment = EnrollmentStatus()
   @ObservedObject var clientLinks = ClientImportLinks()
+  @ObservedObject var activity = WorkspaceActivity()
   @StateObject private var store = ProfileStore()
+  @StateObject private var managed = ManagedSessionController()
   @State private var path: [ClientProfile] = []
   @State private var editor: ClientProfile?
   @State private var pairing: HostPairing?
@@ -158,6 +164,10 @@ struct Workspace: View {
         .navigationDestination(for: ClientProfile.self) { Sessions(client: $0) }
     }
     .tint(mint).preferredColorScheme(.dark)
+    .environmentObject(managed)
+    .onReceive(store.$clients) { managed.updateClients($0) }
+    .onReceive(activity.$isActive) { managed.setActive($0) }
+    .onReceive(NotificationCenter.default.publisher(for: AdvisorCredential.changed)) { _ in managed.credentialChanged() }
     .onReceive(enrollment.$error) { if let error = $0 { message = error } }
     .task(id: clientLinks.requests.count) { reviewNextLink() }
     .onChange(of: message) { if $0 == nil { reviewNextLink() } }
@@ -396,6 +406,7 @@ private struct ProfileEditor: View {
 }
 
 private struct Sessions: View {
+  @EnvironmentObject private var managed: ManagedSessionController
   let client: ClientProfile
   @State private var sessions: [RemoteSession] = []
   @State private var failure: String?
@@ -500,6 +511,7 @@ private struct Sessions: View {
           let items = try await SessionDirectory.fetch(client)
           try Task.checkCancellation()
           sessions = items
+          managed.updateSessions(items, client: client)
         } catch {
           guard !Task.isCancelled else { return }
           failure = error.localizedDescription

@@ -71,7 +71,7 @@ enum SessionAdvisor {
     let choices: [Choice]
   }
 
-  private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
+  final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
       completionHandler(nil)
@@ -155,10 +155,12 @@ enum SessionAdvisor {
        message.contains("however, you are requesting "))
   }
 
-  static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
-                                       maxTokens: Int, session: URLSession) async throws -> T {
+  // Both manual analysis and foreground management use the model selected on this phone.
+  static let model = "deepseek-flash"
+
+  static func chatRequest(instructions: String, userMessage: String, key: String, maxTokens: Int) throws -> URLRequest {
     let body: [String: Any] = [
-      "model": "deepseek-flash",
+      "model": model,
       "messages": [["role": "system", "content": instructions], ["role": "user", "content": userMessage]],
       "thinking": ["type": "disabled"],
       "response_format": ["type": "json_object"],
@@ -171,6 +173,12 @@ enum SessionAdvisor {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+    return request
+  }
+
+  static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
+                                       maxTokens: Int, session: URLSession) async throws -> T {
+    let request = try chatRequest(instructions: instructions, userMessage: userMessage, key: key, maxTokens: maxTokens)
     let data: Data
     let response: URLResponse
     do {
