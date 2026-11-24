@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0731E90B2E791E69DBE356DF /* TerminalChoiceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */; };
 		0C35831EC31CF34E63DB8469 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */; };
 		21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04BA079F6170AF2C112D38A /* RelayIdentity.swift */; };
 		36108C60DDC87A82EA5C84C5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 40A95C15D89DCB37F1EEA411 /* assets */; };
@@ -23,6 +24,7 @@
 		9CA37C6DE7B824104910B340 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A203E797669B5349F523A4 /* App.swift */; };
 		A3FEA1110F037B6DCBA456DC /* TerminalKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */; };
 		AD259FE4D26F6A234AC5A0B8 /* DecisionAnalysisTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2C727DCFA2239DF0ABE54FB /* DecisionAnalysisTests.swift */; };
+		B5EAFB8D266F9AF61649BDE3 /* DecisionBrief.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */; };
 		BEDB8B4F79C210230FF55FD8 /* HostPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41FCFFF9214E39BAAD8876FB /* HostPairing.swift */; };
 		C24030632CB36AF220E8422F /* Identity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E17E7A33DF530425EC38227 /* Identity.swift */; };
 		C30137AD36DA41CA140718CD /* SessionAdvisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BAC02991976F9464F7D84E /* SessionAdvisor.swift */; };
@@ -66,6 +68,7 @@
 
 /* Begin PBXFileReference section */
 		01A203E797669B5349F523A4 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChoiceMenu.swift; sourceTree = "<group>"; };
 		0F99208653984B60CC27DB00 /* SessionAdvisorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAdvisorTests.swift; sourceTree = "<group>"; };
 		27BAC02991976F9464F7D84E /* SessionAdvisor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAdvisor.swift; sourceTree = "<group>"; };
 		3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -87,6 +90,7 @@
 		C232CC9E44B2E4FA94E300B5 /* TerminalActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalActivity.swift; sourceTree = "<group>"; };
 		D04BA079F6170AF2C112D38A /* RelayIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayIdentity.swift; sourceTree = "<group>"; };
 		D4AC8B585736A80747E1EDD3 /* TmuxLink.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TmuxLink.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionBrief.swift; sourceTree = "<group>"; };
 		E2C1D3D17608FFE8B023AF9D /* ShortcutDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutDrawer.swift; sourceTree = "<group>"; };
 		E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyboard.swift; sourceTree = "<group>"; };
 		EE4F1C5B0D7174B0EAF498EE /* TerminalIsland.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalIsland.swift; sourceTree = "<group>"; };
@@ -149,6 +153,7 @@
 				4AA2EEF93695DF540A0B4342 /* Bridge.h */,
 				AA702335524868D5C3B71289 /* ClientTransfer.swift */,
 				9349CDA9AC878F8A63147117 /* DecisionAnalysis.swift */,
+				E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */,
 				41FCFFF9214E39BAAD8876FB /* HostPairing.swift */,
 				5E17E7A33DF530425EC38227 /* Identity.swift */,
 				D04BA079F6170AF2C112D38A /* RelayIdentity.swift */,
@@ -156,6 +161,7 @@
 				27BAC02991976F9464F7D84E /* SessionAdvisor.swift */,
 				963B40480207CD65B4AB9F1E /* SessionAdvisorView.swift */,
 				E2C1D3D17608FFE8B023AF9D /* ShortcutDrawer.swift */,
+				041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */,
 				EE4F1C5B0D7174B0EAF498EE /* TerminalIsland.swift */,
 				E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */,
 				A7B7C2F3ECC3EE5231EE846C /* TerminalTextSelection.swift */,
@@ -316,6 +322,7 @@
 				9CA37C6DE7B824104910B340 /* App.swift in Sources */,
 				E742FEC107C88F142D84F718 /* ClientTransfer.swift in Sources */,
 				FB110C7810D8AD195384B44E /* DecisionAnalysis.swift in Sources */,
+				B5EAFB8D266F9AF61649BDE3 /* DecisionBrief.swift in Sources */,
 				BEDB8B4F79C210230FF55FD8 /* HostPairing.swift in Sources */,
 				C24030632CB36AF220E8422F /* Identity.swift in Sources */,
 				21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */,
@@ -324,6 +331,7 @@
 				F50BDE06B8684FFC8E99FDF2 /* SessionAdvisorView.swift in Sources */,
 				83EF24147C36F0781E6B09A8 /* ShortcutDrawer.swift in Sources */,
 				676C0A528180E6BBF0172B42 /* TerminalActivity.swift in Sources */,
+				0731E90B2E791E69DBE356DF /* TerminalChoiceMenu.swift in Sources */,
 				E96295C1E720F34EA4EC208E /* TerminalIsland.swift in Sources */,
 				A3FEA1110F037B6DCBA456DC /* TerminalKeyboard.swift in Sources */,
 				3C10FC563397D079E12E746D /* TerminalTextSelection.swift in Sources */,
@@ -354,7 +362,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -407,7 +415,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -456,7 +464,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -542,7 +550,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";

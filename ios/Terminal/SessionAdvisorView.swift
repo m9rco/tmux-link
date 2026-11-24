@@ -17,9 +17,10 @@ struct AdvisorSelection {
 }
 
 private struct PaneReading: Identifiable {
-  let snapshot: DecisionSnapshot
+  let brief: DecisionBrief
   let readAt: Date
-  var id: Int64 { snapshot.id }
+  var id: Int64 { brief.id }
+  var hasCurrentContent: Bool { brief.menu != nil || brief.blocks.contains { $0.source == .current } }
 }
 
 @MainActor
@@ -135,10 +136,9 @@ struct SessionAdvisorView: View {
       for source in sources {
         guard !Task.isCancelled else { return }
         do {
-          let snapshot = try await capture(source).sanitized()
+          let snapshot = try await capture(source)
           guard snapshot.id == source.id else { throw RelayError("会话已更改，请刷新列表。") }
-          guard !snapshot.text.isEmpty else { throw RelayError("活动窗格没有可分析的文字。") }
-          readings.append(PaneReading(snapshot: snapshot, readAt: Date()))
+          readings.append(PaneReading(brief: snapshot.prepared(), readAt: Date()))
         } catch {
           failures.append("\(source.name) · \(error.localizedDescription)")
         }
@@ -159,7 +159,7 @@ struct DecisionReviewView: View {
   @StateObject private var keyStatus = AdvisorKeyStatus()
 
   init(snapshot: DecisionSnapshot, readAt: Date = Date(), onClose: @escaping () -> Void) {
-    reading = PaneReading(snapshot: snapshot.sanitized(), readAt: readAt)
+    reading = PaneReading(brief: snapshot.prepared(), readAt: readAt)
     self.onClose = onClose
   }
 
@@ -190,7 +190,7 @@ private struct DecisionReviewContent: View {
   @State private var task: Task<Void, Never>?
 
   private var included: [PaneReading] {
-    readings.filter { !excluded.contains($0.id) && !$0.snapshot.text.isEmpty }
+    readings.filter { !excluded.contains($0.id) && $0.hasCurrentContent }
   }
 
   var body: some View {
@@ -198,16 +198,24 @@ private struct DecisionReviewContent: View {
       if let decisions {
         if decisions.isEmpty {
           Section {
-            Label("在所分析的 \(included.count) 段摘录中未发现待答问题。", systemImage: "checkmark.circle")
+            Label("DeepSeek 本次未返回候选答复。", systemImage: "checkmark.circle")
               .accessibilityIdentifier("advisor.none")
-            ForEach(included) { reading in readingHeader(reading) }
+            ForEach(included.filter { $0.brief.menu == nil }) { reading in readingHeader(reading) }
           }
         } else {
           ForEach(decisions.indices, id: \.self) { index in
             decisionSection(decisions[index], index: index)
           }
         }
-        Button("返回摘录预览") {
+        ForEach(included) { reading in
+          if let menu = reading.brief.menu, !decisions.contains(where: { $0.sessionID == reading.id }) {
+            Section {
+              TerminalMenuPreview(menu: menu)
+              openButton(reading.id, identifier: "advisor.open.menu.\(reading.id)")
+            } header: { readingHeader(reading) }
+          }
+        }
+        Button("返回上下文预览") {
           self.decisions = nil
           copied = nil
           errorMessage = nil
@@ -218,12 +226,12 @@ private struct DecisionReviewContent: View {
         }
         Section {
           Button(action: analyze) {
-            Label("发送 \(included.count) 段摘录给 DeepSeek 分析", systemImage: "sparkles")
+            Label(included.isEmpty ? "分析所选会话" : "分析 \(included.count) 个会话", systemImage: "sparkles")
           }
           .disabled(included.isEmpty || !keyStatus.saved || editingKey || operation != nil)
           .accessibilityIdentifier("advisor.submit")
         } footer: {
-          Text("DeepSeek 将收到勾选的会话编号、名称、当前屏幕摘录及本机压缩的历史摘要。发送前请检查这些内容。")
+          Text("DeepSeek 将收到所选会话的编号、名称和这里展示的上下文。")
         }
       }
       if let operation {
@@ -250,7 +258,7 @@ private struct DecisionReviewContent: View {
     }
     .id(decisions == nil)
     .scrollDismissesKeyboard(.interactively)
-    .navigationTitle(decisions == nil ? "摘录预览" : "待答问题").navigationBarTitleDisplayMode(.inline)
+    .navigationTitle(decisions == nil ? "决策上下文" : "待答问题").navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .confirmationAction) {
         Button("关闭") { cancel(); close() }.accessibilityIdentifier("advisor.close")
@@ -260,22 +268,23 @@ private struct DecisionReviewContent: View {
   }
 
   private func previewSection(_ reading: PaneReading) -> some View {
-    let snapshot = reading.snapshot
     return Section {
-      if snapshot.text.isEmpty {
-        Text("当前窗格没有可分析的文字。").foregroundStyle(.secondary)
+      if !reading.hasCurrentContent {
+        Text("过滤界面元素后，当前屏幕没有可分析的正文。").foregroundStyle(.secondary)
+          .accessibilityIdentifier("advisor.empty.\(reading.id)")
       } else {
         Toggle("纳入分析", isOn: Binding(
-          get: { !excluded.contains(snapshot.id) },
+          get: { !excluded.contains(reading.id) },
           set: { include in
-            if include { excluded.remove(snapshot.id) } else { excluded.insert(snapshot.id) }
+            if include { excluded.remove(reading.id) } else { excluded.insert(reading.id) }
             errorMessage = nil
           }))
           .disabled(operation != nil)
-          .accessibilityIdentifier("advisor.include.\(snapshot.id)")
-        SnapshotExcerpt(title: "当前屏幕", text: snapshot.text)
-        if let context = snapshot.context {
-          SnapshotExcerpt(title: "历史摘要（本机压缩）", text: context)
+          .accessibilityIdentifier("advisor.include.\(reading.id)")
+        if !reading.brief.blocks.isEmpty { BriefPreview(brief: reading.brief) }
+        if let menu = reading.brief.menu {
+          TerminalMenuPreview(menu: menu)
+          openButton(reading.id, identifier: "advisor.open.menu.\(reading.id)")
         }
       }
     } header: {
@@ -289,7 +298,7 @@ private struct DecisionReviewContent: View {
       Text(verbatim: decision.question).font(.headline).textSelection(.enabled)
         .accessibilityIdentifier("advisor.question.\(index)")
       VStack(alignment: .leading, spacing: 6) {
-        Label("终端原文", systemImage: "quote.opening").font(.caption).foregroundStyle(.secondary)
+        Label("屏幕摘录", systemImage: "quote.opening").font(.caption).foregroundStyle(.secondary)
         Text(verbatim: decision.evidence).font(.callout.monospaced()).textSelection(.enabled)
       }.privacySensitive()
       ForEach(decision.options.indices, id: \.self) { optionIndex in
@@ -305,43 +314,53 @@ private struct DecisionReviewContent: View {
           if recommended && !decision.reason.isEmpty {
             Text(verbatim: "推荐理由 · " + decision.reason).font(.subheadline)
           }
-          Button {
-            UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: option.reply]], options: [.localOnly: true])
-            copied = position
-          } label: {
-            Label(copied == position ? "已复制" : "复制回复", systemImage: copied == position ? "checkmark" : "doc.on.doc")
-              .font(.subheadline)
-          }.buttonStyle(.borderless)
-            .accessibilityIdentifier("advisor.copy.\(index).\(optionIndex)")
+          if source?.brief.menu == nil {
+            Button {
+              UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: option.reply]], options: [.localOnly: true])
+              copied = position
+            } label: {
+              Label(copied == position ? "已复制" : "复制回复", systemImage: copied == position ? "checkmark" : "doc.on.doc")
+                .font(.subheadline)
+            }.buttonStyle(.borderless)
+              .accessibilityIdentifier("advisor.copy.\(index).\(optionIndex)")
+          }
         }.padding(.vertical, 3).privacySensitive()
       }
       if decision.recommendedIndex == nil && !decision.reason.isEmpty {
         Text(verbatim: decision.reason).font(.subheadline)
       }
-      Button {
-        run(.opening) {
-          let opened = try await open(decision.sessionID)
-          try Task.checkCancellation()
-          if !opened { errorMessage = "原会话已关闭或更名，请返回会话列表重新预览。" }
-        }
-      } label: { Label(openLabel, systemImage: "terminal") }
-      .disabled(operation != nil || source == nil)
-      .accessibilityIdentifier("advisor.open.\(decision.sessionID).\(index)")
+      if let menu = source?.brief.menu, decisions?.firstIndex(where: { $0.sessionID == decision.sessionID }) == index {
+        DisclosureGroup("查看终端菜单") { TerminalMenuPreview(menu: menu) }
+      }
+      openButton(decision.sessionID, identifier: "advisor.open.\(decision.sessionID).\(index)")
+        .disabled(source == nil)
     } header: {
       if let source { readingHeader(source) }
     }
   }
 
+  private func openButton(_ id: Int64, identifier: String) -> some View {
+    Button {
+      run(.opening) {
+        let opened = try await open(id)
+        try Task.checkCancellation()
+        if !opened { errorMessage = "原会话已关闭或更名，请返回会话列表重新预览。" }
+      }
+    } label: { Label(openLabel, systemImage: "terminal") }
+    .disabled(operation != nil)
+    .accessibilityIdentifier(identifier)
+  }
+
   private func readingHeader(_ reading: PaneReading) -> some View {
     VStack(alignment: .leading, spacing: 3) {
-      Text(verbatim: "\(reading.snapshot.name) · #\(reading.id)").textCase(nil)
+      Text(verbatim: "\(reading.brief.name) · #\(reading.id)").textCase(nil)
       Text("读取于 \(reading.readAt.formatted(date: .omitted, time: .standard))")
         .font(.caption).foregroundStyle(.secondary)
     }
   }
 
   private func analyze() {
-    let approved = included.map(\.snapshot)
+    let approved = included.map(\.brief)
     guard !approved.isEmpty else { return }
     run(.analyzing) {
       guard let key = try AdvisorCredential.load() else {
@@ -349,7 +368,7 @@ private struct DecisionReviewContent: View {
         errorMessage = "请先保存 DeepSeek API Key。"
         return
       }
-      let result = try await SessionAdvisor.analyze(approved, key: key)
+      let result = try await SessionAdvisor.analyzePrepared(approved, key: key)
       try Task.checkCancellation()
       decisions = result
     }
@@ -380,24 +399,115 @@ private struct DecisionReviewContent: View {
   }
 }
 
-private struct SnapshotExcerpt: View {
-  let title: String
-  let text: String
-  @State private var expanded = false
+private struct BriefPreview: View {
+  let brief: DecisionBrief
 
   var body: some View {
-    let lastLines = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(4)
-    let excerpt = String(lastLines.joined(separator: "\n").suffix(200))
-    VStack(alignment: .leading, spacing: 6) {
-      Text(verbatim: title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-      Text(verbatim: expanded ? text : excerpt)
-        .font(.footnote.monospaced()).textSelection(.enabled).privacySensitive()
-        .frame(maxWidth: .infinity, alignment: .leading)
-      if excerpt != text {
-        Button(expanded ? "收起" : "展开全文") { expanded.toggle() }
-          .font(.footnote).buttonStyle(.borderless)
-          .accessibilityLabel((expanded ? "收起" : "展开") + title)
+    let questions = brief.blocks.filter { $0.source == .current && $0.kind == .question }
+    let context = brief.blocks.filter { !($0.source == .current && $0.kind == .question) }
+    // Lead with the live question. Keep the original order within the supporting excerpts.
+    blockRows(questions)
+    if context.count > 4 {
+      let priority: [DecisionBrief.Kind] = [.rationale, .goal, .constraint, .plan, .choice]
+      let primary = priority.compactMap { kind in
+        context.firstIndex { $0.kind == kind && $0.source == .current } ?? context.firstIndex { $0.kind == kind }
       }
+      let other = context.indices.filter { !primary.contains($0) }
+      let featured = Set((primary + other).prefix(4))
+      let shown = context.indices.filter(featured.contains).map { context[$0] }
+      let remaining = context.indices.filter { !featured.contains($0) }.map { context[$0] }
+      blockRows(shown)
+      if !remaining.isEmpty {
+        DisclosureGroup("更多上下文（\(remaining.count)）") { blockRows(remaining) }
+          .font(.subheadline)
+      }
+    } else {
+      blockRows(context)
+    }
+  }
+
+  private func blockRows(_ blocks: [DecisionBrief.Block]) -> some View {
+    ForEach(blocks.indices, id: \.self) { index in
+      let block = blocks[index]
+      VStack(alignment: .leading, spacing: 4) {
+        Text(verbatim: title(block.kind) + (block.source == .history ? " · 历史" : " · 当前"))
+          .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+        Text(verbatim: block.text).font(block.kind == .question ? .headline : .subheadline)
+          .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .privacySensitive()
+    }
+  }
+
+  private func title(_ kind: DecisionBrief.Kind) -> String {
+    switch kind {
+    case .question: return "提问"
+    case .rationale: return "原因"
+    case .goal: return "目标"
+    case .constraint: return "约束"
+    case .fact: return "相关信息"
+    case .plan: return "计划步骤"
+    case .choice: return "可选项"
+    case .state: return "进展"
+    }
+  }
+}
+
+private struct TerminalMenuPreview: View {
+  let menu: TerminalChoiceMenu
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title).font(.subheadline.weight(.semibold))
+      ForEach(menu.items.indices, id: \.self) { index in
+        let item = menu.items[index]
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          if let selected = item.selected {
+            let shape = menu.mode == .multiple ? "square" : "circle"
+            Image(systemName: selected ? "checkmark.\(shape).fill" : shape)
+              .foregroundStyle(selected ? Color.accentColor : .secondary)
+              .accessibilityLabel(selected ? "已选中" : "未选中")
+          }
+          Text(verbatim: item.label).textSelection(.enabled)
+          if item.focused {
+            Text("焦点").font(.caption).foregroundStyle(.secondary)
+          }
+        }
+        .font(.subheadline)
+        .accessibilityElement(children: .combine)
+      }
+      if menu.truncated {
+        Text("其余选项可在原终端查看。").font(.caption).foregroundStyle(.secondary)
+      }
+      if let selection = menu.selectionHint, selection == menu.submitHint {
+        hintRow("操作方式", selection)
+      } else {
+        if let hint = menu.selectionHint { hintRow("选择", hint) }
+        if let hint = menu.submitHint { hintRow("提交", hint) }
+      }
+      if menu.submitHint == nil {
+        Text("当前画面未显示提交方式。").font(.caption).foregroundStyle(.secondary)
+      }
+      if menu.submitFocused {
+        Text("焦点位于提交项").font(.caption).foregroundStyle(.secondary)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .privacySensitive()
+  }
+
+  private var title: String {
+    switch menu.mode {
+    case .single: return "终端菜单 · 单选"
+    case .multiple: return "终端菜单 · 多选"
+    case .unspecified: return menu.items.isEmpty ? "终端提交" : "终端菜单 · 选择类型未标明"
+    }
+  }
+
+  private func hintRow(_ title: String, _ hint: String) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(verbatim: title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+      Text(verbatim: hint).font(.footnote.monospaced()).textSelection(.enabled)
     }
   }
 }

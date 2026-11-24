@@ -23,7 +23,7 @@ targets:
         CODE_SIGN_IDENTITY: Apple Development
         PRODUCT_BUNDLE_IDENTIFIER: dev.tmuxlink.mobile
         MARKETING_VERSION: "0.4.5"
-        CURRENT_PROJECT_VERSION: 34
+        CURRENT_PROJECT_VERSION: 35
         INFOPLIST_KEY_CFBundleDisplayName: Tmux Link
         INFOPLIST_FILE: Terminal-Info.plist
         GENERATE_INFOPLIST_FILE: YES
@@ -56,7 +56,7 @@ targets:
         INFOPLIST_FILE: StatusWidget/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: Tmux Link Status
         MARKETING_VERSION: "0.4.5"
-        CURRENT_PROJECT_VERSION: 34
+        CURRENT_PROJECT_VERSION: 35
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         TARGETED_DEVICE_FAMILY: "1,2"

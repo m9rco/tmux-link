@@ -18,20 +18,219 @@ final class DecisionAnalysisTests: XCTestCase {
                             context: history.joined(separator: "\n"))
   }
 
+  // Synthetic narrow-screen transcript: a proposed sequence and a single confirmation.
+  private static let review = DecisionSnapshot(id: 41, name: "catalog-review", text: """
+    当前状态
+    原因：上次刷新索引打断了正在校对的批次。
+    目标：样本通过数从 2/5 提高到 5/5。
+    约束：校对期间不得刷新索引。
+
+    建议的下一步（等你确认）
+    1. 在当前版本 a1b2c3d 验证一份样本。
+    2. 整理过期标签。
+    3. 补充周报模板。
+
+    要先执行第 1
+       步（只验证样本，
+       保留现有索引）吗？
+
+    │ ▏
+    │ Build · Deepseek Flash demo-
+    │             writer
+    ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+       /example/lab/      89.2K (21%) ctrl+p
+       archive                  commands
+    """)
+
+  func testConfirmationRetainsReasonGoalAndReferencedStep() throws {
+    let brief = Self.review.prepared()
+    let blocks = brief.blocks
+    XCTAssertEqual(brief, Self.review.prepared())
+    let encoder = JSONEncoder()
+    XCTAssertLessThan(try encoder.encode(brief).count, try encoder.encode(Self.review).count)
+    let current = blocks.filter { $0.source == .current }
+    let question = try XCTUnwrap(current.first { $0.kind == .question })
+    XCTAssertTrue(question.text.contains("只验证样本"))
+    XCTAssertTrue(question.text.contains("保留现有索引"))
+    XCTAssertTrue(question.text.contains("吗？"))
+    XCTAssertTrue(current.contains { $0.kind == .rationale && $0.text.contains("打断了正在校对的批次") })
+    XCTAssertTrue(current.contains { $0.kind == .goal && $0.text.contains("2/5") && $0.text.contains("5/5") })
+    XCTAssertTrue(current.contains { $0.kind == .constraint && $0.text.contains("不得刷新索引") })
+    XCTAssertTrue(current.contains { $0.kind == .plan && $0.text.contains("a1b2c3d") && $0.text.contains("验证一份样本") })
+    XCTAssertFalse(current.contains { $0.kind == .choice })
+    let transmitted = blocks.map(\.text).joined(separator: "\n")
+    for noise in ["Deepseek Flash", "demo-", "writer", "▄", "│", "▏", "/example", "89.2K", "ctrl+p", "commands", "archive"] {
+      XCTAssertFalse(transmitted.contains(noise), "Chrome survived: \(noise)")
+    }
+  }
+
+  func testUnrelatedPlanActionCanStillCarryARelevantBoundary() {
+    let text = Self.review.text.replacingOccurrences(of: "2. 整理过期标签。",
+      with: "2. 整理过期标签（其他部门的条目先不动）。")
+    let brief = DecisionSnapshot(id: 1, name: "catalog", text: text).prepared()
+    XCTAssertTrue(brief.blocks.contains { $0.kind == .constraint && $0.text.contains("其他部门的条目先不动") })
+    XCTAssertFalse(brief.blocks.contains { $0.text.contains("整理过期标签") })
+  }
+
+  private static let checksMenu = DecisionSnapshot(id: 3, name: "chapters", text: """
+    请选择要导出的章节（可多选）
+    ❯ [ ] 摘要
+      [x] 图表
+      [ ] 附录
+      提交
+    空格切换，回车提交
+    """)
+
+  func testExplicitSingleSelectMenuDoesNotInferACheckFromFocus() throws {
+    let snapshot = DecisionSnapshot(id: 1, name: "export", text: """
+      Choose one export format:
+      ❯ 1. CSV
+        2. JSON
+      Enter to confirm
+      """, context: "Which format should be archived?")
+    let brief = snapshot.prepared()
+    let menu = try XCTUnwrap(brief.menu)
+    XCTAssertEqual(menu.mode, .single)
+    XCTAssertEqual(menu.items.count, 2)
+    XCTAssertTrue(menu.items[0].label.contains("CSV"))
+    XCTAssertTrue(menu.items[0].focused)
+    XCTAssertNotEqual(menu.items[0].selected, true)
+    XCTAssertTrue(menu.items[1].label.contains("JSON"))
+    XCTAssertFalse(menu.items[1].focused)
+    XCTAssertTrue(try XCTUnwrap(menu.submitHint).contains("Enter"))
+    XCTAssertFalse(menu.submitFocused)
+    XCTAssertFalse(menu.truncated)
+    XCTAssertFalse(brief.blocks.contains { $0.source == .current && $0.text.contains("archived") })
+  }
+
+  func testReadOnlyMenusKeepNumericKeysAndSeparateSubmitFromAnswers() throws {
+    let middle = """
+      Choose one region:
+        East
+      ❯ West
+        North
+      ↑↓ navigate · Enter to confirm
+      """
+    let menu = try XCTUnwrap(TerminalChoiceMenu.detect(in: middle))
+    XCTAssertEqual(menu.items.map(\.label), ["East", "West", "North"])
+    XCTAssertEqual(menu.items.map(\.focused), [false, true, false])
+    XCTAssertTrue(menu.items.allSatisfy { $0.selected == nil })
+    XCTAssertNil(TerminalChoiceMenu.detect(in: middle + "\nSubmitted.\nBuild complete."))
+
+    let numbered = try XCTUnwrap(TerminalChoiceMenu.detect(in: "Choose one region:\n❯ 2. East\n  4. West\nEnter to confirm"))
+    XCTAssertEqual(numbered.items.map(\.label), ["2. East", "4. West"])
+    let wrapped = DecisionSnapshot(id: 1, name: "test", text: """
+      Select one or more:
+      ❯ [x] Preserve the snapshot
+            and its metadata
+        [ ] Discard the draft
+      Space to toggle · Enter to submit
+      """).prepared()
+    XCTAssertEqual(wrapped.menu?.items.count, 2)
+    XCTAssertEqual(wrapped.menu?.items.first?.label, "Preserve the snapshot\nand its metadata")
+    XCTAssertFalse(wrapped.blocks.contains { $0.text.contains("metadata") })
+    let submit = try XCTUnwrap(TerminalChoiceMenu.detect(in: "❯ Submit answers\nEnter to submit"))
+    XCTAssertTrue(submit.items.isEmpty)
+    XCTAssertTrue(submit.submitFocused)
+    XCTAssertTrue(try XCTUnwrap(submit.submitHint).contains("Enter"))
+  }
+
+  func testMultipleSelectionSeparatesCheckedRowsFocusAndSubmit() throws {
+    let brief = Self.checksMenu.prepared()
+    let menu = try XCTUnwrap(brief.menu)
+    XCTAssertEqual(menu.mode, .multiple)
+    XCTAssertEqual(menu.items.map(\.label), ["摘要", "图表", "附录"])
+    XCTAssertEqual(menu.items.map(\.selected), [false, true, false])
+    XCTAssertEqual(menu.items.map(\.focused), [true, false, false])
+    XCTAssertTrue(try XCTUnwrap(menu.selectionHint).contains("空格"))
+    XCTAssertTrue(try XCTUnwrap(menu.submitHint).contains("回车"))
+    XCTAssertFalse(menu.submitFocused)
+    XCTAssertFalse(menu.truncated)
+
+    let submit = DecisionSnapshot(id: 3, name: "chapters", text: """
+      Select one or more chapters:
+        [x] Introduction
+        [ ] References
+      ❯ Submit
+      Space to select · Enter to submit
+      """)
+    let selected = try XCTUnwrap(submit.prepared().menu)
+    XCTAssertEqual(selected.items.map(\.label), ["Introduction", "References"])
+    XCTAssertEqual(selected.items.map(\.selected), [true, false])
+    XCTAssertFalse(selected.items.contains { $0.focused })
+    XCTAssertTrue(selected.submitFocused)
+    XCTAssertTrue(try XCTUnwrap(selected.selectionHint).contains("Space"))
+    XCTAssertTrue(try XCTUnwrap(selected.submitHint).contains("Enter"))
+  }
+
+  func testMenuCannotInferSubmitKeysOrTransferFromHistory() throws {
+    let previous = DecisionSnapshot(id: 4, name: "preview", text: "Export complete.", context: Self.checksMenu.text)
+    XCTAssertNil(previous.prepared().menu)
+    XCTAssertNil(Self.review.prepared().menu)
+    let noKeys = DecisionSnapshot(id: 5, name: "preview", text: """
+      Choose one export format:
+      1) CSV
+      2) JSON
+      """)
+    let noHints = try XCTUnwrap(noKeys.prepared().menu)
+    XCTAssertNil(noHints.submitHint)
+    XCTAssertFalse(noHints.submitFocused)
+    XCTAssertEqual(noHints.items.count, 2)
+  }
+
+  func testLongMenuIsMarkedIncompleteAndLeavesRoomForItsQuestion() throws {
+    let labels = (1...30).map { i in
+      "[ ] 章节 \(i) " + String(repeating: "长", count: 48)
+    }
+    let snapshot = DecisionSnapshot(id: 5, name: "long-menu",
+      text: (["请选择要导出的章节（可多选）"] + labels + ["Space to select · Enter to submit"]).joined(separator: "\n"))
+    let brief = snapshot.prepared()
+    let menu = try XCTUnwrap(brief.menu)
+    XCTAssertTrue(menu.truncated)
+    XCTAssertFalse(menu.items.isEmpty)
+    XCTAssertLessThan(menu.items.count, labels.count)
+    XCTAssertLessThanOrEqual(try JSONEncoder().encode(brief).count, DecisionBrief.maxEncodedBytes)
+    XCTAssertTrue(brief.blocks.contains { $0.source == .current && $0.text.contains("请选择要导出的章节") })
+  }
+
+  func testStatusLookingValuesStayWhenTheyExplainADecision() {
+    let snapshot = DecisionSnapshot(id: 2, name: "usage-review", text: """
+      原因：历史记录显示转换阶段的 CPU 占用达 92%。
+      目标：保留 /example/archives 输入，输出快照。
+      是否把批次减半？
+      """)
+    let brief = snapshot.prepared()
+    XCTAssertTrue(brief.blocks.contains { $0.kind == .rationale && $0.text.contains("92%") })
+    XCTAssertTrue(brief.blocks.contains { $0.kind == .goal && $0.text.contains("/example/archives") })
+    XCTAssertTrue(brief.blocks.contains { $0.kind == .question && $0.text.contains("批次减半") })
+  }
+
   func testLocalCompressionRedactsBeforeRankingAndKeepsEarlyConstraint() throws {
-    let preview = Self.example.sanitized()
-    XCTAssertEqual(preview, preview.sanitized())
-    let context = try XCTUnwrap(preview.context)
-    XCTAssertLessThanOrEqual(context.utf8.count, DecisionSnapshot.maxContextBytes)
-    let lines = context.components(separatedBy: .newlines)
-    XCTAssertLessThanOrEqual(lines.count, DecisionSnapshot.maxContextLines)
-    XCTAssertEqual(lines.filter { $0.contains("Building fixture") }, ["Building fixture part 125 (125%)"])
+    let preview = Self.example.prepared()
+    let history = preview.blocks.filter { $0.source == .history }
+    let context = history.map(\.text).joined(separator: "\n")
+    XCTAssertLessThanOrEqual(history.filter { $0.text.contains("Building fixture") }.count, 1)
     XCTAssertTrue(context.contains("Constraint: report must support nested fields."))
     XCTAssertTrue(context.contains("Decided to use the existing editor."))
     XCTAssertTrue(context.contains("Tests passed."))
     XCTAssertFalse(context.contains("history-private"))
-    XCTAssertFalse(preview.text.contains("screen-private"))
-    XCTAssertTrue(preview.text.contains(Self.question))
+    let current = preview.blocks.filter { $0.source == .current }.map(\.text)
+    XCTAssertFalse(current.contains { $0.contains("screen-private") })
+    XCTAssertTrue(current.contains(Self.question))
+  }
+
+  func testEncodedBudgetPrioritizesTheQuestionAndItsEarlierConstraints() throws {
+    let old = (1...100).map { "Diagnostic row \($0): " + String(repeating: "旧", count: 48) }
+    let history = (["Constraint: use the signed manifest."] + old).joined(separator: "\n")
+    let status = (1...80).map { "Analyzing catalog page \($0) of 80..." }
+    let snapshot = DecisionSnapshot(id: 7, name: "unicode-example",
+      text: (status + [Self.review.text]).joined(separator: "\n"), context: history)
+    let preview = snapshot.prepared()
+    let encoded = try JSONEncoder().encode(preview)
+    XCTAssertLessThanOrEqual(encoded.count, DecisionBrief.maxEncodedBytes)
+    XCTAssertTrue(preview.blocks.contains { $0.source == .history && $0.text.contains("signed manifest") })
+    XCTAssertTrue(preview.blocks.contains { $0.source == .current && $0.kind == .question && $0.text.contains("只验证样本") })
+    XCTAssertTrue(preview.blocks.contains { $0.source == .current && $0.kind == .plan && $0.text.contains("a1b2c3d") })
   }
 
   func testVisibleUnicodeBoundsAndCommonSecrets() throws {
@@ -45,14 +244,14 @@ final class DecisionAnalysisTests: XCTestCase {
     ]
     let content = String(repeating: "文", count: 4000) + "\n" + secrets.joined(separator: "\n") + "\n请选格式"
     let snapshot = DecisionSnapshot(id: 1, name: "API_TOKEN=fixture-name-value", text: content, context: "\n  ")
-    let preview = snapshot.sanitized()
-    XCTAssertLessThanOrEqual(preview.text.utf8.count, DecisionSnapshot.maxScreenBytes)
-    XCTAssertFalse(preview.text.contains("fixture"))
-    XCTAssertFalse(preview.text.contains("�"))
+    let preview = snapshot.prepared()
+    let current = preview.blocks.filter { $0.source == .current }.map(\.text).joined(separator: "\n")
+    XCTAssertLessThanOrEqual(current.utf8.count, 4096)
+    XCTAssertFalse(current.contains("fixture"))
+    XCTAssertFalse(current.contains("�"))
     XCTAssertFalse(preview.name.contains("fixture"))
-    XCTAssertTrue(preview.text.hasSuffix("请选格式"))
-    XCTAssertNil(preview.context)
-    XCTAssertEqual(preview, preview.sanitized())
+    XCTAssertTrue(current.contains("请选格式"))
+    XCTAssertFalse(preview.blocks.contains { $0.source == .history })
   }
 
   func testSendsExactlyPreviewedFieldsAndParsesActionableOptions() async throws {
@@ -65,13 +264,25 @@ final class DecisionAnalysisTests: XCTestCase {
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         XCTAssertEqual(messages.compactMap { $0["role"] }, ["system", "user"])
         let content = try XCTUnwrap(messages.last?["content"])
-        for excluded in ["screen-private", "history-private", DecisionAnalysisTests.key] {
+        for excluded in ["screen-private", "history-private", DecisionAnalysisTests.key, "Deepseek Flash", "89.2K"] {
           XCTAssertFalse(content.contains(excluded))
         }
-        let sent = try JSONDecoder().decode([DecisionSnapshot].self, from: Data(content.utf8))
-        XCTAssertEqual(sent, [DecisionAnalysisTests.example.sanitized()])
+        let sent = try JSONDecoder().decode([DecisionBrief].self, from: Data(content.utf8))
+        XCTAssertEqual(sent, [DecisionAnalysisTests.example.prepared(), DecisionAnalysisTests.review.prepared(),
+                              DecisionAnalysisTests.checksMenu.prepared()])
         let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(content.utf8)) as? [[String: Any]])
-        XCTAssertEqual(Set(try XCTUnwrap(rows.first).keys), ["id", "name", "text", "context"])
+        for (row, brief) in zip(rows, sent) {
+          let keys = brief.menu == nil ? ["id", "name", "blocks"] : ["id", "name", "blocks", "menu"]
+          XCTAssertEqual(Set(row.keys), Set(keys))
+          let blocks = try XCTUnwrap(row["blocks"] as? [[String]])
+          XCTAssertEqual(blocks, brief.blocks.map { [$0.source.rawValue, $0.kind.rawValue, $0.text] })
+        }
+        let chapters = try XCTUnwrap(sent.first { $0.id == DecisionAnalysisTests.checksMenu.id })
+        let chapterLabels = try XCTUnwrap(chapters.menu).items.map(\.label)
+        XCTAssertEqual(chapterLabels, ["摘要", "图表", "附录"])
+        for option in chapterLabels {
+          XCTAssertFalse(chapters.blocks.contains { $0.text.contains(option) }, "Duplicated menu item: \(option)")
+        }
         return (200, try completion("""
           {"decisions":[{"session_id":37,"question":"选哪种报告格式？","evidence":"\(DecisionAnalysisTests.question)",
           "options":[{"reply":"1) CSV","tradeoff":"表格工具可以直接打开，但嵌套字段需要平铺。"},
@@ -81,7 +292,8 @@ final class DecisionAnalysisTests: XCTestCase {
     }
     let session = Endpoint.session()
     defer { session.invalidateAndCancel() }
-    let result = try await SessionAdvisor.analyze([Self.example.sanitized()], key: Self.key, session: session)
+    let result = try await SessionAdvisor.analyzePrepared([Self.example.prepared(), Self.review.prepared(), Self.checksMenu.prepared()],
+                                                         key: Self.key, session: session)
     let decision = try XCTUnwrap(result.first)
     XCTAssertEqual(result.count, 1)
     XCTAssertEqual(decision.sessionID, Self.example.id)
@@ -92,7 +304,7 @@ final class DecisionAnalysisTests: XCTestCase {
   }
 
   func testOnlyGroundedDistinctChoicesAreAccepted() throws {
-    let screen = Self.example.sanitized()
+    let screen = Self.example.prepared()
     let csv = DecisionOption(reply: "CSV", tradeoff: "Tabular shape.")
     let json = DecisionOption(reply: "JSON", tradeoff: "Retains nested fields.")
     func decision(id: Int64 = 37, quote: String = DecisionAnalysisTests.question,
@@ -103,6 +315,7 @@ final class DecisionAnalysisTests: XCTestCase {
     for invalid in [
       [decision(id: -1)], [decision(id: 21)], [decision(), decision()],
       [decision(quote: "Which editor should we use?")], // Appears only in history.
+      [decision(quote: "Constraint: report must support nested fields.")],
       [decision(quote: "CSV or XML?")], [decision(quote: "")], [decision(quote: " ")],
       [decision(options: [csv])], [decision(options: [csv, csv])],
       [decision(options: [csv, DecisionOption(reply: "JSON", tradeoff: "")])],
@@ -118,8 +331,36 @@ final class DecisionAnalysisTests: XCTestCase {
     let quotes = ["Which format?", "Which language?", "Which audience?", "Which timezone?"]
     let multi = DecisionSnapshot(id: 37, name: "report", text: quotes.joined(separator: "\n"))
     let questions = quotes.map { decision(quote: $0) }
-    XCTAssertEqual(try SessionAdvisor.validatedDecisions(Array(questions.prefix(3)), screens: [multi]).count, 3)
-    XCTAssertThrowsError(try SessionAdvisor.validatedDecisions(questions, screens: [multi]))
+    XCTAssertEqual(try SessionAdvisor.validatedDecisions(Array(questions.prefix(3)), screens: [multi.prepared()]).count, 3)
+    XCTAssertThrowsError(try SessionAdvisor.validatedDecisions(questions, screens: [multi.prepared()]))
+  }
+
+  func testScopedConfirmationCannotOfferFollowUpPlanItemsAsReplies() throws {
+    let source = Self.review.prepared()
+    let quote = try XCTUnwrap(source.blocks.first { $0.kind == .question && $0.source == .current }).text
+    let approve = DecisionOption(reply: "先整理过期标签", tradeoff: "先取得样本结果。", intent: .approve)
+    let hold = DecisionOption(reply: "直接修改周报模板", tradeoff: "等待更多样本再判断。", intent: .hold)
+    let unrelated = DecisionOption(reply: "新建周报", tradeoff: "影响周报。")
+    func decision(_ options: [DecisionOption], recommend: Int? = nil) -> SessionDecision {
+      SessionDecision(sessionID: source.id, question: "是否先验证样本？", evidence: quote, options: options,
+                      recommendedIndex: recommend, reason: recommend == nil ? "" : "先验证可以检查当前样本。")
+    }
+    let response = decision([unrelated, hold, approve], recommend: 2)
+    let scoped = try XCTUnwrap(SessionAdvisor.validatedDecisions([response], screens: [source]).first)
+    XCTAssertEqual(scoped.options.count, 2)
+    XCTAssertTrue(scoped.options.contains { $0.intent == .approve })
+    XCTAssertTrue(scoped.options.contains { $0.intent == .hold })
+    let selected = try XCTUnwrap(scoped.recommendedIndex)
+    XCTAssertEqual(scoped.options[selected].intent, .approve)
+    for option in scoped.options {
+      XCTAssertFalse(option.reply.contains("标签") || option.reply.contains("周报"))
+    }
+    let removed = decision([unrelated, hold, approve], recommend: 0)
+    let noRecommendation = try XCTUnwrap(SessionAdvisor.validatedDecisions([removed], screens: [source]).first)
+    XCTAssertNil(noRecommendation.recommendedIndex)
+    for invalid in [[unrelated, approve], [unrelated, hold], [approve, approve, hold]] {
+      XCTAssertThrowsError(try SessionAdvisor.validatedDecisions([decision(invalid)], screens: [source]))
+    }
   }
 
   func testBadSelectionsAndEmptyScreensNeverReachNetwork() async throws {
@@ -137,10 +378,25 @@ final class DecisionAnalysisTests: XCTestCase {
     }
     let empty = try await SessionAdvisor.analyze((0..<6).map { screen(Int64($0)) }, key: Self.key, session: session)
     XCTAssertTrue(empty.isEmpty)
+    let footer = DecisionSnapshot(id: 3, name: "idle", text: "│ ▏\n━━━━━━\n│ Build · Deepseek Flash",
+                                  context: "Which report format do you want?")
+    let historyOnly = try await SessionAdvisor.analyze([footer], key: Self.key, session: session)
+    XCTAssertTrue(historyOnly.isEmpty)
     do {
       let accidental = DecisionSnapshot(id: 1, name: "test", text: "notes \(Self.key)")
       _ = try await SessionAdvisor.analyze([accidental], key: Self.key, session: session)
       XCTFail("API credential was sent as screen data")
+    } catch SessionAdvisorError.credentialInSnapshot {}
+    let keyedMenu = DecisionSnapshot(id: 1, name: "test", text: """
+      Choose one profile:
+      ❯ 1. \(Self.key)
+        2. Other
+      Enter to confirm
+      """)
+    XCTAssertEqual(keyedMenu.prepared().menu?.items.first?.label, "1. " + Self.key)
+    do {
+      _ = try await SessionAdvisor.analyze([keyedMenu], key: Self.key, session: session)
+      XCTFail("Credential in a menu label reached the network")
     } catch SessionAdvisorError.credentialInSnapshot {}
   }
 
@@ -185,14 +441,25 @@ final class DecisionAnalysisTests: XCTestCase {
                   capture.text.trimmingCharacters(in: .whitespacesAndNewlines) == lines[i],
                   capture.context?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
             else { return XCTFail("Unexpected SSH content. No snapshots were submitted.") }
-            screens.append(capture.sanitized())
+            screens.append(capture)
           }
           usedSSH = true
         }
       }
+      // This fourth fixture is generated in memory and never reads a user's pane.
+      let reviewID = try XCTUnwrap((0...Int64(screens.count)).first { id in !screens.contains { $0.id == id } })
+      let review = DecisionSnapshot(id: reviewID, name: Self.review.name, text: Self.review.text)
+      let sshIDs = usedSSH ? Set(screens.map(\.id)) : []
+      screens.append(review)
       let result = try await SessionAdvisor.analyze(screens, key: key)
-      XCTAssertEqual(Set(result.map(\.sessionID)), Set(screens.prefix(2).map(\.id)))
-      XCTAssertEqual(result.count, 2)
+      XCTAssertEqual(Set(result.map(\.sessionID)), [screens[0].id, screens[1].id, reviewID])
+      XCTAssertEqual(result.count, 3)
+      let confirmation = try XCTUnwrap(result.first { $0.sessionID == reviewID })
+      XCTAssertTrue(confirmation.options.contains { $0.intent == .approve })
+      XCTAssertTrue(confirmation.options.contains { $0.intent == .hold })
+      for option in confirmation.options {
+        XCTAssertFalse(option.reply.contains("周报") || option.reply.contains("过期标签"))
+      }
       let checks = [[["csv", "1"], ["json", "2"]], [["quick", "快速"], ["full", "完整", "全量"]]]
       for i in 0..<2 {
         let decision = try XCTUnwrap(result.first { $0.sessionID == screens[i].id })
@@ -205,7 +472,8 @@ final class DecisionAnalysisTests: XCTestCase {
         }
       }
       let samples = result.map { value -> [String: Any] in
-        ["session": screens.first { $0.id == value.sessionID }?.name ?? "", "question": value.question,
+        ["session": screens.first { $0.id == value.sessionID }?.name ?? "",
+         "source": sshIDs.contains(value.sessionID) ? "synthetic-ssh" : "synthetic-local", "question": value.question,
          "evidence": value.evidence, "options": value.options.map { ["reply": $0.reply, "tradeoff": $0.tradeoff] },
          "recommendedIndex": value.recommendedIndex.map { $0 as Any } ?? NSNull(), "reason": value.reason]
       }

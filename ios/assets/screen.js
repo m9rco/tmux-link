@@ -116,27 +116,32 @@ function decisionScreen() {
   const buffer = term.buffer.active;
   function lines(start, end) {
     const result = [];
+    let logicalLine = '';
+    function finishLine() {
+      const value = logicalLine.trimEnd();
+      if (value || result[result.length - 1]) result.push(value);
+      logicalLine = '';
+    }
     for (let y = start; y < end; y++) {
       const line = buffer.getLine(y);
       if (!line) continue;
-      let value = '';
-      for (let x = 0; x < line.length;) {
+      if (!line.isWrapped && y > start) finishLine();
+      // xterm may retain off-screen cells from a wider terminal after a resize.
+      for (let x = 0; x < Math.min(line.length, term.cols);) {
         const cell = line.getCell(x);
         if (!cell) break;
         const width = Math.max(1, cell.getWidth());
-        value += cell.isInvisible() ? ' '.repeat(width) : (cell.getChars() || ' ');
+        logicalLine += cell.isInvisible() ? ' '.repeat(width) : (cell.getChars() || ' ');
         x += width;
       }
-      value = value.trimEnd();
-      if (value || result[result.length - 1]) result.push(value);
     }
-    return result;
+    finishLine();
+    return result.join('\n').slice(-32768);
   }
-  // A phone scrolled into local history may still have a live prompt below the viewport.
+  // Capture the live grid before pruning chrome on the phone, including a rationale near the top.
   const top = buffer.baseY;
-  const text = lines(top, top + term.rows).slice(-40).join('\n').slice(-6000);
-  const context = buffer.type === 'normal'
-    ? lines(Math.max(0, top - 120), top).join('\n').slice(-16384) : '';
+  const text = lines(top, top + term.rows);
+  const context = buffer.type === 'normal' ? lines(Math.max(0, top - 120), top) : '';
   return {text, context};
 }
 

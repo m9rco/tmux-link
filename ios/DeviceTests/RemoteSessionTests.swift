@@ -403,11 +403,15 @@ final class RemoteSessionTests: XCTestCase {
       const normal = decisionScreen();
       await write("\x1b[?1049h\x1b[HChoose format: CSV or JSON?");
       const alternate = decisionScreen();
+      term.resize(24, 52);
+      await write("\x1b[2J\x1b[H" + "WHY-KEEP-THIS-" + "X".repeat(30) + "\r\n" + "status\r\n".repeat(45) + "Approve?");
+      const tall = decisionScreen();
       return [normal.text.includes('Proceed? [y/n]'), !normal.text.includes('EARLIER-GOAL'),
               normal.context.includes('EARLIER-GOAL'), !normal.text.includes('hidden-cell'),
-              alternate.text.includes('Choose format'), alternate.context === ''];
+              alternate.text.includes('Choose format'), alternate.context === '',
+              tall.text.includes('WHY-KEEP-THIS-' + 'X'.repeat(30)), tall.text.includes('Approve?')];
       """#, arguments: [:], in: nil, contentWorld: .page) as? [Bool]
-    XCTAssertEqual(checks, Array(repeating: true, count: 6))
+    XCTAssertEqual(checks, Array(repeating: true, count: 8))
   }
 
   @MainActor
