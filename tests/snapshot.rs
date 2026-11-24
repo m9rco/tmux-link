@@ -675,3 +675,100 @@ fn bound_codemaker_ignores_heterogeneous_parts_and_keeps_diagnostics_private() {
         assert!(!diagnostic.contains(sensitive));
     }
 }
+
+#[test]
+fn codemaker_pipe_export_allows_worker_to_append_to_large_existing_store() {
+    let server = Server::codemaker("pipe-store");
+    let store = server.0.join("store");
+    let original_size = 65 * 1024 * 1024;
+    fs::File::create(&store)
+        .unwrap()
+        .set_len(original_size)
+        .unwrap();
+    fs::write(
+        server.0.join("messages.json"),
+        r#"{"info":{"id":"ses_fixture"},"messages":[
+        {"info":{"id":"msg1","sessionID":"ses_fixture","role":"user","time":{"created":1}},
+         "parts":[{"type":"text","text":"Keep the signed catalog."}]}
+    ]}"#,
+    )
+    .unwrap();
+    // The exporter appends to its own sparse store while producing a tiny
+    // transcript. Its worker inherits stdout after the launcher exits.
+    fs::write(
+        server.0.join("codemaker"),
+        r#"#!/bin/sh
+test "$1/$2/$3" = '--pure/export/ses_fixture' || exit 2
+(
+    if test -p /dev/fd/1; then mode=pipe; else mode=file; fi
+    echo "$mode" >> "$HOME/captures"
+    printf x >> "$HOME/store" || exit 3
+    exec cat "$HOME/messages.json"
+) &
+exit 0
+"#,
+    )
+    .unwrap();
+    let bind = server.codemaker_agent(&["bind-session", "0", "ses_fixture"], None);
+    assert!(
+        bind.status.success(),
+        "export could not append to its existing store"
+    );
+    let result = server.codemaker_agent(&["attach"], Some("tmux-link-snapshot-v2 0"));
+    assert!(result.status.success());
+    let pane: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let context = &pane["applicationContext"];
+    assert_eq!(context["sessionID"], "ses_fixture");
+    assert_eq!(context["messages"][0]["text"], "Keep the signed catalog.");
+    assert_eq!(fs::metadata(&store).unwrap().len(), original_size + 2);
+    assert_eq!(
+        fs::read_to_string(server.0.join("captures")).unwrap(),
+        "pipe\npipe\n"
+    );
+}
+
+#[test]
+fn failed_codemaker_binds_report_sanitized_exit_status_and_leave_pane_unbound() {
+    let server = Server::codemaker("failed-bind");
+    fs::write(
+        server.0.join("codemaker"),
+        r#"#!/bin/sh
+test "$1/$2" = '--pure/export' || exit 2
+returned="$3"
+case "$3" in
+    ses_wrong_id) returned=ses_other; code=0 ;;
+    ses_missing) printf 'Session not found: ses_missing\n' >&2; code=17 ;;
+    *) code=23 ;;
+esac
+printf '{"info":{"id":"%s","title":"PRIVATE-EXPORT-BODY"},"messages":[]}' "$returned"
+printf 'API_KEY=PRIVATE-STDERR-KEY\n' >&2
+exit "$code"
+"#,
+    )
+    .unwrap();
+    for (id, code, missing) in [
+        ("ses_wrong_id", None, false),
+        ("ses_missing", Some("17"), true),
+        ("ses_failure", Some("23"), false),
+    ] {
+        let bind = server.codemaker_agent(&["bind-session", "0", id], None);
+        assert!(!bind.status.success() && bind.stdout.is_empty());
+        let error = String::from_utf8_lossy(&bind.stderr);
+        if let Some(code) = code {
+            let lower = error.to_ascii_lowercase();
+            assert!(
+                lower.contains("exit") && lower.contains(code),
+                "missing exit code for {id}"
+            );
+            assert_eq!(lower.contains("not found"), missing);
+        }
+        for private in ["PRIVATE-EXPORT-BODY", "PRIVATE-STDERR-KEY", "BOUND-READY"] {
+            assert!(!error.contains(private));
+        }
+        let result = server.codemaker_agent(&["attach"], Some("tmux-link-snapshot-v2 0"));
+        assert!(result.status.success());
+        let pane: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(pane["applicationContextStatus"], "unbound");
+        assert!(pane.get("applicationContext").is_none());
+    }
+}

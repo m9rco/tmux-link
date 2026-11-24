@@ -11,10 +11,11 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
+        process::ExitStatusExt,
     },
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
@@ -75,32 +76,6 @@ fn export_file() -> Result<(File, File)> {
     Ok((reader, writer))
 }
 
-fn limit_export(command: &mut Command, limit: usize) -> Result<()> {
-    let mut size = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: getrlimit initializes an owned rlimit structure.
-    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut size) } != 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    // The extra byte distinguishes an oversized write from a valid exact fit,
-    // including when the exporting runtime ignores a short write.
-    size.rlim_max = size.rlim_max.min((limit as libc::rlim_t).saturating_add(1));
-    size.rlim_cur = size.rlim_cur.min(size.rlim_max);
-    // SAFETY: only setrlimit and errno inspection run in the post-fork child.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::setrlimit(libc::RLIMIT_FSIZE, &size) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        })
-    };
-    Ok(())
-}
-
 pub(super) fn resolve() -> Result<PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     env::split_paths(&path)
@@ -121,15 +96,52 @@ pub(super) fn resolve() -> Result<PathBuf> {
 
 pub(super) fn read(executable: &Path, directory: &Path, id: &str) -> Result<Transcript> {
     ensure!(valid_id(id), "invalid CodeMaker session ID");
+    let args = ["--pure", "export", id];
+    let start = Instant::now();
     let bytes = output(
         executable,
         directory,
-        &["--pure", "export", id],
-        Capture::Export,
+        &args,
+        Capture::Pipe,
         MAX_EXPORT_BYTES,
         DEADLINE,
-    )?;
-    from_bytes(&bytes, id)
+    )
+    .context("CodeMaker export via stdout pipe failed")?;
+    let error = match from_bytes(&bytes, id) {
+        Ok(transcript) => return Ok(transcript),
+        Err(error) => error,
+    };
+    // Some CLI versions exit successfully before the last asynchronous stdout
+    // write finishes. An empty result or a complete, invalid export is a different failure.
+    let json = bytes
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(&bytes)
+        .trim_ascii_start();
+    if !json.starts_with(b"{")
+        || !serde_json::from_slice::<&serde_json::value::RawValue>(json)
+            .is_err_and(|err| err.is_eof())
+    {
+        return Err(error).context("invalid CodeMaker export from stdout pipe");
+    }
+    drop(bytes);
+    let remaining = DEADLINE
+        .checked_sub(start.elapsed())
+        .filter(|duration| !duration.is_zero())
+        .context("CodeMaker stdout pipe returned incomplete JSON and export deadline expired")?;
+    let retry = output(
+        executable,
+        directory,
+        &args,
+        Capture::Export,
+        MAX_EXPORT_BYTES,
+        remaining,
+    )
+    .and_then(|bytes| from_bytes(&bytes, id));
+    retry.with_context(|| {
+        format!(
+            "CodeMaker stdout pipe returned incomplete JSON ({error}); anonymous file retry failed"
+        )
+    })
 }
 
 fn output(
@@ -168,7 +180,7 @@ fn output(
             .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
             .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
         let mut reader = match capture {
@@ -180,13 +192,15 @@ fn output(
                 let (reader, writer) = export_file()?;
                 writer.lock_exclusive()?;
                 command.stdout(Stdio::from(writer));
-                limit_export(&mut command, limit)?;
                 Some(reader)
             }
         };
         let mut child = command.spawn().context("could not launch CodeMaker")?;
         drop(command); // Close our copy of the writer passed to the child.
         let pid = child.id().context("missing CodeMaker process ID")? as libc::pid_t;
+        let hints = tokio::spawn(super::codemaker_status::failure_hint(
+            child.stderr.take().context("missing CodeMaker stderr")?,
+        ));
         let mut bytes = Vec::new();
         let result = timeout(deadline, async {
             if let Some(file) = &reader {
@@ -198,7 +212,7 @@ fn output(
                     match FileExt::try_lock_shared(file) {
                         Ok(()) => break,
                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                            tokio::time::sleep(Duration::from_millis(15)).await
+                            tokio::time::sleep(Duration::from_millis(5)).await
                         }
                         Err(err) => return Err(err.into()),
                     }
@@ -222,7 +236,17 @@ fn output(
         let error = match result {
             Ok(Ok(status)) => {
                 let status = status.context("could not wait for CodeMaker")?;
-                ensure!(status.success(), "CodeMaker command failed");
+                if !status.success() {
+                    let reason = match (status.code(), status.signal()) {
+                        (Some(code), _) => format!("exit code {code}"),
+                        (_, Some(signal)) => format!("signal {signal}"),
+                        _ => "unknown exit status".to_owned(),
+                    };
+                    if let Ok(Ok(Some(hint))) = timeout(Duration::from_millis(100), hints).await {
+                        return Err(anyhow!("CodeMaker command failed ({reason}, {hint})"));
+                    }
+                    return Err(anyhow!("CodeMaker command failed ({reason})"));
+                }
                 if let Some(file) = reader.take() {
                     file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
                     ensure!(
@@ -292,7 +316,8 @@ pub(super) fn choose(executable: &Path, directory: &Path) -> Result<String> {
         Capture::Pipe,
         MAX_LIST_BYTES,
         DEADLINE,
-    )?;
+    )
+    .context("CodeMaker session list via stdout pipe failed")?;
     let sessions = candidates(&bytes, directory)?;
     ensure!(
         !sessions.is_empty(),
@@ -407,7 +432,7 @@ esac
     }
 
     #[test]
-    fn export_uses_an_unlinked_regular_file_and_waits_for_all_writers() {
+    fn export_prefers_pipe_and_retries_only_truncated_json_in_a_private_regular_file() {
         let directory = env::temp_dir().join(format!(
             "tmux-link-export-test-{:016x}",
             getrandom::u64().unwrap()
@@ -415,12 +440,17 @@ esac
         fs::create_dir(&directory).unwrap();
         let executable = directory.join("codemaker");
         fs::write(&executable, r#"#!/usr/bin/env python3
-import os, resource, stat, sys, time
+import os, signal, stat, sys, time
 fd = os.fstat(1)
-assert stat.S_ISREG(fd.st_mode) and fd.st_nlink == 0 and fd.st_mode & 0o077 == 0
+regular = stat.S_ISREG(fd.st_mode)
+assert (regular and fd.st_nlink == 0 and fd.st_mode & 0o077 == 0) or stat.S_ISFIFO(fd.st_mode)
 action = sys.argv[-1]
+with open("attempts-" + action, "a") as record:
+    record.write("F" if regular else "P")
 if action in ("exact", "excess"):
-    assert resource.getrlimit(resource.RLIMIT_FSIZE) == (5, 5)
+    # Export byte limits must never apply to CodeMaker's database or WAL.
+    with open("db-wal-fixture", "wb") as wal:
+        wal.write(b'x' * 4096)
     os.write(1, b"1234" if action == "exact" else b"123456")
 elif action == "descendant":
     if os.fork() == 0:
@@ -433,26 +463,59 @@ elif action == "ses_large":
         # Reproduce a CLI which queues one large nonblocking write and exits immediately.
         os.set_blocking(1, False)
         os.write(1, b'{"unused":"' + b'x' * (7 * 1024 * 1024) + b'","info":{"id":"ses_large"},"messages":[]}')
+elif action == "ses_pipe":
+    assert not regular
+    os.write(1, b'{"info":{"id":"ses_pipe"},"messages":[]}')
 elif action == "ses_blank":
     os.write(1, b"  \n")
 elif action == "ses_bad":
     os.write(1, b'{"info":{"id":"ses_bad"},"messages":[]')
+elif action == "ses_syntax":
+    os.write(1, b'{"info":!}')
+elif action == "ses_wrong":
+    os.write(1, b'{"info":{"id":"ses_other"},"messages":[]}')
 elif action == "ses_failed":
-    os.write(1, b'{"info":{"id":"ses_failed"},"messages":[]}')
+    os.write(1, b'{"info":')
+    os.write(2, b'synthetic-private-diagnostic')
     os._exit(2)
+elif action == "ses_signal":
+    os.kill(os.getpid(), signal.SIGTERM)
 os._exit(0)
 "#).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let attempts = |id| fs::read_to_string(directory.join(format!("attempts-{id}"))).unwrap();
+        assert!(read(&executable, &directory, "ses_pipe").is_ok());
+        assert_eq!(attempts("ses_pipe"), "P");
         assert!(read(&executable, &directory, "ses_large").is_ok());
-        for id in ["ses_blank", "ses_bad", "ses_failed"] {
+        assert_eq!(attempts("ses_large"), "PF");
+        for (id, expected, diagnostic) in [
+            ("ses_blank", "P", "stdout pipe"),
+            ("ses_bad", "PF", "anonymous file retry"),
+            ("ses_syntax", "P", "Syntax"),
+            ("ses_wrong", "P", "does not match"),
+            ("ses_failed", "P", "exit code 2"),
+            ("ses_signal", "P", "signal 15"),
+        ] {
+            let error = read(&executable, &directory, id)
+                .err()
+                .expect("invalid export accepted");
+            let message = format!("{error:#}");
             assert!(
-                read(&executable, &directory, id).is_err(),
-                "{id} was accepted"
+                message.contains("stdout pipe") && message.contains(diagnostic),
+                "{message}"
             );
+            assert!(!message.contains("synthetic-private-diagnostic"));
+            assert_eq!(attempts(id), expected);
         }
         let run =
             |arg: &str, time| output(&executable, &directory, &[arg], Capture::Export, 4, time);
         assert_eq!(run("exact", DEADLINE).unwrap(), b"1234");
+        assert_eq!(
+            fs::metadata(directory.join("db-wal-fixture"))
+                .unwrap()
+                .len(),
+            4096
+        );
         assert!(
             run("excess", DEADLINE)
                 .unwrap_err()

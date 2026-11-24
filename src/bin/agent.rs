@@ -14,6 +14,8 @@ mod import_link;
 mod codemaker;
 #[path = "agent/codemaker_export.rs"]
 mod codemaker_export;
+#[path = "agent/codemaker_status.rs"]
+mod codemaker_status;
 #[path = "agent/snapshot.rs"]
 mod snapshot;
 
