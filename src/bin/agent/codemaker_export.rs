@@ -214,11 +214,14 @@ fn output(
                     "CodeMaker output exceeds the size limit"
                 );
             }
-            Ok(child.wait().await?)
+            // A wait error (e.g. ECHILD) does not guarantee ownership of this
+            // process group. Only pre-wait capture failures and timeouts kill it.
+            Ok(child.wait().await)
         })
         .await;
         let error = match result {
             Ok(Ok(status)) => {
+                let status = status.context("could not wait for CodeMaker")?;
                 ensure!(status.success(), "CodeMaker command failed");
                 if let Some(file) = reader.take() {
                     file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
