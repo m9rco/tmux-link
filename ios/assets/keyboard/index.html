@@ -7,11 +7,13 @@
   <link rel="stylesheet" href="keyboard.css">
 </head>
 <body>
-  <div id="choices"><button type="button" id="spelling" aria-label="按原文输入当前拼写"></button><div id="candidates" aria-label="候选词或标点"></div></div>
-  <div class="simple-keyboard" aria-label="终端键盘"></div>
+  <div id="punctuation" role="group" aria-label="常用终端符号">
+    <button type="button">/</button><button type="button">-</button><button type="button">_</button>
+    <button type="button">|</button><button type="button">~</button><button type="button">`</button>
+    <button type="button">=</button><button type="button">[</button><button type="button">]</button>
+  </div>
+  <div class="simple-keyboard" aria-label="英文终端键盘"></div>
   <script src="simple-keyboard.js"></script>
-  <script src="pinyin.js"></script>
-  <script src="decoder.js"></script>
   <script src="keyboard.js"></script>
 </body>
 </html>

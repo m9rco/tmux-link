@@ -147,6 +147,8 @@ def benchmark(device, tmp):
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testOfflineEnglishKeyboard",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testKeyboardRowAndCursorModes",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testBoundConversationUsesLatestReply",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testManagedStatusUsesPinnedSessionWithoutEnablingIt",

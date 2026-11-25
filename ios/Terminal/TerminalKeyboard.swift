@@ -92,16 +92,8 @@ final class TerminalTypingKeyboard: UIView {
     if previous?.verticalSizeClass != traitCollection.verticalSizeClass { panelHeight?.constant = preferredHeight }
   }
 
-  func clearComposition() {
-    surface.evaluateJavaScript("window.resetComposition?.()", completionHandler: nil)
-  }
-
-  func handleShortcut(_ key: String) {
-    surface.callAsyncJavaScript("handleShortcut(key)", arguments: ["key": key], in: nil, in: .page) {
-      [weak self] result in
-      // The native shortcut row can become available before the layout has loaded.
-      if case .failure = result { self?.onText?(key) }
-    }
+  func resetLayout() {
+    surface.evaluateJavaScript("window.resetLayout?.()", completionHandler: nil)
   }
 }
 
@@ -129,7 +121,7 @@ final class TerminalKeyboardBar: UIView {
       row.topAnchor.constraint(equalTo: topAnchor),
       row.bottomAnchor.constraint(equalTo: bottomAnchor)
     ])
-    for key: TerminalKey in [.escape, .tab, .interrupt, .prefix, .left, .right] {
+    for key: TerminalKey in [.escape, .tab, .interrupt, .prefix, .left, .up, .down, .right] {
       let button = UIButton(type: .system)
       button.setTitle(key.title, for: .normal)
       button.titleLabel?.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
@@ -139,6 +131,8 @@ final class TerminalKeyboardBar: UIView {
       case .interrupt: button.accessibilityLabel = "Control C"
       case .prefix: button.accessibilityLabel = "Control B"
       case .left: button.accessibilityLabel = "方向左"
+      case .up: button.accessibilityLabel = "方向上"
+      case .down: button.accessibilityLabel = "方向下"
       case .right: button.accessibilityLabel = "方向右"
       default: break
       }

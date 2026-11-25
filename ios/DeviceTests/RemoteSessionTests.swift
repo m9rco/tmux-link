@@ -27,6 +27,9 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   func configuration() throws -> Connection {
+    if let fixture = ProcessInfo.processInfo.environment["TMUX_LINK_E2E_FIXTURE"] {
+      return try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
+    }
     let file = try XCTUnwrap(
       FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
     ).appendingPathComponent("tmux-link-e2e.json")
@@ -698,33 +701,44 @@ final class RemoteSessionTests: XCTestCase {
     let bar = TerminalKeyboardBar()
     let buttons = descendants(bar).compactMap { $0 as? UIButton }
     let shortcuts = buttons.filter { $0.accessibilityIdentifier != "terminal.keyboard.hide" }
-    XCTAssertEqual(shortcuts.compactMap { $0.title(for: .normal) }, ["Esc", "Tab", "⌃C", "⌃B", "←", "→"])
+    let expected = ["Esc": "\u{1b}", "Tab": "\t", "⌃C": "\u{03}", "⌃B": "\u{02}",
+                    "↑": "\u{1b}[A", "↓": "\u{1b}[B", "←": "\u{1b}[D", "→": "\u{1b}[C"]
+    XCTAssertEqual(shortcuts.count, expected.count)
+    XCTAssertEqual(Set(shortcuts.compactMap { $0.title(for: .normal) }), Set(expected.keys))
     XCTAssertTrue(shortcuts.allSatisfy { !$0.isEnabled })
     bar.setReady(true)
     var keys: [String] = []
     bar.press = { keys.append($0) }
-    for button in shortcuts { button.sendActions(for: .touchUpInside) }
-    XCTAssertEqual(keys, ["\u{1b}", "\t", "\u{03}", "\u{02}", "\u{1b}[D", "\u{1b}[C"])
+    for button in shortcuts {
+      let title = try XCTUnwrap(button.title(for: .normal))
+      XCTAssertTrue(button.isEnabled)
+      XCTAssertEqual(button.accessibilityIdentifier, "terminal.keyboard." + title)
+      button.sendActions(for: .touchUpInside)
+      XCTAssertEqual(keys.last, expected[title])
+    }
+    XCTAssertEqual(keys.count, expected.count)
     let script = #"""
       await ready;
       const output = [];
       const watch = term.onData(s => output.push(s));
-      pressTerminalKey(left);
+      await new Promise(done => term.write('\x1b[?1l', done));
+      for (const key of arrows) pressTerminalKey(key);
       await new Promise(done => term.write('\x1b[?1h', done));
-      pressTerminalKey(left);
+      for (const key of arrows) pressTerminalKey(key);
       watch.dispose();
       return output;
       """#
-    let output = try await web.callAsyncJavaScript(script, arguments: ["left": TerminalKey.left.rawValue],
+    let arrows = [TerminalKey.up, .down, .left, .right].map(\.rawValue)
+    let output = try await web.callAsyncJavaScript(script, arguments: ["arrows": arrows],
                                                    in: nil, contentWorld: .page) as? [String]
-    XCTAssertEqual(output, ["\u{1b}[D", "\u{1b}OD"])
+    XCTAssertEqual(output, ["\u{1b}[A", "\u{1b}[B", "\u{1b}[D", "\u{1b}[C",
+                            "\u{1b}OA", "\u{1b}OB", "\u{1b}OD", "\u{1b}OC"])
   }
 
   @MainActor
-  func testOfflineEnglishAndPinyinKeyboard() async throws {
-    let saved = UserDefaults.standard.string(forKey: "terminal.typing.language")
+  func testOfflineEnglishKeyboard() async throws {
+    let saved = UserDefaults.standard.object(forKey: "terminal.typing.language")
     defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
-    // An installation upgraded from a release that remembered Chinese must also start in English.
     UserDefaults.standard.set("zh", forKey: "terminal.typing.language")
     let board = TerminalTypingKeyboard()
     let page = board.surface
@@ -735,68 +749,24 @@ final class RemoteSessionTests: XCTestCase {
       try await Task.sleep(nanoseconds: 50_000_000)
     }
     let script = #"""
+      function assertEnglishLayout() {
+        if (keyboard.getButtonElement('{lang}')) throw new Error('Unexpected language switch');
+      }
+      const tap = k => keyboard.getButtonElement(k).click();
+      assertEnglishLayout();
       const initialSpace = keyboard.getButtonElement('{space}').textContent;
-      const key = k => keyboard.handleButtonClicked(k);
-      key('a'); key('{shift}'); key('B'); key('{symbols}'); key('7'); key('{symbols}');
-      key('{lang}');
-      for (const c of 'nihaoshijie') key(c);
-      const phrase = options[0].text;
-      key('{space}');
-      for (const c of 'shijie') key(c);
-      const alternative = options.findIndex(x => x.text === '师姐');
-      choose(alternative);
-      for (const c of "xi'an") key(c);
-      const disambiguated = options[0].text;
-      key('{bksp}'); handleShortcut('\x1b');
-      key('n'); key('i'); key('{enter}'); key('{enter}'); key('{bksp}');
-      return [initialSpace, phrase, disambiguated, pending, keyboard.getInput()];
+      tap('a'); tap('{shift}'); assertEnglishLayout(); tap('B'); tap('c');
+      tap('{symbols}'); assertEnglishLayout(); tap('7');
+      tap('{more}'); assertEnglishLayout(); tap('{braceL}'); tap('{braceR}');
+      tap('{symbols}'); tap('d');
+      document.querySelector('#punctuation button').click();
+      tap('{space}'); tap('{bksp}'); tap('{enter}');
+      return [initialSpace, keyboard.getInput()];
       """#
     let result = try await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
-    XCTAssertEqual(result, ["space", "你好世界", "西安", "", ""])
-    for _ in 0..<30 where committed.count < 8 { try await Task.sleep(nanoseconds: 20_000_000) }
-    XCTAssertEqual(committed, ["a", "B", "7", "你好世界", "师姐", "你", "\r", "\u{7f}"])
-  }
-
-  @MainActor
-  func testMixedPinyinDraftEditing() async throws {
-    let board = TerminalTypingKeyboard()
-    var committed = ""
-    board.onText = { committed += $0 }
-    for _ in 0..<100 {
-      if (try? await board.surface.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool == true { break }
-      try await Task.sleep(nanoseconds: 50_000_000)
-    }
-    let script = #"""
-      const key = k => keyboard.handleButtonClicked(k);
-      key('{lang}');
-      const type = s => { for (const c of s) key(c); };
-      const snapshots = [];
-      type("nihao'shijie");
-      choose(options.findIndex(x => x.text === '你好'));
-      snapshots.push(spelling.textContent);
-      key('{lang}'); key('{lang}'); key('{bksp}');
-      snapshots.push(spelling.textContent);
-      choose(options.findIndex(x => x.text === '你好'));
-      type('x'); key('{bksp}'); snapshots.push(spelling.textContent);
-      choose(options.findIndex(x => x.text === '师姐'));
-      type('git'); key('{lang}'); key('{space}');
-      key('{lang}'); type('ni'); key('{lang}'); key('{enter}');
-      key('{lang}'); type('sh'); spelling.click();
-      type('nihao'); handleShortcut('\t'); snapshots.push(spelling.textContent);
-      key('{space}');
-      for (const phrase of ['qingjianchazheduandaima', 'womeiyouwenti', 'qingbangwoxiufuzhegewenti']) {
-        type(phrase); snapshots.push(options[0].text); key('{space}');
-      }
-      type('z'.repeat(160)); spelling.click();
-      return snapshots;
-      """#
-    let result = try await board.surface.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
-    XCTAssertEqual(result, ["你好shijie", "nihao'shijie", "你好shijie", "nihao",
-                            "请检查这段代码", "我没有问题", "请帮我修复这个问题"])
-    let expected = "你好师姐git nish\t你好请检查这段代码我没有问题请帮我修复这个问题" + String(repeating: "z", count: 160)
-    for _ in 0..<50 where committed.utf8.count < expected.utf8.count {
-      try await Task.sleep(nanoseconds: 20_000_000)
-    }
+    XCTAssertEqual(result, ["space", ""])
+    let expected = ["a", "B", "c", "7", "{", "}", "d", "/", " ", "\u{7f}", "\r"]
+    for _ in 0..<30 where committed.count < expected.count { try await Task.sleep(nanoseconds: 20_000_000) }
     XCTAssertEqual(committed, expected)
   }
 
@@ -986,7 +956,7 @@ final class RemoteSessionTests: XCTestCase {
     let keyFrame = keys.convert(keys.bounds, to: window)
     XCTAssertEqual(keyFrame.maxY, window.bounds.maxY, accuracy: pixel)
     let bottomEdges = try await keys.evaluateJavaScript("""
-      ['{lang}', '{space}', '{enter}'].map(k => keyboard.getButtonElement(k).getBoundingClientRect().bottom)
+      ['{symbols}', '{space}', '{enter}'].map(k => keyboard.getButtonElement(k).getBoundingClientRect().bottom)
       """) as? [Double]
     let edges = try XCTUnwrap(bottomEdges)
     XCTAssertEqual(edges.count, 3)
@@ -1268,28 +1238,8 @@ final class RemoteSessionTests: XCTestCase {
         escape.sendActions(for: .touchUpInside)
         try await waitFor("__BYTE_27__")
         try await toggle(dismiss)
-        let bar = try XCTUnwrap((web as? TerminalWebView)?.shortcutBar)
-        try await type(
-          "saved=$(stty -g); stty raw -echo; printf '__BAR_%s__\\r\\n' READY; "
-            + "b=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
-            + "stty \"$saved\"; printf '__BAR_%s__\\n' \"$b\""
-        )
-        try await waitFor("__BAR_READY__")
-        for label in ["Esc", "Tab", "⌃C"] {
-          let button = try XCTUnwrap(descendants(bar).first {
-            $0.accessibilityIdentifier == "terminal.keyboard." + label
-          } as? UIButton)
-          XCTAssertTrue(button.isEnabled)
-          button.sendActions(for: .touchUpInside)
-        }
-        try await waitFor("__BAR_1b0903__")
-        try await type(
-          "saved=$(stty -g); stty raw -echo; printf '__IME_%s__\\r\\n' READY; "
-            + "b=$(dd bs=1 count=13 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
-            + "stty \"$saved\"; printf '__IME_%s__\\n' \"$b\""
-        )
-        try await waitFor("__IME_READY__")
         let terminal = try XCTUnwrap(web as? TerminalWebView)
+        let bar = terminal.shortcutBar
         let board = terminal.typingKeyboard.surface
         func showKeyboard() async throws {
           _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
@@ -1299,35 +1249,38 @@ final class RemoteSessionTests: XCTestCase {
           XCTAssertFalse(terminal.typingKeyboard.isHidden)
         }
         try await showKeyboard()
+        // Raw PTY reads verify that UIKit, xterm, SSH and tmux preserve the actual bytes.
+        try await type(
+          "saved=$(stty -g); stty raw -echo; printf '\\033[?1l__BAR_%s__\\r\\n' READY; "
+            + "b=$(dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
+            + "stty \"$saved\"; printf '__BAR_%s__\\n' \"$b\""
+        )
+        try await waitFor("__BAR_READY__")
+        for label in ["Esc", "Tab", "⌃C", "↑", "↓"] {
+          let button = try XCTUnwrap(descendants(bar).first {
+            $0.accessibilityIdentifier == "terminal.keyboard." + label
+          } as? UIButton)
+          XCTAssertTrue(button.isEnabled)
+          button.sendActions(for: .touchUpInside)
+        }
+        try await waitFor("__BAR_1b09031b5b411b5b42__")
+        try await type(
+          "saved=$(stty -g); stty raw -echo; printf '__KEYS_%s__\\r\\n' READY; "
+            + "b=$(dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
+            + "stty \"$saved\"; printf '__KEYS_%s__\\n' \"$b\""
+        )
+        try await waitFor("__KEYS_READY__")
         _ = try await board.evaluateJavaScript("""
-          window.tapKey = k => keyboard.handleButtonClicked(k);
-          tapKey('x'); tapKey('{lang}');
-          for (const c of 'nihaoz') tapKey(c);
-          tapKey('{bksp}'); true
+          window.tapKey = k => keyboard.getButtonElement(k).click();
+          tapKey('x'); tapKey('{shift}'); tapKey('B'); true
           """)
         bar.hideKeyboard?()
         XCTAssertTrue(terminal.typingKeyboard.isHidden)
         try await showKeyboard()
-        let resumed = try await board.evaluateJavaScript("[language, spelling.textContent]") as? [String]
-        XCTAssertEqual(resumed, ["zh", "nihao"])
-        let didRepeat = try await board.callAsyncJavaScript(#"""
-          document.querySelector('#candidates button').click();
-          for (const c of 'git') tapKey(c);
-          tapKey('{lang}'); tapKey('{space}'); tapKey('{lang}');
-          tapKey('n'); tapKey('i');
-          const del = keyboard.getButtonElement('{bksp}');
-          const pointer = type => del.dispatchEvent(new PointerEvent(type, {
-            bubbles:true, pointerType:'touch', pointerId:1, isPrimary:true
-          }));
-          pointer('pointerdown');
-          await new Promise(done => setTimeout(done, 1000));
-          pointer('pointerup');
-          const repeated = !hasDraft();
-          pointer('pointerdown'); pointer('pointerup'); tapKey('.');
-          return repeated;
-          """#, arguments: [:], in: nil, contentWorld: .page) as? Bool
-        XCTAssertEqual(didRepeat, true)
-        try await waitFor("__IME_78e4bda0e5a5bd676974207f2e__")
+        _ = try await board.evaluateJavaScript("""
+          tapKey('{symbols}'); tapKey('7'); tapKey('{bksp}'); tapKey('{enter}'); true
+          """)
+        try await waitFor("__KEYS_7842377f0d__")
       }
     }
   }

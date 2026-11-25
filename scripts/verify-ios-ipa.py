@@ -40,10 +40,12 @@ def verify(archive):
     if any("_CodeSignature" in path.parts or path.name == "embedded.mobileprovision" for path in entries):
         raise ValueError("Unsigned IPA contains a signing resource or provisioning profile")
     keyboard = host / "assets/keyboard"
-    for name in ("index.html", "keyboard.css", "keyboard.js", "decoder.js", "simple-keyboard.js", "pinyin.js",
-                 "LICENSE-simple-keyboard", "LICENSE-pinyin-simp", "AUTHORS-pinyin-simp"):
+    for name in ("index.html", "keyboard.css", "keyboard.js", "simple-keyboard.js", "LICENSE-simple-keyboard"):
         if keyboard / name not in entries:
             raise ValueError(f"IPA is missing the offline keyboard resource {name}")
+    for name in ("pinyin.js", "decoder.js", "LICENSE-pinyin-simp", "AUTHORS-pinyin-simp"):
+        if keyboard / name in entries:
+            raise ValueError(f"IPA still contains the retired Pinyin keyboard resource {name}")
     app = bundle_info(archive, host)
     if app.get("NSSupportsLiveActivities") is not True:
         raise ValueError("TmuxLink.app does not declare NSSupportsLiveActivities")

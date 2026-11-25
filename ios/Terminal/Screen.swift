@@ -641,7 +641,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     shortcuts?.setReady(false)
     web?.shortcutBar.setReady(false)
     web?.typingKeyboard.isUserInteractionEnabled = false
-    web?.typingKeyboard.clearComposition()
+    web?.typingKeyboard.resetLayout()
     if web != nil { setKeyboardVisible(false) }
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
@@ -651,8 +651,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func press(_ key: String) {
     guard ready else { return }
-    if !web.typingKeyboard.isHidden { web.typingKeyboard.handleShortcut(key) }
-    else { sendTerminalKey(key) }
+    sendTerminalKey(key)
     UISelectionFeedbackGenerator().selectionChanged()
   }
 
