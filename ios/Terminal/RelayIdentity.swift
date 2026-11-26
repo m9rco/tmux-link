@@ -267,6 +267,13 @@ struct TerminalTransport {
     return try JSONDecoder().decode(AgentPaneContext.self, from: data).identity
   }
 
+  static func attachedPane(_ client: ClientProfile, sessionID: Int64, attachPID: UInt32) async throws -> (id: Int64, instance: String) {
+    let data = try await read(client, target: sessionID, contextPID: attachPID)
+    let pane = try JSONDecoder().decode(AgentPaneContext.self, from: data)
+    guard pane.version == 1, pane.id >= 0, !pane.instance.isEmpty else { throw RelayError("无法核对此终端的目标窗格。") }
+    return (pane.id, pane.instance)
+  }
+
   private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil, contextPID: UInt32? = nil) async throws -> Data {
     let connection = try TerminalTransport(client)
     var pair: [Int32] = [-1, -1]

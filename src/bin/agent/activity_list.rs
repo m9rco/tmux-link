@@ -71,9 +71,17 @@ pub(super) fn print() -> Result<()> {
             .filter(|s| tmux_link::valid_managed_instance(s));
         // An observing row without a sample lets the phone retry a transient
         // pane change or oversized grid on its next visible refresh.
-        let item = json!({"id": id, "name": name, "touchPaging": true, "activity": "observing",
+        let mut item = json!({"id": id, "name": name, "touchPaging": true, "activity": "observing",
             "directory": (!path.is_empty()).then_some(path), "snapshot": true, "snapshotVersion": 2,
             "managedVersion": 2, "managedInstance": instance, "agentContextVersion": 1});
+        if instance.is_some()
+            && path.starts_with('/')
+            && !(matches!(listing, std::borrow::Cow::Owned(_))
+                && path.contains(char::REPLACEMENT_CHARACTER))
+            && fields.get(3).is_some_and(|s| s.starts_with('0'))
+        {
+            item["uploadVersion"] = 1.into();
+        }
         let num = |n| fields.get(n).and_then(|s: &&str| s.parse::<usize>().ok());
         let pane = fields
             .get(2)

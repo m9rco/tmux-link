@@ -25,6 +25,8 @@ final class RemoteSessionTests: XCTestCase {
     let agentShortcutFixtureID: Int64?
     let activityFixtureID: Int64?
     let activityFixtureName: String?
+    let uploadFixtureID: Int64?
+    let uploadFixtureName: String?
     let conversationFixtureID: Int64?
     let conversationFixturePane: UInt64?
 
@@ -43,6 +45,62 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   func configuration() throws -> Connection { try Connection.load() }
+
+  @MainActor
+  func testUploadDrawerOpensFilesForAttachedPane() async throws {
+    let config = try configuration()
+    guard let id = config.uploadFixtureID, let name = config.uploadFixtureName,
+          name.hasPrefix("tmux-link-upload-") else { throw XCTSkip("No isolated upload pane") }
+    let client = ClientProfile(name: "Files picker fixture", host: config.host, port: config.port,
+                               route: config.route ?? "", user: config.user, pin: config.fingerprint)
+    let sessions = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(sessions.first { $0.id == id && $0.name == name })
+    let window = try XCTUnwrap(appWindow)
+    let previous = window.rootViewController
+    let screen = Screen(client: client, session: session)
+    window.rootViewController = screen
+    screen.view.layoutIfNeeded()
+    defer {
+      screen.dismiss(animated: false)
+      screen.stop()
+      window.rootViewController = previous
+    }
+    let views = descendants(screen.view)
+    let reveal = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "terminal.shortcuts.open" } as? UIButton)
+    let upload = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "terminal.upload" } as? UIButton)
+    let readyDeadline = ProcessInfo.processInfo.systemUptime + 20
+    while !upload.isEnabled && ProcessInfo.processInfo.systemUptime < readyDeadline {
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertTrue(upload.isEnabled)
+    reveal.sendActions(for: .touchUpInside)
+    upload.sendActions(for: .touchUpInside)
+    func filePicker(in controller: UIViewController) -> UIDocumentPickerViewController? {
+      if let picker = controller as? UIDocumentPickerViewController { return picker }
+      if let sheet = controller.presentedViewController, let picker = filePicker(in: sheet) { return picker }
+      for child in controller.children {
+        if let picker = filePicker(in: child) { return picker }
+      }
+      return nil
+    }
+    let pickerDeadline = ProcessInfo.processInfo.systemUptime + 20
+    while ProcessInfo.processInfo.systemUptime < pickerDeadline {
+      if let picker = filePicker(in: screen) {
+        XCTAssertFalse(picker.allowsMultipleSelection)
+        return
+      }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    if let host = screen.presentedViewController as? UIHostingController<SessionUploadView> {
+      switch host.rootView.flow.phase {
+      case .failed(let reason): XCTFail(reason)
+      case .checking: XCTFail("Still looking up the target pane")
+      default: XCTFail("Files picker requested: \(host.rootView.flow.showPicker), presented: \(String(describing: host.presentedViewController))")
+      }
+    } else {
+      XCTFail("Upload sheet was not presented: \(String(describing: screen.presentedViewController))")
+    }
+  }
 
   func testHostSnapshotRetainsEarlierConstraint() async throws {
     let config = try configuration()

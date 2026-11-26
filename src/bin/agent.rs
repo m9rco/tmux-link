@@ -26,6 +26,8 @@ mod managed;
 mod managed_decision;
 #[path = "agent/snapshot.rs"]
 mod snapshot;
+#[path = "agent/upload.rs"]
+mod upload;
 
 #[cfg(all(feature = "tls", feature = "ssh-probe"))]
 #[path = "agent/pair.rs"]
@@ -131,6 +133,11 @@ fn attach() -> Result<()> {
         .as_deref()
         .map(|v| v.to_str().context("invalid request"))
         .transpose()?;
+    if let Some(command) = command
+        && command.split(' ').next() == Some("tmux-link-upload-v1")
+    {
+        return upload::receive(command);
+    }
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-advisor-v2 ")) {
         return phone_advice(request);
     }

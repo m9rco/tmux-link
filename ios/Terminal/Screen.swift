@@ -127,6 +127,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var pendingReply: Task<Void, Never>?
   private let transportBadge = UILabel()
   private var shortcuts: ShortcutDrawer!
+  private weak var uploadFlow: SessionUploadFlow?
+  private weak var uploadController: UIViewController?
   private let leave: (() -> Void)?
   private weak var edgeBackSwipe: UISwipeGestureRecognizer?
   private weak var contentBackSwipe: UISwipeGestureRecognizer?
@@ -230,7 +232,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
     ])
     shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave,
-                               review: { [weak self] in self?.reviewDecisions() }) { [weak self] key in self?.press(key) }
+                               review: { [weak self] in self?.reviewDecisions() },
+                               upload: { [weak self] in self?.chooseUpload() }) { [weak self] key in self?.press(key) }
     web.typingKeyboard.onAgentReply = { [weak self] text in self?.insertAgentReply(text) }
     shortcuts.onAgentReply = web.typingKeyboard.onAgentReply
     shortcuts.onVisibilityChange = { [weak self] open in
@@ -261,6 +264,46 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     if notification.name == UIScene.didEnterBackgroundNotification { pauseStatus() }
     else { resumeStatus() }
   }
+  private func chooseUpload() {
+    guard active, ready, !backgrounded, !verifyingConnection, presentedViewController == nil else { return }
+    let flow = SessionUploadFlow(client: client) { [weak self] in
+      guard let self else { throw CancellationError() }
+      return try await self.uploadTarget()
+    }
+    let host = UIHostingController(rootView: SessionUploadView(flow: flow))
+    host.modalPresentationStyle = .pageSheet
+    host.sheetPresentationController?.detents = [.medium(), .large()]
+    uploadFlow = flow
+    uploadController = host
+    present(host, animated: true) { [weak self, weak host, weak flow] in
+      guard let host, self?.presentedViewController === host else { return }
+      flow?.begin()
+    }
+  }
+
+  private func uploadTarget() async throws -> RemoteSession {
+    guard let session, session.id >= 0 else { throw RelayError("请从会话列表打开一个具名会话后再上传。") }
+    guard active, ready, !backgrounded, !verifyingConnection else { throw RelayError("请等待终端恢复连接后再上传。") }
+    let attempt = generation
+    let rows = try await SessionDirectory.fetch(client)
+    try Task.checkCancellation()
+    guard let current = rows.first(where: { Self.sameSession(session, $0) }) else {
+      throw RelayError("会话已变化，请返回会话列表重新打开。")
+    }
+    guard current.uploadVersion == 1 else { throw RelayError("请更新节点上的 tmux-link-agent 后再上传。") }
+    guard let pid = attachedClientPID, let instance = current.managedInstance, !instance.isEmpty,
+          let directory = current.directory, directory.hasPrefix("/") else {
+      throw RelayError("无法核对当前窗格与目录，请返回会话列表重新进入。")
+    }
+    let pane = try await TerminalTransport.attachedPane(client, sessionID: session.id, attachPID: pid)
+    try Task.checkCancellation()
+    guard isCurrent(attempt), ready, !backgrounded, !verifyingConnection, attachedClientPID == pid,
+          session.id == pane.id, instance == pane.instance else {
+      throw RelayError("终端当前显示的窗格已切换，请从列表重新进入目标会话。")
+    }
+    return current
+  }
+
   private func reviewDecisions() {
     guard active, ready, presentedViewController == nil else { return }
     web.evaluateJavaScript("decisionScreen()") { [weak self] value, error in
@@ -480,6 +523,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   @objc private func pauseStatus() {
     guard active, !backgrounded else { return }
     backgrounded = true
+    uploadFlow?.enteredBackground()
     if !completed && session?.managedInstance != nil {
       recoveryEnabled = true
     }
@@ -943,6 +987,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   private func disconnect() {
+    uploadFlow?.cancel()
+    if let uploadController, presentedViewController === uploadController { dismiss(animated: false) }
+    uploadFlow = nil
+    uploadController = nil
     ready = false
     verifyingConnection = false
     pendingBytes = 0

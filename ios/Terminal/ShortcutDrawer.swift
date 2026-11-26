@@ -13,7 +13,7 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
   var onAgentReply: ((String) -> Void)?
 
   init(in viewport: UIView, accent: UIColor, leave: (() -> Void)? = nil,
-       review: (() -> Void)? = nil, press: @escaping (String) -> Void) {
+       review: (() -> Void)? = nil, upload: (() -> Void)? = nil, press: @escaping (String) -> Void) {
     super.init(frame: viewport.bounds)
     autoresizingMask = [.flexibleWidth, .flexibleHeight]
     viewport.addSubview(self)
@@ -70,6 +70,19 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
       button.addAction(UIAction { [weak self] _ in
         self?.settle(open: false)
         review()
+      }, for: .touchUpInside)
+      keys.addArrangedSubview(button)
+      button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+    }
+    if let upload {
+      let button = UIButton(type: .system)
+      button.setTitle("上传", for: .normal)
+      button.tintColor = accent
+      button.accessibilityLabel = "上传文件"
+      button.accessibilityIdentifier = "terminal.upload"
+      button.addAction(UIAction { [weak self] _ in
+        self?.settle(open: false)
+        upload()
       }, for: .touchUpInside)
       keys.addArrangedSubview(button)
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true

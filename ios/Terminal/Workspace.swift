@@ -471,11 +471,12 @@ final class SessionListModel: ObservableObject {
       recordActivity(items)
       // Samples are transient. Publishing a new list for every changing token
       // would redraw rows even while their visible running state stays the same.
-      let sorted = items.map { item in
+      var sorted = items.map { item -> RemoteSession in
         var row = item
         row.activitySample = nil
         return row
-      }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+      }
+      sorted.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
       if sessions != sorted { sessions = sorted }
       if failure != nil { failure = nil }
       return sessions

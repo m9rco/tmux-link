@@ -10,6 +10,7 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   var managedVersion: Int? = nil
   var managedInstance: String? = nil
   var agentContextVersion: Int? = nil
+  var uploadVersion: Int? = nil
   // Optional list metadata. Keep unknown wire values decodable for older apps.
   var activity: String? = nil
   var activitySample: String? = nil

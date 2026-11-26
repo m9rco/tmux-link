@@ -87,6 +87,23 @@ def activity_fixture(tmp, runtime_env):
     return int(session[1:]), name
 
 
+def upload_fixture(tmp, runtime_env):
+    work = Path(tempfile.mkdtemp(prefix="tmux-link-upload-", dir=tmp))
+    session = output("tmux", "-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{session_id}",
+                     "-s", work.name, "-c", work, "/bin/sleep", "1800", env=runtime_env)
+    return int(session[1:]), work
+
+
+def verify_fixture_upload(work):
+    # Independent end-to-end byte check on the receiving node, including NULs across SSH packets.
+    expected = {"会话 upload '数据'.bin": bytes(range(256)) * 1025, "empty.txt": b""}
+    if {item.name for item in work.iterdir()} != set(expected):
+        raise RuntimeError("Upload did not leave exactly the two expected files")
+    for name, data in expected.items():
+        if (work / name).read_bytes() != data:
+            raise RuntimeError("Uploaded bytes did not match the file selected on iOS")
+
+
 def benchmark(device, tmp):
     sim = ["xcrun", "simctl"]
     derived = ROOT / "target/xcode-simulator-tests"
@@ -130,6 +147,7 @@ def benchmark(device, tmp):
                              report, env=runtime_env)
         conversation_id, conversation_pane = bound_conversation(tmp, runtime_env)
         activity_id, activity_name = activity_fixture(tmp, runtime_env)
+        upload_id, upload_dir = upload_fixture(tmp, runtime_env)
         question_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
                              "-s", "tmux-link-managed-question-simulator", sys.executable, "-c",
                              "import time; print('What audience should the draft address?', flush=True); time.sleep(1800)",
@@ -180,6 +198,7 @@ def benchmark(device, tmp):
                     "managedQuestionFixtureID": int(question_id.removeprefix("$")),
                     "agentShortcutFixtureID": int(shortcut_id.removeprefix("$")),
                     "activityFixtureID": activity_id, "activityFixtureName": activity_name,
+                    "uploadFixtureID": upload_id, "uploadFixtureName": upload_dir.name,
                     "conversationFixtureID": conversation_id, "conversationFixturePane": conversation_pane,
                 }))
                 run(*sim, "terminate", device, bundle)
@@ -187,6 +206,8 @@ def benchmark(device, tmp):
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testOfflineEnglishKeyboard",
                     "-only-testing:TmuxLinkDeviceTests/SessionActivityTests",
+                    "-only-testing:TmuxLinkDeviceTests/SessionUploadTests",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testUploadDrawerOpensFilesForAttachedPane",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyMenusFollowForegroundIdentity",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyInsertsTextOnlyWhileAgentIsForeground",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testKeyboardRowAndCursorModes",
@@ -202,6 +223,7 @@ def benchmark(device, tmp):
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testRecoveryRecognizesTheSameTmuxSessionAcrossPaneChanges",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",
                     "-resultBundlePath", result, "test-without-building")
+                verify_fixture_upload(upload_dir)
                 attachments = tmp / "attachments"
                 run("xcrun", "xcresulttool", "export", "attachments", "--path", result,
                     "--output-path", attachments)

@@ -1,5 +1,6 @@
 //! iOS transport. A private socket pair links UIKit input and terminal output to SSH.
 mod handoff;
+mod upload;
 use anyhow::{Context, Result, bail, ensure};
 use russh::{
     ChannelMsg, client,
@@ -727,6 +728,7 @@ enum Target<'a> {
     TrackedTerminal(i64),
     AgentContext(i64, u32),
     List,
+    Upload(upload::Request<'a>),
     SnapshotV1(i64),
     SnapshotV2(i64),
     Managed(i64, &'a str),
@@ -803,6 +805,10 @@ unsafe fn open_inner(
                 })
             }
         };
+        ensure!(
+            !host.is_null() && !user.is_null() && !pin.is_null() && !seed.is_null(),
+            "invalid peer"
+        );
         let host = unsafe { CStr::from_ptr(host) }.to_str()?;
         let user = unsafe { CStr::from_ptr(user) }.to_str()?;
         let pin = unsafe { CStr::from_ptr(pin) }.to_str()?;
@@ -826,6 +832,10 @@ unsafe fn open_inner(
                     key: PrivateKey::from(key),
                     identity,
                 };
+                // Uploads listen for cancellation even during SSH authentication.
+                if let Target::Upload(request) = target {
+                    return upload::run(request, &peer, read, output).await;
+                }
                 let key = (!matches!(target, Target::Terminal(None)))
                     .then(|| handoff::PeerKey::from(&peer));
                 let connection = handoff::open_channel(&peer, key.as_ref(), &mut output).await?;
@@ -856,6 +866,7 @@ unsafe fn open_inner(
                         };
                         (command, 1024 * 1024)
                     }
+                    Target::Upload(_) => unreachable!("handled before opening a channel"),
                     Target::List => (String::from("tmux-link-list"), 1024 * 1024),
                     Target::Managed(id, action) => {
                         (format!("tmux-link-managed-v1 {action} {id}"), 1024 * 1024)

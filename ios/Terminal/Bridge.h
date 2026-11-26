@@ -19,6 +19,9 @@ char *tl_snapshot_v2_secure(int fd, const char *host, uint16_t port, const char 
 char *tl_managed_secure(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t session_id, const char *action, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
 // A NULL ticket claims a prompt. A finish sends the JSON reply as SSH stdin.
 char *tl_advice_secure(int fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t session_id, const char *instance, const char *ticket, const uint8_t *payload, size_t size, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
+// Owns both distinct descriptors. Reads a regular file from offset zero. Shutdown the
+// socket peer to cancel; on success the socket receives one unframed {path,bytes} receipt.
+char *tl_upload_secure(int fd, int file_fd, const char *host, uint16_t port, const char *user, const char *pin, const uint8_t *seed, int64_t session_id, const char *instance, const char *directory, const char *name, uint64_t size, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
 void tl_free_error(char *);
 // Returns NULL after approved host reports an outbound tunnel, otherwise an owned error string.
 char *tl_approve_pairing(const char *url, const char *id, const char *request_json, const uint8_t *cert_der, size_t cert_len, const uint8_t *key_pkcs8, size_t key_len);
