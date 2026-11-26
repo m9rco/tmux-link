@@ -131,7 +131,8 @@ def benchmark(device, tmp):
         )
         run("cc", "-o", shortcut_dir / "codex", source)
         shortcut_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
-                             "-s", "tmux-link-agent-keys-simulator", "-c", shortcut_dir, "-e", "HISTFILE=/dev/null",
+                             "-s", "tmux-link-agent-keys-simulator", "-c", shortcut_dir,
+                             "-e", "HISTFILE=/dev/null", "-e", "PS1=$ ",
                              "/bin/bash", "--noprofile", "--norc", "-i", env=runtime_env)
         tmux_path = str(Path(shutil.which("tmux")).parent)
         command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}", f"HOME={tmp}",

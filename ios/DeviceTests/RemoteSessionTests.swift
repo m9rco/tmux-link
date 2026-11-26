@@ -817,13 +817,17 @@ final class RemoteSessionTests: XCTestCase {
     let button = try XCTUnwrap(descendants(terminal.typingKeyboard).first {
       $0.accessibilityIdentifier == "terminal.typing.agent"
     } as? UIButton)
-    func waitFor(_ description: String, _ predicate: () async throws -> Bool) async throws {
+    func waitFor(_ description: String, file: StaticString = #filePath, line: UInt = #line,
+                 _ predicate: () async throws -> Bool) async throws {
       let deadline = ProcessInfo.processInfo.systemUptime + 25
       while ProcessInfo.processInfo.systemUptime < deadline {
         if try await predicate() { return }
         try await Task.sleep(for: .milliseconds(100))
       }
-      throw RelayError("Timed out waiting for " + description)
+      let contents = (try? await visible()) ?? "(terminal not rendered)"
+      let failure = "Timed out waiting for \(description) in the isolated shortcut fixture.\n\(contents)"
+      XCTFail(failure, file: file, line: line)
+      throw RelayError(failure)
     }
     func keys(_ text: String) async throws {
       _ = try await terminal.callAsyncJavaScript("pressTerminalKey(text); return true",
@@ -836,6 +840,8 @@ final class RemoteSessionTests: XCTestCase {
       return try XCTUnwrap(result as? String)
     }
     try await waitFor("SSH ready") { terminal.typingKeyboard.isUserInteractionEnabled }
+    // SSH acknowledges the exec before tmux has attached and drawn the shell.
+    try await waitFor("first shell prompt") { try await visible().contains("$") }
     _ = try await terminal.evaluateJavaScript("bridge.postMessage({showKeyboard:true}); true")
     try await waitFor("English keyboard") { !terminal.typingKeyboard.isHidden }
     try await keys("printf 'TL-SHELL-%s\\n' READY\r")
