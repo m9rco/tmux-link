@@ -32,7 +32,7 @@ iPhone 和节点均更新到 v0.5.1 后，在手机会话列表点「托管」�
 已配对的 Linux 或 Mac 节点只需以运行 tmux 的用户更新一次。
 
 ```sh
-curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.5.2/install.sh | sh -s -- --version v0.5.2
+curl -fsSL https://github.com/m9rco/tmux-link/releases/download/v0.5.3/install.sh | sh -s -- --version v0.5.3
 ```
 
 | 模式 | 会话等待回答时如何处理 |
@@ -72,7 +72,7 @@ iOS 0.4.5（Build 35）起，手机在本地过滤常见凭据、输入框边线
 
 点终端打开英文键盘。Shift 切换大小写，123 切换数字和符号。键盘上方有 Esc、Tab、Ctrl-C、Ctrl-B 和 ← ↑ ↓ →。在 shell 里按 ↑、↓ 可以翻看命令历史，在终端菜单里可以上下移动选项。
 
-iOS Build 42 和 v0.5.2 节点支持 Agent 快捷回复。当前窗格的前台程序被识别为交互式 Agent 时，键盘符号行和右侧快捷栏会出现 **Agent**。点开可选 `Proceed`、`Keep going`、`Follow up on this`、`Ack` 等英文回复，以及 `/compact`、`/models` 和 `/help`。选中的文字插入当前光标处，可以继续编辑，按回车发送。命令的可用性取决于会话中运行的 CLI。
+iOS Build 43 和 v0.5.3 节点支持 Agent 快捷回复。当前窗格的前台程序被识别为交互式 Agent 时，键盘符号行和右侧快捷栏会出现 **Agent**。点开可选 `Proceed`、`Keep going`、`Follow up on this`、`Ack` 等英文回复，以及 `/compact`、`/models` 和 `/help`。选中的文字插入当前光标处，可以继续编辑，按回车发送。命令的可用性取决于会话中运行的 CLI。
 
 双击光标所在的输入行可选中当前可见输入，继续键入或粘贴可替换选区。长按光标行后点「粘贴」，文本会通过终端当前的粘贴模式送到远端。长按输出可拖动系统选区手柄，再点「复制」。会话列表中也可长按名称复制。
 

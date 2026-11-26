@@ -225,6 +225,90 @@ fn attach_pid(line: &[u8]) -> Option<u32> {
         .filter(|n| *n > 0)
 }
 
+// SSH accepts exec before the forced command has written its PID or tmux has
+// taken ownership of the tty. Enabling input at that point can echo a user's
+// first keystrokes into the PID preface. Wait for tmux output on tracked opens.
+struct AttachStartup {
+    acknowledgments: u8,
+    preface: Option<Vec<u8>>,
+    first_output: Option<Vec<u8>>,
+}
+
+impl AttachStartup {
+    fn new(tracked: bool) -> Self {
+        Self {
+            acknowledgments: 0,
+            preface: tracked.then(Vec::new),
+            first_output: tracked.then(Vec::new),
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.acknowledgments == 2 && self.first_output.is_none()
+    }
+
+    async fn terminal_bytes(&mut self, output: &mut Output, data: &[u8]) -> Result<()> {
+        if let Some(pending) = &mut self.first_output {
+            // A server may send tmux's initial queries before both SSH replies.
+            // Forward those queries after ready so xterm can answer immediately.
+            ensure!(
+                pending.len() + data.len() <= 256 * 1024,
+                "too much terminal data before SSH acknowledgment"
+            );
+            pending.extend_from_slice(data);
+            Ok(())
+        } else {
+            output.data(data).await
+        }
+    }
+
+    async fn data(&mut self, output: &mut Output, mut data: &[u8]) -> Result<()> {
+        if let Some(line) = &mut self.preface {
+            let length = data.len().min(32 - line.len());
+            let end = data[..length].iter().position(|b| *b == b'\n');
+            let consumed = end.map_or(length, |pos| pos + 1);
+            line.extend_from_slice(&data[..consumed]);
+            data = &data[consumed..];
+            if end.is_none() && line.len() < 32 {
+                return Ok(());
+            }
+            if let Some(pid) = attach_pid(line) {
+                output.frame(4, &pid.to_be_bytes()).await?;
+            } else {
+                let bytes = std::mem::take(line);
+                self.terminal_bytes(output, &bytes).await?;
+            }
+            self.preface = None;
+        }
+        self.terminal_bytes(output, data).await
+    }
+
+    async fn forward(&mut self, output: &mut Output, message: ChannelMsg) -> Result<bool> {
+        let was_ready = self.ready();
+        match message {
+            ChannelMsg::Data { data } => self.data(output, &data).await?,
+            ChannelMsg::ExtendedData { data, .. } => output.data(&data).await?,
+            ChannelMsg::Close | ChannelMsg::Eof => return Ok(false),
+            ChannelMsg::Success => self.acknowledgments = (self.acknowledgments + 1).min(2),
+            ChannelMsg::Failure => bail!("remote PTY or shell request failed"),
+            _ => {}
+        }
+        if !was_ready
+            && self.acknowledgments == 2
+            && self
+                .first_output
+                .as_ref()
+                .is_none_or(|data| !data.is_empty())
+        {
+            output.stage("ready").await?;
+            if let Some(data) = self.first_output.take() {
+                output.data(&data).await?;
+            }
+        }
+        Ok(true)
+    }
+}
+
 async fn run(
     (session, channel): handoff::SessionChannel,
     read: tokio::net::unix::OwnedReadHalf,
@@ -325,10 +409,9 @@ async fn run(
     let framed = output.framed;
     let (samples, mut sample_rx) = tokio::sync::mpsc::channel::<u32>(1);
     let download = async {
-        let mut acknowledgments = 0;
-        let mut preface = tracked.then(Vec::new);
-        let ack_deadline = tokio::time::sleep(Duration::from_secs(20));
-        tokio::pin!(ack_deadline);
+        let mut startup = AttachStartup::new(tracked);
+        let deadline = tokio::time::sleep(Duration::from_secs(20));
+        tokio::pin!(deadline);
         loop {
             let message = tokio::select! {
                 message = ssh_rx.wait() => match message {
@@ -339,45 +422,19 @@ async fn run(
                     output.frame(3, &[]).await?;
                     continue;
                 }
-                Some(ms) = sample_rx.recv(), if framed && acknowledgments == 2 => {
+                Some(ms) = sample_rx.recv(), if framed && startup.ready() => {
                     output.frame(2, &ms.to_be_bytes()).await?;
                     continue;
                 }
-                _ = &mut ack_deadline, if framed && acknowledgments < 2 => {
-                    bail!("remote PTY or command acknowledgment timed out");
+                _ = &mut deadline, if framed && !startup.ready() => {
+                    if startup.acknowledgments < 2 {
+                        bail!("remote PTY or command acknowledgment timed out");
+                    }
+                    bail!("remote tmux did not start");
                 }
             };
-            match message {
-                ChannelMsg::Data { data } => {
-                    let mut data = &data[..];
-                    if let Some(line) = &mut preface {
-                        let length = data.len().min(32 - line.len());
-                        let end = data[..length].iter().position(|b| *b == b'\n');
-                        let consumed = end.map_or(length, |pos| pos + 1);
-                        line.extend_from_slice(&data[..consumed]);
-                        data = &data[consumed..];
-                        if end.is_none() && line.len() < 32 {
-                            continue;
-                        }
-                        if let Some(pid) = attach_pid(line) {
-                            output.frame(4, &pid.to_be_bytes()).await?;
-                        } else {
-                            output.data(line).await?;
-                        }
-                        preface = None;
-                    }
-                    output.data(data).await?
-                }
-                ChannelMsg::ExtendedData { data, .. } => output.data(&data).await?,
-                ChannelMsg::Close | ChannelMsg::Eof => break,
-                ChannelMsg::Success if framed && acknowledgments < 2 => {
-                    acknowledgments += 1;
-                    if acknowledgments == 2 {
-                        output.stage("ready").await?;
-                    }
-                }
-                ChannelMsg::Failure => bail!("remote PTY or shell request failed"),
-                _ => {}
+            if !startup.forward(&mut output, message).await? {
+                break;
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -995,6 +1052,74 @@ mod grid_tests {
             b"TLCLIENT 4294967296\n",
         ] {
             assert_eq!(attach_pid(invalid), None);
+        }
+    }
+
+    async fn startup_frames(
+        tracked: bool,
+        messages: Vec<ChannelMsg>,
+        ready_after: usize,
+    ) -> Vec<(u8, Vec<u8>)> {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        let mut output = Output {
+            writer: writer.into_split().1,
+            framed: true,
+        };
+        let mut startup = AttachStartup::new(tracked);
+        for (index, message) in messages.into_iter().enumerate() {
+            startup.forward(&mut output, message).await.unwrap();
+            assert_eq!(startup.ready(), index + 1 >= ready_after);
+        }
+        drop(output);
+        let mut frames = Vec::new();
+        while let Ok(kind) = reader.read_u8().await {
+            let mut bytes = vec![0; reader.read_u32().await.unwrap() as usize];
+            reader.read_exact(&mut bytes).await.unwrap();
+            frames.push((kind, bytes));
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn tracked_ready_follows_ssh_acks_and_preserves_the_first_tmux_query() {
+        let data = |s: &'static str| ChannelMsg::Data { data: s.into() };
+        for acknowledgments_first in [true, false] {
+            let mut messages = vec![data("TLCLI"), data("ENT 42\r\n")];
+            let acks = [ChannelMsg::Success, ChannelMsg::Success];
+            if acknowledgments_first {
+                messages.splice(0..0, acks);
+                messages.push(data("\x1b[c"));
+            } else {
+                messages.push(data("\x1b[c"));
+                messages.extend(acks);
+            }
+            messages.push(data("prompt"));
+            assert_eq!(
+                startup_frames(true, messages, 5).await,
+                [
+                    (4, 42_u32.to_be_bytes().to_vec()),
+                    (1, b"ready".to_vec()),
+                    (0, b"\x1b[c".to_vec()),
+                    (0, b"prompt".to_vec()),
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untracked_or_unrecognized_preface_keeps_the_terminal_usable() {
+        for tracked in [false, true] {
+            let messages = vec![
+                ChannelMsg::Success,
+                ChannelMsg::Success,
+                ChannelMsg::Data {
+                    data: "banner\n".into(),
+                },
+            ];
+            assert_eq!(
+                startup_frames(tracked, messages, if tracked { 3 } else { 2 }).await,
+                [(1, b"ready".to_vec()), (0, b"banner\n".to_vec())]
+            );
         }
     }
 

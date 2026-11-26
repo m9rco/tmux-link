@@ -840,12 +840,11 @@ final class RemoteSessionTests: XCTestCase {
       return try XCTUnwrap(result as? String)
     }
     try await waitFor("SSH ready") { terminal.typingKeyboard.isUserInteractionEnabled }
-    // SSH acknowledges the exec before tmux has attached and drawn the shell.
-    try await waitFor("first shell prompt") { try await visible().contains("$") }
+    // A hardware key or paste can arrive the moment the session reports ready.
+    try await keys("printf 'TL-SHELL-%s\\n' READY\r")
+    try await waitFor("first command after attach") { try await visible().contains("TL-SHELL-READY") }
     _ = try await terminal.evaluateJavaScript("bridge.postMessage({showKeyboard:true}); true")
     try await waitFor("English keyboard") { !terminal.typingKeyboard.isHidden }
-    try await keys("printf 'TL-SHELL-%s\\n' READY\r")
-    try await waitFor("fixture shell") { try await visible().contains("TL-SHELL-READY") }
     XCTAssertTrue(button.isHidden)
     try await keys("./codex\r")
     try await waitFor("interactive Agent menu") { !button.isHidden && button.menu != nil }
