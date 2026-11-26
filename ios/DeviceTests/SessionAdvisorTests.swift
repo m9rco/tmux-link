@@ -97,6 +97,96 @@ final class SessionAdvisorTests: XCTestCase {
     return try JSONDecoder().decode(ManagedClaim.self, from: Data(body.utf8))
   }
 
+  func testManagedPhoneUsesOnlyTheConfiguredRelayAndModel() async throws {
+    let relay = AdvisorProvider(id: UUID().uuidString, name: "Private gateway",
+                                baseURL: "https://GATEWAY.example:443/company/v1/chat/completions/", model: "team/fast")
+    final class Gateway: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        XCTAssertEqual(request.url?.absoluteString, "https://gateway.example/company/v1/chat/completions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer relay-fixture-only")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody()) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "team/fast")
+        XCTAssertEqual(body["max_tokens"] as? Int, 384)
+        XCTAssertNil(body["thinking"])
+        XCTAssertNil(body["headers"])
+        XCTAssertNil(body["url"])
+        return (200, Data(#"{"usage":{"total_tokens":7},"choices":[{"finish_reason":"stop","message":{"content":"{\"reason\":\"Matches the request\"}"}}]}"#.utf8))
+      }
+    }
+    let session = Gateway.session()
+    defer { session.invalidateAndCancel() }
+    let reply = try await ManagedPhoneModel.complete(foregroundClaim(), key: "relay-fixture-only",
+                                                     provider: relay, session: session)
+    XCTAssertTrue(String(decoding: reply, as: UTF8.self).contains("Matches the request"))
+    XCTAssertFalse(String(decoding: reply, as: UTF8.self).contains("relay-fixture-only"))
+    let builtIn = try SessionAdvisor.chatRequest(instructions: "Return JSON", userMessage: "Test", key: "fixture",
+                                                  maxTokens: 160, provider: .openAI)
+    XCTAssertEqual(builtIn.url?.absoluteString, "https://api.openai.com/v1/chat/completions")
+    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(builtIn.httpBody)) as? [String: Any])
+    XCTAssertEqual(body["max_completion_tokens"] as? Int, 160)
+    XCTAssertNil(body["thinking"])
+  }
+
+  func testManualDecisionPostsToReviewedProviderAndRejectsRedirects() async throws {
+    let relay = AdvisorProvider(id: UUID().uuidString, name: "Review", baseURL: "https://review.example/v1", model: "review-model")
+    final class Gateway: AdvisorHTTPFixture, @unchecked Sendable {
+      override func reply() throws -> (Int, Data) {
+        XCTAssertEqual(request.url?.absoluteString, "https://review.example/v1/chat/completions")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody()) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "review-model")
+        return (200, try completion(#"{"decisions":[]}"#))
+      }
+    }
+    let session = Gateway.session()
+    defer { session.invalidateAndCancel() }
+    let brief = DecisionSnapshot(id: 7, name: "review", text: "Which format should be archived?").prepared()
+    XCTAssertTrue(brief.canAnalyze)
+    let decisions = try await SessionAdvisor.analyzePrepared([brief], key: "fixture-manual", provider: relay, session: session)
+    XCTAssertTrue(decisions.isEmpty)
+
+    let source = try XCTUnwrap(URL(string: relay.baseURL))
+    let redirected = try XCTUnwrap(URL(string: "https://another.example/chat/completions"))
+    let response = try XCTUnwrap(HTTPURLResponse(url: source, statusCode: 307, httpVersion: nil,
+                                                headerFields: ["Location": redirected.absoluteString]))
+    let redirect = SessionAdvisor.RedirectBlocker()
+    var called = false
+    redirect.urlSession(session, task: session.dataTask(with: source), willPerformHTTPRedirection: response,
+                        newRequest: URLRequest(url: redirected)) { next in
+      called = true
+      XCTAssertNil(next)
+    }
+    XCTAssertTrue(called)
+  }
+
+  func testProviderSelectionPersistsAndKeychainStaysBoundToTheEndpoint() throws {
+    let suite = "provider-fixture-" + UUID().uuidString
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let id = UUID().uuidString
+    let a = AdvisorProvider(id: id, name: "Gateway", baseURL: "https://a.example/proxy/v1", model: "m1")
+    let b = AdvisorProvider(id: id, name: "Gateway", baseURL: "https://b.example/proxy/v1", model: "m2")
+    var catalog = try AdvisorProviders.load(from: defaults)
+    XCTAssertEqual(catalog.selected, .deepSeek)
+    XCTAssertEqual(AdvisorProvider.deepSeek.keychainAccount, "deepseek")
+    try AdvisorCredential.save("fixture-key-one", for: a)
+    defer { try? AdvisorCredential.remove(for: a) }
+    XCTAssertNil(try AdvisorCredential.load(for: b))
+    catalog.profiles.append(a)
+    catalog.selectedID = id
+    try catalog.save(to: defaults)
+    let active = try XCTUnwrap(AdvisorCredential.current(from: defaults))
+    XCTAssertEqual(active.provider, a)
+    XCTAssertEqual(active.key, "fixture-key-one")
+    let metadata = try JSONEncoder().encode(try AdvisorProviders.load(from: defaults))
+    XCTAssertFalse(String(decoding: metadata, as: UTF8.self).contains("fixture-key-one"))
+    for url in ["http://local.example/v1", "https://user:password@a.example", "https://a.example/?key=fixture",
+                "https://a.example/#fragment", "https://a.example/../v1"] {
+      XCTAssertThrowsError(try AdvisorProvider(id: id, name: "test", baseURL: url, model: "m").validated())
+    }
+    let redirectedDefault = AdvisorProvider(id: "deepseek", name: "DeepSeek", baseURL: b.baseURL, model: "m")
+    XCTAssertThrowsError(try AdvisorCredential.load(for: redirectedDefault))
+  }
+
   func testManagedPhonePinsModelAndReturnsOnlyDecisionAndUsage() async throws {
     final class Endpoint: AdvisorHTTPFixture, @unchecked Sendable {
       override func reply() throws -> (Int, Data) {
@@ -119,6 +209,24 @@ final class SessionAdvisorTests: XCTestCase {
     XCTAssertTrue(text.contains("total_tokens"))
     for forbidden in ["fixture-phone-secret", "provider-metadata", "private-thought", "action", "Enter"] {
       XCTAssertFalse(text.contains(forbidden))
+    }
+  }
+
+  func testManagedPhoneAccountsForSplitUsageAndRejectsMissingCounts() throws {
+    func receipt(_ usage: [String: Any]) throws -> Data {
+      let data = try JSONSerialization.data(withJSONObject: [
+        "choices": [["finish_reason": "length"]], "usage": usage
+      ])
+      return try ManagedPhoneModel.sanitizedResponse(data, key: "fixture")
+    }
+    let data = try receipt(["prompt_tokens": 7, "completion_tokens": 4])
+    let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    XCTAssertEqual((root["usage"] as? [String: Int])?["total_tokens"], 11)
+    for invalid: [String: Any] in [[:], ["prompt_tokens": 7], ["total_tokens": true],
+                                    ["prompt_tokens": -1, "completion_tokens": 3], ["total_tokens": 0.1]] {
+      XCTAssertThrowsError(try receipt(invalid)) { error in
+        guard case SessionAdvisorError.missingUsage = error else { return XCTFail("Expected a usage error") }
+      }
     }
   }
 
@@ -148,9 +256,9 @@ final class SessionAdvisorTests: XCTestCase {
     var key: String?
     var claims = 0
     var decisions = 0
-    services.key = {
+    services.access = {
       if key == nil { keyMissing.fulfill() }
-      return key
+      return key.map { AdvisorAccess(provider: .deepSeek, key: $0) }
     }
     services.claim = { profile, id, instance in
       XCTAssertEqual(profile.id, target.clientID)
@@ -160,7 +268,7 @@ final class SessionAdvisorTests: XCTestCase {
       return ManagedClaimResponse(enabled: true, claim: fixture)
     }
     services.model = { _, secret in
-      XCTAssertEqual(secret, "phone-only-value")
+      XCTAssertEqual(secret.key, "phone-only-value")
       decisions += 1
       return Data("decision".utf8)
     }
@@ -208,7 +316,7 @@ final class SessionAdvisorTests: XCTestCase {
     var decisions = 0
     var attempts = 0
     var services = ManagedSessionController.Services()
-    services.key = { "fixture" }
+    services.access = { AdvisorAccess(provider: .deepSeek, key: "fixture") }
     services.claim = { _, _, _ in
       claims += 1
       return ManagedClaimResponse(enabled: true, claim: fixture)
@@ -248,7 +356,7 @@ final class SessionAdvisorTests: XCTestCase {
     let stopped = expectation(description: "cancelled request on lock")
     let claim = try foregroundClaim()
     var services = ManagedSessionController.Services()
-    services.key = { "fixture" }
+    services.access = { AdvisorAccess(provider: .deepSeek, key: "fixture") }
     services.claim = { _, _, _ in ManagedClaimResponse(enabled: true, claim: claim) }
     services.model = { _, _ in
       started.fulfill()

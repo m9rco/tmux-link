@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct ManagedClaimResponse: Decodable {
   let enabled: Bool
@@ -34,14 +35,25 @@ enum ManagedPhoneModel {
     let draft: String?
   }
 
+  private static func tokenCount(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          let count = value as? Int, (0...1_000_000).contains(count) else { return nil }
+    return count
+  }
+
   static func sanitizedResponse(_ data: Data, key: String) throws -> Data {
     guard data.count <= limit,
-          let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let first = (envelope["choices"] as? [[String: Any]])?.first,
-          let finish = first["finish_reason"] as? String,
-          let usage = envelope["usage"] as? [String: Any],
-          let tokens = usage["total_tokens"] as? Int, (1...1_000_000).contains(tokens)
-    else { throw SessionAdvisorError.invalidResponse }
+          let finish = first["finish_reason"] as? String else { throw SessionAdvisorError.invalidResponse }
+    guard let usage = envelope["usage"] as? [String: Any] else { throw SessionAdvisorError.missingUsage }
+    let tokens: Int
+    if let total = tokenCount(usage["total_tokens"]), total > 0 {
+      tokens = total
+    } else if let prompt = tokenCount(usage["prompt_tokens"]), let completion = tokenCount(usage["completion_tokens"]),
+              (1...1_000_000).contains(prompt + completion) {
+      tokens = prompt + completion
+    } else { throw SessionAdvisorError.missingUsage }
     // An incomplete or filtered answer still incurred these tokens. Return
     // usage without a selectable answer so the node can reconcile its budget.
     var result: [String: Any] = ["finish_reason": finish == "length" ? "length" : "filtered"]
@@ -58,7 +70,7 @@ enum ManagedPhoneModel {
     return resultData
   }
 
-  static func complete(_ claim: ManagedClaim, key: String, session: URLSession = SessionAdvisor.transport) async throws -> Data {
+  static func complete(_ claim: ManagedClaim, key: String, provider: AdvisorProvider = .deepSeek, session: URLSession = SessionAdvisor.transport) async throws -> Data {
     let token = try SessionAdvisor.validatedKey(key)
     let chat = claim.request
     guard chat.messages.map(\.role) == ["system", "user"], (1...384).contains(chat.max_tokens),
@@ -66,25 +78,9 @@ enum ManagedPhoneModel {
     else { throw SessionAdvisorError.invalidResponse }
     guard chat.messages.allSatisfy({ !$0.content.contains(token) }) else { throw SessionAdvisorError.credentialInSnapshot }
     let request = try SessionAdvisor.chatRequest(instructions: chat.messages[0].content, userMessage: chat.messages[1].content,
-                                                 key: token, maxTokens: chat.max_tokens)
+                                                 key: token, maxTokens: chat.max_tokens, provider: provider)
     try Task.checkCancellation()
-    let (bytes, response) = try await session.bytes(for: request, delegate: SessionAdvisor.RedirectBlocker())
-    defer { bytes.task.cancel() }
-    guard let http = response as? HTTPURLResponse else { throw SessionAdvisorError.invalidResponse }
-    switch http.statusCode {
-    case 200..<300: break
-    case 401, 403: throw SessionAdvisorError.authentication
-    case 402: throw SessionAdvisorError.quota
-    case 429: throw SessionAdvisorError.rateLimited
-    default: throw SessionAdvisorError.serviceUnavailable
-    }
-    guard response.expectedContentLength <= Int64(limit) else { throw SessionAdvisorError.invalidResponse }
-    var data = Data()
-    for try await byte in bytes {
-      guard data.count < limit else { throw SessionAdvisorError.invalidResponse }
-      data.append(byte)
-    }
-    try Task.checkCancellation()
+    let data = try await SessionAdvisor.responseData(for: request, session: session, limit: limit)
     return try sanitizedResponse(data, key: token)
   }
 }
@@ -99,17 +95,24 @@ final class ManagedSessionController: ObservableObject {
   }
 
   struct Services {
-    var key: () throws -> String? = AdvisorCredential.load
+    var beginModelTime: @MainActor (@escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier = {
+      UIApplication.shared.beginBackgroundTask(withName: "Finish session advice", expirationHandler: $0)
+    }
+    var endModelTime: @MainActor (UIBackgroundTaskIdentifier) -> Void = { UIApplication.shared.endBackgroundTask($0) }
+    var access: () throws -> AdvisorAccess? = { try AdvisorCredential.current() }
     var claim: (ClientProfile, Int64, String) async throws -> ManagedClaimResponse = { client, id, instance in
       try await TerminalTransport.claim(client, sessionID: id, instance: instance)
     }
-    var model: (ManagedClaim, String) async throws -> Data = { try await ManagedPhoneModel.complete($0, key: $1) }
+    var model: (ManagedClaim, AdvisorAccess) async throws -> Data = { try await ManagedPhoneModel.complete($0, key: $1.key, provider: $1.provider) }
     var finish: (ClientProfile, Int64, String, String, Data?) async throws -> Void = { client, id, instance, ticket, envelope in
       _ = try await TerminalTransport.finish(client, sessionID: id, instance: instance, ticket: ticket, envelope: envelope)
     }
   }
 
   private static let settingsKey = "managed.foreground.targets.v2"
+  @Published private(set) var personalMemory = PersonalDecisionMemory()
+  @Published private(set) var personalMemoryUnavailable = false
+  private let memoryFile: PersonalMemoryFile
   @Published private(set) var targets: [Target]
   @Published private(set) var notices: [Target: String] = [:]
   private let defaults: UserDefaults
@@ -120,6 +123,8 @@ final class ManagedSessionController: ObservableObject {
   private var active = false
   private var task: Task<Void, Never>?
   private var current: Target?
+  private var backgroundTime: UIBackgroundTaskIdentifier = .invalid
+  private var backgroundGeneration = 0
   // Keep an unacknowledged reply only in RAM. A reconnect retries the same
   // ticket before claiming another one, without spending more model tokens.
   private struct PendingReply {
@@ -129,10 +134,35 @@ final class ManagedSessionController: ObservableObject {
   }
   private var replies: [Target: PendingReply] = [:]
 
-  init(defaults: UserDefaults = .standard, services: Services = Services()) {
+  init(defaults: UserDefaults = .standard, services: Services = Services(), memoryFile: PersonalMemoryFile = .local) {
     self.defaults = defaults
     self.services = services
+    self.memoryFile = memoryFile
     targets = defaults.data(forKey: Self.settingsKey).flatMap { try? JSONDecoder().decode([Target].self, from: $0) } ?? []
+    reloadPersonalMemory()
+  }
+
+  func reloadPersonalMemory() {
+    do {
+      personalMemory = try memoryFile.read()
+      personalMemoryUnavailable = false
+    } catch {
+      personalMemory = PersonalDecisionMemory()
+      personalMemoryUnavailable = true
+    }
+  }
+
+  func updatePersonalMemory(_ edit: (inout PersonalDecisionMemory) throws -> Void) throws {
+    // Read the latest protected file first, including after an unlock or a
+    // change made from a different scene.
+    var updated: PersonalDecisionMemory
+    do { updated = try memoryFile.read() }
+    catch { throw RelayError("暂时无法读取个人偏好，请解锁 iPhone 后再试。") }
+    try edit(&updated)
+    do { try memoryFile.save(updated) }
+    catch { throw RelayError("个人偏好未保存，请检查 iPhone 是否已解锁及剩余空间。") }
+    personalMemory = updated
+    personalMemoryUnavailable = false
   }
 
   func updateClients(_ clients: [ClientProfile]) {
@@ -170,12 +200,39 @@ final class ManagedSessionController: ObservableObject {
   }
 
   func setActive(_ value: Bool) {
-    guard value != active else { return }
-    active = value
-    if value {
-      deadlines.removeAll()
-      start()
-    } else { task?.cancel() }
+    if !value {
+      active = false
+      task?.cancel()
+      endModelTime()
+      return
+    }
+    guard !active else { return }
+    active = true
+    deadlines.removeAll()
+    start()
+  }
+
+  func leaveForeground() {
+    active = false
+    // Only a model request already underway can use its remaining iOS time.
+    if backgroundTime == .invalid { task?.cancel() }
+  }
+
+  private func beginModelTime() {
+    backgroundGeneration &+= 1
+    let generation = backgroundGeneration
+    backgroundTime = services.beginModelTime { [weak self] in
+      guard let self, backgroundGeneration == generation else { return }
+      endModelTime()
+      if !active { task?.cancel() }
+    }
+  }
+
+  private func endModelTime() {
+    backgroundGeneration &+= 1
+    guard backgroundTime != .invalid else { return }
+    services.endModelTime(backgroundTime)
+    backgroundTime = .invalid
   }
 
   func enable(_ target: Target) {
@@ -255,22 +312,31 @@ final class ManagedSessionController: ObservableObject {
       return
     }
     replies[target] = nil
-    guard let key = try services.key(), !key.isEmpty else { throw SessionAdvisorError.invalidKey }
+    guard let access = try services.access(), !access.key.isEmpty else { throw SessionAdvisorError.invalidKey }
     let result = try await services.claim(client, target.sessionID, target.instance)
     try Task.checkCancellation()
     guard result.enabled else { remove(target); return }
-    guard let claim = result.claim else { notices[target] = nil; return }
+    guard let original = result.claim else { notices[target] = nil; return }
+    reloadPersonalMemory()
+    let claim = personalMemory.personalizing(original, for: PersonalDecisionMemory.scope(for: client))
     guard claim.ticket.utf8.count == 16, claim.ticket.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
     else { throw SessionAdvisorError.invalidResponse }
+    guard active else { return }
+    beginModelTime()
+    defer { endModelTime() }
     var envelope: Data?
     var modelError: Error?
-    do { envelope = try await services.model(claim, key) }
+    do {
+      guard !personalMemoryUnavailable else { throw RelayError("解锁 iPhone 后才能读取个人决策偏好。") }
+      envelope = try await services.model(claim, access)
+    }
     catch { modelError = error }
     // An in-flight provider call can outlive the active scene or be revoked.
     // Only an active, still-enabled session may return its recommendation.
     guard targets.contains(target), !Task.isCancelled else { return }
     let reply = PendingReply(ticket: claim.ticket, envelope: envelope, created: Date())
     replies[target] = reply
+    guard active else { return }
     try await deliver(reply, target: target, client: client)
     if let modelError { throw modelError }
   }

@@ -93,12 +93,33 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private let status = UILabel()
   private let latency = UILabel()
   private let statusBar = UIStackView()
+  private let reconnectButton = UIButton(type: .system)
   private weak var navigationStatus: TerminalNavigationStatus?
   private var island: IslandReporting?
   private var activityState = TerminalActivityState()
   private var backgrounded = false
   private var expiry: Timer?
   private var completed = false
+  private var generation = 0
+  private var navigation: WKNavigation?
+  private var recoveryEnabled = false
+  private var retryCount = 0
+  private var retryTask: Task<Void, Never>?
+  private var resumeCheck: Task<Void, Never>?
+  private var resumedAt: Date?
+  private var verifyingConnection = false
+  private var previouslyConnected = false
+  // The worker holds at most one frame while WebKit is suspended. Socket
+  // backpressure keeps further output on the transport until the view resumes.
+  private final class DisplayFrame {
+    let bytes: Data
+    let delivered = DispatchSemaphore(value: 0)
+    var submitted = false
+    init(_ bytes: Data) { self.bytes = bytes }
+  }
+  private var displayFrame: DisplayFrame?
+  private var displayDeadline: Timer?
+  private var displayStartedAt = Date()
   private var attachedClientPID: UInt32?
   private var drawerOpen = false
   private var agentIdentity: String?
@@ -143,9 +164,6 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     title = heading
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
-    let paging = touchPaging ? "agent" : target >= 0 ? "tmux" : "keys"
-    config.userContentController.addUserScript(WKUserScript(
-      source: "window.touchPaging = '\(paging)'", injectionTime: .atDocumentStart, forMainFrameOnly: true))
     config.userContentController.add(self, name: "terminal")
     web = TerminalWebView(frame: .zero, configuration: config)
     web.typingKeyboard.isUserInteractionEnabled = false
@@ -183,7 +201,14 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     transportBadge.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
     transportBadge.textColor = .secondaryLabel
     let bar = statusBar
-    [status, transportBadge, latency].forEach(bar.addArrangedSubview)
+    reconnectButton.configuration = .plain()
+    reconnectButton.configuration?.title = "重连"
+    reconnectButton.accessibilityIdentifier = "terminal.reconnect"
+    reconnectButton.accessibilityLabel = "重新连接此会话"
+    reconnectButton.addTarget(self, action: #selector(retryManually), for: .touchUpInside)
+    reconnectButton.isHidden = true
+    reconnectButton.configuration?.contentInsets = .init(top: 12, leading: 10, bottom: 12, trailing: 10)
+    [status, transportBadge, latency, reconnectButton].forEach(bar.addArrangedSubview)
     bar.alignment = .center
     bar.spacing = 10
     bar.isLayoutMarginsRelativeArrangement = true
@@ -224,14 +249,17 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       web.addGestureRecognizer(left)
       contentBackSwipe = left
     }
-    let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
-    web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
-    NotificationCenter.default.addObserver(
-      self, selector: #selector(pauseStatus),
-      name: UIApplication.didEnterBackgroundNotification, object: nil)
-    NotificationCenter.default.addObserver(
-      self, selector: #selector(resumeStatus),
-      name: UIApplication.didBecomeActiveNotification, object: nil)
+    loadTerminalPage()
+    NotificationCenter.default.addObserver(self, selector: #selector(sceneChanged(_:)),
+                                          name: UIScene.didEnterBackgroundNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(sceneChanged(_:)),
+                                          name: UIScene.didActivateNotification, object: nil)
+  }
+
+  @objc private func sceneChanged(_ notification: Notification) {
+    guard let scene = notification.object as? UIScene, scene === viewIfLoaded?.window?.windowScene else { return }
+    if notification.name == UIScene.didEnterBackgroundNotification { pauseStatus() }
+    else { resumeStatus() }
   }
   private func reviewDecisions() {
     guard active, ready, presentedViewController == nil else { return }
@@ -267,7 +295,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   private func updateAgentMonitoring() {
-    guard active, ready, !backgrounded, let pid = attachedClientPID,
+    guard active, ready, !verifyingConnection, !backgrounded, let pid = attachedClientPID,
           drawerOpen || !web.typingKeyboard.isHidden else {
       contextPoll?.cancel()
       contextPoll = nil
@@ -353,6 +381,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
                            suggestedActions: [UIMenuElement]) -> UIMenu? {
     guard let snapshot = menuSnapshot else { return nil }
+    let attempt = generation
     var actions: [UIMenuElement] = []
     if !snapshot.selected.isEmpty {
       actions.append(UIAction(title: "复制", image: UIImage(systemName: "doc.on.doc")) { _ in
@@ -361,7 +390,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     actions += [
       UIAction(title: "粘贴", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
-        guard let self, ready, let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        guard let self, isCurrent(attempt), ready, !verifyingConnection, !backgrounded,
+              let text = UIPasteboard.general.string, !text.isEmpty else { return }
         web.callAsyncJavaScript("pasteTerminal(text)", arguments: ["text": text], in: nil, in: .page,
                                 completionHandler: nil)
       },
@@ -448,20 +478,94 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   @objc private func pauseStatus() {
-    guard active, !completed else { return }
+    guard active, !backgrounded else { return }
     backgrounded = true
+    if !completed && session?.managedInstance != nil {
+      recoveryEnabled = true
+    }
+    resumeCheck?.cancel()
+    if let retryTask {
+      retryTask.cancel()
+      self.retryTask = nil
+      retryCount = max(0, retryCount - 1)
+      reconnectButton.isHidden = false
+    }
+    displayDeadline?.invalidate()
+    displayDeadline = nil
     pendingReply?.cancel()
     updateAgentMonitoring()
     // Flush any coalesced reading with its original deadline before suspension.
-    refreshStatus(immediately: true)
+    if !completed { refreshStatus(immediately: true) }
   }
 
   @objc private func resumeStatus() {
-    guard active, !completed else { return }
+    guard active, backgrounded else { return }
     backgrounded = false
+    if completed {
+      scheduleRecovery()
+      return
+    }
+    if !started, navigation == nil {
+      loadTerminalPage()
+    }
+    displayStartedAt = Date()
+    displayIfVisible()
+    if recoveryEnabled && ready { checkResumedConnection() }
     updateAgentMonitoring()
     refreshStatus(immediately: true)
     startIslandIfAvailable()
+  }
+
+  private func checkResumedConnection() {
+    // A suspended TCP connection may look writable until the next SSH ping.
+    // Once its last reading is stale, enable typing only after a new reading.
+    resumedAt = Date()
+    verifyingConnection = activityState.staleDate <= Date()
+    setInputEnabled(!verifyingConnection)
+    let attempt = generation
+    resumeCheck?.cancel()
+    resumeCheck = Task { [weak self] in
+      do { try await Task.sleep(nanoseconds: 12_000_000_000) } catch { return }
+      guard let self, isCurrent(attempt), !backgrounded, resumedAt != nil else { return }
+      finish("原连接未响应")
+    }
+  }
+
+  private func setInputEnabled(_ enabled: Bool) {
+    shortcuts?.setReady(enabled)
+    web?.shortcutBar.setReady(enabled)
+    web?.typingKeyboard.isUserInteractionEnabled = enabled
+  }
+
+  private func loadTerminalPage() {
+    let bridge = web.configuration.userContentController
+    bridge.removeAllUserScripts()
+    let paging = touchPaging ? "agent" : target >= 0 ? "tmux" : "keys"
+    bridge.addUserScript(WKUserScript(
+      source: "window.touchPaging = '\(paging)'; window.terminalConnectionID = \(generation)",
+      injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    let file = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets")!
+    navigation = web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
+  }
+
+  private func isCurrent(_ attempt: Int) -> Bool {
+    active && !completed && generation == attempt
+  }
+
+  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    guard active, !completed else { return }
+    recoveryEnabled = previouslyConnected && session?.managedInstance != nil
+    finish("终端画面已暂停")
+  }
+
+  func webView(_ webView: WKWebView, didFailProvisionalNavigation failed: WKNavigation!, withError error: Error) {
+    guard let failed, navigation === failed else { return }
+    finish("终端页面加载失败")
+  }
+
+  func webView(_ webView: WKWebView, didFail failed: WKNavigation!, withError error: Error) {
+    guard let failed, navigation === failed else { return }
+    finish("终端页面加载失败")
   }
 
   func webView(
@@ -474,8 +578,11 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         ? .allow : .cancel)
   }
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    guard active && !started else { return }
+    guard active, !completed, !started, self.navigation === navigation else { return }
+    self.navigation = nil
+    guard !backgrounded else { return }
     started = true
+    let attempt = generation
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
       finish("本地连接失败")
@@ -495,6 +602,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     do { connection = try TerminalTransport(client) } catch {
       close(reader)
       close(worker)
+      recoveryEnabled = false
       finish(error.localizedDescription)
       return
     }
@@ -510,17 +618,21 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
           if kind == 1 {
             let stage = String(decoding: payload, as: UTF8.self)
             let observedAt = Date()
-            DispatchQueue.main.async {
-              self?.stage(stage, hasIdentity: hasIdentity, observedAt: observedAt)
+            DispatchQueue.main.async { [weak self] in
+              guard let self, isCurrent(attempt) else { return }
+              self.stage(stage, hasIdentity: hasIdentity, observedAt: observedAt)
             }
           } else if kind == 2 {
             guard payload.count == 4 else { throw RelayError("延迟数据格式错误") }
             let ms = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             let observedAt = Date()
-            DispatchQueue.main.async { self?.updateLatency(ms, observedAt: observedAt) }
+            DispatchQueue.main.async { [weak self] in
+              guard let self, isCurrent(attempt) else { return }
+              updateLatency(ms, observedAt: observedAt)
+            }
           } else if kind == 3 && payload.isEmpty {
             DispatchQueue.main.async { [weak self] in
-              guard let self, active, view.window != nil, presentedViewController == nil else { return }
+              guard let self, isCurrent(attempt), !backgrounded, view.window != nil, presentedViewController == nil else { return }
               let alert = UIAlertController(title: "暂时无法翻页", message: "会话仍已连接，请稍后再滑动一次。", preferredStyle: .alert)
               alert.addAction(UIAlertAction(title: "好", style: .default))
               present(alert, animated: true)
@@ -528,37 +640,71 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
           } else if kind == 4 && trackAgent && payload.count == 4 {
             let pid = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             DispatchQueue.main.async { [weak self] in
-              guard let self, active, !completed, attachedClientPID == nil, pid > 0 else { return }
+              guard let self, isCurrent(attempt), attachedClientPID == nil, pid > 0 else { return }
               attachedClientPID = pid
               updateAgentMonitoring()
             }
           } else if kind == 0 {
-            let rendered = DispatchSemaphore(value: 0)
-            let bytes = payload.base64EncodedString()
+            let frame = DisplayFrame(payload)
             DispatchQueue.main.async { [weak self] in
-              guard let self, active else {
-                rendered.signal()
+              guard let self, isCurrent(attempt) else {
+                frame.delivered.signal()
                 return
               }
-              web.callAsyncJavaScript(
-                "await window.display(bytes)", arguments: ["bytes": bytes], in: nil, in: .page
-              ) { _ in rendered.signal() }
+              displayFrame = frame
+              displayStartedAt = Date()
+              displayIfVisible()
             }
-            if rendered.wait(timeout: .now() + 30) == .timedOut {
-              throw RelayError("终端显示超时，请重新连接")
-            }
+            frame.delivered.wait()
           } else {
             throw RelayError("终端数据格式错误")
           }
         }
         Task { @MainActor [weak self] in
           let error = await result.value
-          self?.finish(error ?? "会话已断开")
+          guard let self, isCurrent(attempt) else { return }
+          finish(error ?? "会话已断开")
         }
       } catch {
-        DispatchQueue.main.async { self?.finish(error.localizedDescription) }
+        DispatchQueue.main.async { [weak self] in
+          guard let self, isCurrent(attempt) else { return }
+          finish(error.localizedDescription)
+        }
       }
     }
+  }
+
+  private func displayIfVisible() {
+    guard !backgrounded, let frame = displayFrame else { return }
+    watchDisplay()
+    guard !frame.submitted else { return }
+    frame.submitted = true
+    web.callAsyncJavaScript("await window.display(bytes)", arguments: ["bytes": frame.bytes.base64EncodedString()],
+                            in: nil, in: .page) { [weak self] result in
+      guard let self, displayFrame === frame else { return }
+      if case .failure = result {
+        finish("终端画面未能恢复")
+      } else {
+        releaseDisplayFrame()
+      }
+    }
+  }
+
+  private func watchDisplay() {
+    guard !backgrounded, displayFrame != nil, displayDeadline == nil else { return }
+    let remaining = displayStartedAt.addingTimeInterval(30).timeIntervalSinceNow
+    guard remaining > 0 else { finish("终端显示超时"); return }
+    // Recheck the age of whichever frame is outstanding. A continuous stream
+    // of output uses one timer per 30s, not one timer per render.
+    displayDeadline = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
+      self?.displayDeadline = nil
+      self?.watchDisplay()
+    }
+  }
+
+  private func releaseDisplayFrame() {
+    displayFrame?.delivered.signal()
+    displayFrame = nil
   }
 
   nonisolated static func readFrame(from stream: FileHandle) throws -> (UInt8, Data)? {
@@ -587,11 +733,14 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
+      previouslyConnected = true
+      if recoveryEnabled, !backgrounded { checkResumedConnection() }
       updateAgentMonitoring()
       statusBar.isHidden = navigationStatus != nil
-      shortcuts.setReady(true)
-      web.shortcutBar.setReady(true)
-      web.typingKeyboard.isUserInteractionEnabled = true
+      setInputEnabled(!verifyingConnection)
+      if !web.typingKeyboard.isHidden {
+        web.evaluateJavaScript("trackKeyboardCursor(true)", completionHandler: nil)
+      }
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
     }
     if phase == .attaching || phase == .ready { resize() }
@@ -603,23 +752,41 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     activityState.milliseconds = ms == .max ? nil : ms
     activityState.timedOut = ms == .max
+    if !backgrounded, ms != .max, resumedAt.map({ observedAt >= $0 }) ?? true {
+      if verifyingConnection {
+        verifyingConnection = false
+        setInputEnabled(true)
+        updateAgentMonitoring()
+      }
+      resumeCheck?.cancel()
+      resumeCheck = nil
+      // After suspension the first frame may contain a ping sampled before
+      // sleep, immediately followed by EOF. Keep recovery armed through two
+      // fresh five-second heartbeat intervals.
+      if resumedAt.map({ observedAt.timeIntervalSince($0) >= 12 }) ?? true {
+        resumedAt = nil
+        retryCount = 0
+        recoveryEnabled = false
+      }
+    }
     refreshStatus()
   }
 
   func userContentController(
     _ controller: WKUserContentController, didReceive message: WKScriptMessage
   ) {
-    guard active, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any] else {
+    guard active, !completed, message.frameInfo.isMainFrame, let obj = message.body as? [String: Any],
+          obj["connectionID"] as? Int == generation else {
       return
     }
-    if ready, touchPaging, let direction = obj["page"] as? String, ["up", "down"].contains(direction) {
+    if ready, !verifyingConnection, !backgrounded, touchPaging, let direction = obj["page"] as? String, ["up", "down"].contains(direction) {
       send(2, Data([direction == "up" ? 1 : 0]))
     }
     if let cursor = obj["cursor"] as? [String: Int], let row = cursor["row"], let rows = cursor["rows"],
        rows > 0, rows <= Int(UInt16.max) {
       viewport.setCursor(row: row, rows: rows)
     }
-    if obj["showKeyboard"] as? Bool == true, ready { setKeyboardVisible(true) }
+    if obj["showKeyboard"] as? Bool == true, ready, !verifyingConnection, !backgrounded { setKeyboardVisible(true) }
     if let metrics = obj["layout"] as? [String: Double],
       let w = metrics["width"], let h = metrics["height"],
       let gw = metrics["gridWidth"], let gh = metrics["gridHeight"] {
@@ -627,7 +794,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
     let bytes = (obj["data"] as? String).map { Data($0.utf8) }
       ?? (obj["binary"] as? String).flatMap { Data(base64Encoded: $0) }
-    if ready, let bytes {
+    if ready, !verifyingConnection, !backgrounded, let bytes {
       pendingReply?.cancel()
       for offset in stride(from: 0, to: bytes.count, by: 16384) {
         send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
@@ -665,6 +832,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       return
     }
     let packet = frame
+    let attempt = generation
     pendingBytes += packet.count
     input.async { [weak self] in
       defer { close(output) }
@@ -679,7 +847,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         return true
       }
       DispatchQueue.main.async {
-        guard let self else { return }
+        guard let self, self.isCurrent(attempt) else { return }
         self.pendingBytes -= packet.count
         if !ok && self.fd >= 0 { self.finish("输入通道已断开") }
       }
@@ -687,9 +855,15 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func finish(_ message: String) {
     guard active, !completed else { return }
+    generation += 1
     completed = true
+    navigation = nil
+    resumeCheck?.cancel()
+    resumeCheck = nil
+    resumedAt = nil
     statusBar.directionalLayoutMargins.top = 5 + max(view.safeAreaInsets.top, 20)
     statusBar.isHidden = false
+    reconnectButton.isHidden = false
     navigationStatus?.update(nil)
     expiry?.invalidate()
     island?.end()
@@ -700,17 +874,85 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     latency.accessibilityLabel = nil
     transportBadge.text = nil
     disconnect()
+    scheduleRecovery()
   }
+
+  nonisolated static func sameSession(_ original: RemoteSession, _ current: RemoteSession) -> Bool {
+    guard original.id == current.id else { return false }
+    // A pane switch and a session rename are both legitimate. The tmux server
+    // PID and session creation time remain stable across both operations.
+    if let originalInstance = original.managedInstance {
+      let parts = originalInstance.split(separator: "-")
+      guard parts.count == 4, let other = current.managedInstance?.split(separator: "-"),
+            other.count == 4 else { return false }
+      return parts.prefix(2).elementsEqual(other.prefix(2))
+    }
+    return original.name == current.name
+  }
+
+  @objc private func retryManually() {
+    retryCount = 0
+    recoveryEnabled = false
+    scheduleRecovery(manual: true)
+  }
+
+  private func scheduleRecovery(manual: Bool = false) {
+    let delays: [UInt64] = [0, 1, 3]
+    guard active, completed, !backgrounded, retryTask == nil,
+          manual || (recoveryEnabled && retryCount < delays.count) else { return }
+    let attempt = generation
+    let delay = manual ? 0 : delays[retryCount]
+    if !manual { retryCount += 1 }
+    status.text = "◌  正在恢复会话"
+    reconnectButton.isHidden = true
+    retryTask = Task { [weak self, client, session] in
+      do {
+        try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+        if let session {
+          let sessions = try await SessionDirectory.fetch(client)
+          try Task.checkCancellation()
+          guard sessions.contains(where: { Self.sameSession(session, $0) }) else {
+            self?.retryTask = nil
+            self?.recoveryEnabled = false
+            self?.status.text = "原会话已结束或已更换，请返回会话列表"
+            return
+          }
+        }
+      } catch {
+        guard let self, !Task.isCancelled, active, generation == attempt else { return }
+        retryTask = nil
+        reconnectButton.isHidden = false
+        status.text = "○  " + error.localizedDescription
+        scheduleRecovery()
+        return
+      }
+      guard let self, !Task.isCancelled, active, !backgrounded, generation == attempt else { return }
+      retryTask = nil
+      completed = false
+      started = false
+      dimensions = nil
+      sentDimensions = nil
+      activityState = TerminalActivityState()
+      status.textColor = .secondaryLabel
+      statusBar.directionalLayoutMargins.top = 5
+      statusBar.isHidden = navigationStatus != nil
+      startIslandIfAvailable()
+      refreshStatus(immediately: true)
+      loadTerminalPage()
+    }
+  }
+
   private func disconnect() {
     ready = false
+    verifyingConnection = false
+    pendingBytes = 0
+    displayDeadline?.invalidate()
+    displayDeadline = nil
+    releaseDisplayFrame()
     pendingReply?.cancel()
     attachedClientPID = nil
     updateAgentMonitoring()
-    shortcuts?.setReady(false)
-    web?.shortcutBar.setReady(false)
-    web?.typingKeyboard.isUserInteractionEnabled = false
-    web?.typingKeyboard.resetLayout()
-    if web != nil { setKeyboardVisible(false) }
+    setInputEnabled(false)
     if fd >= 0 {
       shutdown(fd, SHUT_RDWR)
       close(fd)
@@ -724,7 +966,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   private func sendTerminalKey(_ key: String) {
-    guard ready else { return }
+    guard ready, !verifyingConnection, !backgrounded else { return }
     web.callAsyncJavaScript("pressTerminalKey(key)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
   }
   override func accessibilityPerformEscape() -> Bool {
@@ -743,6 +985,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   func stop() {
     active = false
+    retryTask?.cancel()
+    resumeCheck?.cancel()
     expiry?.invalidate()
     island?.end()
     island = nil

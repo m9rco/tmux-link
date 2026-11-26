@@ -149,6 +149,7 @@ struct Workspace: View {
   @State private var path: [ClientProfile] = []
   @State private var editor: ClientProfile?
   @State private var pairing: HostPairing?
+  @State private var showingProviders = false
   @State private var importedID: UUID?
   @State private var message: String?
   var body: some View {
@@ -157,16 +158,27 @@ struct Workspace: View {
         .scrollContentBackground(.hidden).background(ink).navigationTitle("Tmux Link")
         .toolbar {
           ToolbarItem(placement: .navigationBarTrailing) {
-            Button(action: copyKey) { Image(systemName: "key") }
-              .accessibilityLabel("复制手机 SSH 公钥")
+            Menu {
+              Button { showingProviders = true } label: { Label("模型服务", systemImage: "slider.horizontal.3") }
+              Button(action: copyKey) { Label("复制手机 SSH 公钥", systemImage: "key") }
+            } label: { Image(systemName: "ellipsis.circle") }
+            .accessibilityLabel("工作区设置")
           }
         }
-        .navigationDestination(for: ClientProfile.self) { Sessions(client: $0) }
+        .navigationDestination(for: ClientProfile.self) { Sessions(client: $0).id($0) }
     }
     .tint(mint).preferredColorScheme(.dark)
     .environmentObject(managed)
     .onReceive(store.$clients) { managed.updateClients($0) }
-    .onReceive(activity.$isActive) { managed.setActive($0) }
+    .onReceive(activity.$isActive) {
+      if $0 { managed.setActive(UIApplication.shared.isProtectedDataAvailable) } else { managed.leaveForeground() }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataWillBecomeUnavailableNotification)) { _ in
+      managed.setActive(false)
+    }
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
+      if activity.isActive { managed.setActive(true) }
+    }
     .onReceive(NotificationCenter.default.publisher(for: AdvisorCredential.changed)) { _ in managed.credentialChanged() }
     .onReceive(enrollment.$error) { if let error = $0 { message = error } }
     .task(id: clientLinks.requests.count) { reviewNextLink() }
@@ -189,6 +201,7 @@ struct Workspace: View {
         path = [client]
       }
     }
+    .sheet(isPresented: $showingProviders, onDismiss: { reviewNextLink() }) { AdvisorProviderSettings() }
     .alert(
       message ?? "",
       isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })
@@ -250,7 +263,7 @@ struct Workspace: View {
   }
 
   private func reviewNextLink() {
-    guard editor == nil, pairing == nil, message == nil, let request = clientLinks.takeNext() else { return }
+    guard editor == nil, pairing == nil, !showingProviders, message == nil, let request = clientLinks.takeNext() else { return }
     switch request {
     case .review(let draft): review(draft)
     case .pair(let offer): pairing = offer
@@ -405,25 +418,62 @@ private struct ProfileEditor: View {
   }
 }
 
+@MainActor
+final class SessionListModel: ObservableObject {
+  @Published private(set) var sessions: [RemoteSession] = []
+  @Published private(set) var failure: String?
+  @Published private(set) var loading = true
+  private var revision = 0
+  private let fetch: (ClientProfile) async throws -> [RemoteSession]
+
+  init(fetch: @escaping (ClientProfile) async throws -> [RemoteSession] = SessionDirectory.fetch) {
+    self.fetch = fetch
+  }
+
+  func refresh(_ client: ClientProfile) async -> [RemoteSession]? {
+    revision &+= 1
+    let request = revision
+    loading = true
+    defer { if request == revision { loading = false } }
+    do {
+      let items = try await fetch(client)
+      guard request == revision, !Task.isCancelled else { return nil }
+      sessions = items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+      failure = nil
+      return sessions
+    } catch {
+      if request == revision, !Task.isCancelled { failure = error.localizedDescription }
+      return nil
+    }
+  }
+
+  func matching(_ query: String) -> [RemoteSession] {
+    let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !term.isEmpty else { return sessions }
+    return sessions.filter {
+      $0.name.localizedCaseInsensitiveContains(term) || $0.directory?.localizedCaseInsensitiveContains(term) == true
+    }
+  }
+}
+
 private struct Sessions: View {
   @EnvironmentObject private var managed: ManagedSessionController
   let client: ClientProfile
-  @State private var sessions: [RemoteSession] = []
-  @State private var failure: String?
-  @State private var loading = true
-  @State private var revision = 0
+  @StateObject private var directory = SessionListModel()
+  @State private var search = ""
   @State private var showingAdvisor = false
   @State private var managedSession: RemoteSession?
   @State private var pendingSelection: AdvisorSelection?
   @State private var advisorDestination: AdvisorSelection?
 
   private var advisorNotice: String? {
-    if loading { return "正在读取会话…" }
-    if failure != nil { return "会话列表读取失败，请返回列表刷新。" }
-    return sessions.isEmpty ? "这个客户端暂无会话。" : nil
+    if directory.loading && directory.sessions.isEmpty { return "正在读取会话…" }
+    if directory.failure != nil && directory.sessions.isEmpty { return "会话列表读取失败，请返回列表刷新。" }
+    return directory.sessions.isEmpty ? "这个客户端暂无会话。" : nil
   }
 
   var body: some View {
+    let visibleSessions = directory.matching(search)
     List {
       Section {
         Button { showingAdvisor = true } label: {
@@ -432,15 +482,21 @@ private struct Sessions: View {
         .accessibilityIdentifier("sessions.advisor")
       }.listRowBackground(panel)
       Section {
-        if loading {
+        if directory.loading && directory.sessions.isEmpty {
           ProgressView("正在读取会话…")
-        } else if let failure {
+        } else if let failure = directory.failure {
           Text(failure).font(.callout).textSelection(.enabled)
-          NavigationLink("打开兼容终端") { TerminalView(client: client, session: nil) }
-        } else if sessions.isEmpty {
+          if directory.sessions.isEmpty {
+            NavigationLink("打开兼容终端") { TerminalView(client: client, session: nil) }
+          } else {
+            Text("显示上次读取的会话").font(.caption).foregroundStyle(.secondary)
+          }
+        } else if directory.sessions.isEmpty {
           Text("暂无会话").foregroundStyle(.secondary)
+        } else if visibleSessions.isEmpty {
+          Text("没有匹配的会话").foregroundStyle(.secondary)
         }
-        ForEach(sessions) { session in
+        ForEach(visibleSessions) { session in
           HStack(spacing: 12) {
             NavigationLink {
               TerminalView(client: client, session: session)
@@ -464,10 +520,10 @@ private struct Sessions: View {
               }
             }
             Button { managedSession = session } label: {
-              Text("托管").font(.subheadline.weight(.medium)).fixedSize()
+              Text(isManaged(session) ? "托管中" : "托管").font(.subheadline.weight(.medium)).fixedSize()
                 .frame(minWidth: 44, minHeight: 44)
             }.buttonStyle(.borderless)
-              .accessibilityLabel("托管会话 " + session.name)
+              .accessibilityLabel((isManaged(session) ? "正在托管会话 " : "托管会话 ") + session.name)
               .accessibilityIdentifier("sessions.managed.\(session.id)")
           }
         }
@@ -476,12 +532,12 @@ private struct Sessions: View {
       }.listRowBackground(panel)
     }.scrollContentBackground(.hidden).background(ink).navigationTitle(client.name)
       .navigationBarTitleDisplayMode(.inline)
+      .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "名称或工作目录")
+      .refreshable { await refresh() }
       .toolbar {
-        Button {
-          revision += 1
-        } label: {
+        Button { Task { await refresh() } } label: {
           Image(systemName: "arrow.clockwise")
-        }.accessibilityLabel("刷新会话")
+        }.disabled(directory.loading).accessibilityLabel("刷新会话")
       }
       .sheet(isPresented: $showingAdvisor, onDismiss: {
         if let pendingSelection {
@@ -490,7 +546,7 @@ private struct Sessions: View {
         }
       }) {
         SessionAdvisorView(
-          sessions: sessions, notice: advisorNotice,
+          sessions: directory.sessions, notice: advisorNotice,
           capture: { try await SessionDirectory.snapshot($0, client: client) }, open: openFromAdvisor)
           .preferredColorScheme(.dark).tint(mint)
       }
@@ -503,29 +559,26 @@ private struct Sessions: View {
       ) {
         advisorDestination?.terminal
       }
-      .task(id: revision) {
-        loading = true
-        failure = nil
-        sessions = []
-        do {
-          let items = try await SessionDirectory.fetch(client)
-          try Task.checkCancellation()
-          sessions = items
-          managed.updateSessions(items, client: client)
-        } catch {
-          guard !Task.isCancelled else { return }
-          failure = error.localizedDescription
-        }
-        loading = false
-      }
+      .task(id: client) { await refresh() }
+  }
+
+  private func isManaged(_ session: RemoteSession) -> Bool {
+    managed.targets.contains { $0.clientID == client.id && $0.sessionID == session.id && $0.instance == session.managedInstance }
+  }
+
+  @MainActor private func refresh() async {
+    if let items = await directory.refresh(client) { managed.updateSessions(items, client: client) }
   }
 
   @MainActor
   private func openFromAdvisor(_ candidate: RemoteSession) async throws -> Bool {
-    let current = try await SessionDirectory.fetch(client)
+    guard let current = await directory.refresh(client) else {
+      try Task.checkCancellation()
+      throw RelayError(directory.failure ?? "会话列表已刷新，请重试。")
+    }
     try Task.checkCancellation()
     guard showingAdvisor else { throw CancellationError() }
-    sessions = current
+    managed.updateSessions(current, client: client)
     guard let selection = AdvisorSelection(candidate, in: current, client: client) else { return false }
     pendingSelection = selection
     showingAdvisor = false

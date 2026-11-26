@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		038E2B58C59B4FB3A1F26F6E /* PersonalDecisionMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A7FBE6417D8B5322EE629B3 /* PersonalDecisionMemory.swift */; };
 		0731E90B2E791E69DBE356DF /* TerminalChoiceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */; };
 		0873F55C97EC28DE0E04510C /* PaneSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26696F51ADAFACAE760211B2 /* PaneSnapshot.swift */; };
 		0C35831EC31CF34E63DB8469 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */; };
 		21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04BA079F6170AF2C112D38A /* RelayIdentity.swift */; };
+		24D8DD1C432D72A7388A9301 /* PersonalDecisionMemoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61DEB9D6B077153328AA970B /* PersonalDecisionMemoryTests.swift */; };
 		36108C60DDC87A82EA5C84C5 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 40A95C15D89DCB37F1EEA411 /* assets */; };
 		383795B4DAE52C76AF54913A /* TerminalStatusWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 9E090264D282F5152ABD1524 /* TerminalStatusWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3AFC72BEC961024B8910C016 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578B5E364A900CEF7B36DD35 /* Workspace.swift */; };
@@ -22,6 +24,7 @@
 		7F53244DB259EB35AFE53034 /* Screen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9449273D3949245A2F2A8160 /* Screen.swift */; };
 		82246769212E3A36953F4391 /* ManagedSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFA0DBB6E46E8D8747C65EB9 /* ManagedSessionView.swift */; };
 		83EF24147C36F0781E6B09A8 /* ShortcutDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2C1D3D17608FFE8B023AF9D /* ShortcutDrawer.swift */; };
+		8783B1EAF706917249E5A2D3 /* TerminalRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1566179A81BC71479C2BA78D /* TerminalRecoveryTests.swift */; };
 		9A0EED2D3A21161F6C406AF7 /* AdvisorCredential.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD4913C6D9E6010C45F7FBB /* AdvisorCredential.swift */; };
 		9CA37C6DE7B824104910B340 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A203E797669B5349F523A4 /* App.swift */; };
 		A3FEA1110F037B6DCBA456DC /* TerminalKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */; };
@@ -32,6 +35,7 @@
 		C30137AD36DA41CA140718CD /* SessionAdvisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BAC02991976F9464F7D84E /* SessionAdvisor.swift */; };
 		E742FEC107C88F142D84F718 /* ClientTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA702335524868D5C3B71289 /* ClientTransfer.swift */; };
 		E96295C1E720F34EA4EC208E /* TerminalIsland.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE4F1C5B0D7174B0EAF498EE /* TerminalIsland.swift */; };
+		EA57568A71CCA7A610705FED /* WorkspaceExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FDA459D9FBECB10BE7D2927 /* WorkspaceExperienceTests.swift */; };
 		F50BDE06B8684FFC8E99FDF2 /* SessionAdvisorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963B40480207CD65B4AB9F1E /* SessionAdvisorView.swift */; };
 		F7F0BB6B3B3F1DCF3251E2D2 /* TerminalStatusWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE7AA1458B56112D4FE78CB0 /* TerminalStatusWidget.swift */; };
 		FB110C7810D8AD195384B44E /* DecisionAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9349CDA9AC878F8A63147117 /* DecisionAnalysis.swift */; };
@@ -73,6 +77,8 @@
 		01A203E797669B5349F523A4 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChoiceMenu.swift; sourceTree = "<group>"; };
 		0F99208653984B60CC27DB00 /* SessionAdvisorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAdvisorTests.swift; sourceTree = "<group>"; };
+		0FDA459D9FBECB10BE7D2927 /* WorkspaceExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceExperienceTests.swift; sourceTree = "<group>"; };
+		1566179A81BC71479C2BA78D /* TerminalRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalRecoveryTests.swift; sourceTree = "<group>"; };
 		26696F51ADAFACAE760211B2 /* PaneSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSnapshot.swift; sourceTree = "<group>"; };
 		27BAC02991976F9464F7D84E /* SessionAdvisor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAdvisor.swift; sourceTree = "<group>"; };
 		3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -82,6 +88,8 @@
 		578B5E364A900CEF7B36DD35 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5A6144AA955D24B75D0EB605 /* TmuxLinkDeviceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TmuxLinkDeviceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5E17E7A33DF530425EC38227 /* Identity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identity.swift; sourceTree = "<group>"; };
+		61DEB9D6B077153328AA970B /* PersonalDecisionMemoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalDecisionMemoryTests.swift; sourceTree = "<group>"; };
+		7A7FBE6417D8B5322EE629B3 /* PersonalDecisionMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalDecisionMemory.swift; sourceTree = "<group>"; };
 		7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionTests.swift; sourceTree = "<group>"; };
 		9349CDA9AC878F8A63147117 /* DecisionAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionAnalysis.swift; sourceTree = "<group>"; };
 		9449273D3949245A2F2A8160 /* Screen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Screen.swift; sourceTree = "<group>"; };
@@ -136,8 +144,11 @@
 			isa = PBXGroup;
 			children = (
 				A2C727DCFA2239DF0ABE54FB /* DecisionAnalysisTests.swift */,
+				61DEB9D6B077153328AA970B /* PersonalDecisionMemoryTests.swift */,
 				7D8865C438CF45CF84C2405D /* RemoteSessionTests.swift */,
 				0F99208653984B60CC27DB00 /* SessionAdvisorTests.swift */,
+				1566179A81BC71479C2BA78D /* TerminalRecoveryTests.swift */,
+				0FDA459D9FBECB10BE7D2927 /* WorkspaceExperienceTests.swift */,
 			);
 			path = DeviceTests;
 			sourceTree = "<group>";
@@ -165,6 +176,7 @@
 				D86133008E33FE92BE686BE0 /* ManagedSessionController.swift */,
 				AFA0DBB6E46E8D8747C65EB9 /* ManagedSessionView.swift */,
 				26696F51ADAFACAE760211B2 /* PaneSnapshot.swift */,
+				7A7FBE6417D8B5322EE629B3 /* PersonalDecisionMemory.swift */,
 				D04BA079F6170AF2C112D38A /* RelayIdentity.swift */,
 				9449273D3949245A2F2A8160 /* Screen.swift */,
 				27BAC02991976F9464F7D84E /* SessionAdvisor.swift */,
@@ -309,8 +321,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				AD259FE4D26F6A234AC5A0B8 /* DecisionAnalysisTests.swift in Sources */,
+				24D8DD1C432D72A7388A9301 /* PersonalDecisionMemoryTests.swift in Sources */,
 				4ADD034A26E0AFD1BCFD3512 /* RemoteSessionTests.swift in Sources */,
 				6E229B17AF9A4400927228A4 /* SessionAdvisorTests.swift in Sources */,
+				8783B1EAF706917249E5A2D3 /* TerminalRecoveryTests.swift in Sources */,
+				EA57568A71CCA7A610705FED /* WorkspaceExperienceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -337,6 +352,7 @@
 				FD2B32B18591959CC4974522 /* ManagedSessionController.swift in Sources */,
 				82246769212E3A36953F4391 /* ManagedSessionView.swift in Sources */,
 				0873F55C97EC28DE0E04510C /* PaneSnapshot.swift in Sources */,
+				038E2B58C59B4FB3A1F26F6E /* PersonalDecisionMemory.swift in Sources */,
 				21A68F3E1E2FEB1CC5A4AEA0 /* RelayIdentity.swift in Sources */,
 				7F53244DB259EB35AFE53034 /* Screen.swift in Sources */,
 				C30137AD36DA41CA140718CD /* SessionAdvisor.swift in Sources */,
@@ -374,7 +390,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 43;
+				CURRENT_PROJECT_VERSION = 44;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -387,7 +403,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -427,7 +443,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 43;
+				CURRENT_PROJECT_VERSION = 44;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -437,7 +453,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -476,7 +492,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 43;
+				CURRENT_PROJECT_VERSION = 44;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -489,7 +505,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -562,7 +578,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 43;
+				CURRENT_PROJECT_VERSION = 44;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -572,7 +588,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;

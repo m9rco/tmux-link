@@ -14,27 +14,28 @@ enum SessionAdvisorError: LocalizedError {
   case emptyQuestion, questionTooLong, invalidKey, noSessions
   case invalidDecisionSelection, credentialInSnapshot
   case authentication, quota, rateLimited, timeout, network, requestRejected, serviceUnavailable, invalidResponse
-  case inputTooLong, outputTruncated, emptyContent
+  case inputTooLong, outputTruncated, emptyContent, missingUsage
 
   var errorDescription: String? {
     switch self {
     case .emptyQuestion: return "请输入想查找的会话或项目。"
     case .questionTooLong: return "问题太长，请缩短后重试。"
-    case .invalidKey: return "请输入有效的 DeepSeek API 密钥。"
+    case .invalidKey: return "请输入有效的模型服务 API 密钥。"
     case .noSessions: return "当前没有可供查找的会话。"
     case .invalidDecisionSelection: return "请选择一至六个不同的有效会话。"
     case .credentialInSnapshot: return "所选屏幕包含当前 API 密钥。请移除该会话或更新其屏幕后再试。"
-    case .authentication: return "DeepSeek 未授权此次请求，请检查 API 密钥。"
-    case .quota: return "DeepSeek 账户余额不足，请检查账户余额。"
-    case .rateLimited: return "DeepSeek 请求过于频繁，请稍后重试。"
-    case .timeout: return "DeepSeek 请求超时，请重试。"
-    case .network: return "无法连接 DeepSeek，请检查网络连接。"
-    case .requestRejected: return "DeepSeek 无法处理此次请求，请调整问题后重试。"
+    case .authentication: return "模型服务未授权此次请求，请检查 API 密钥。"
+    case .quota: return "模型服务账户余额不足，请检查账户余额。"
+    case .rateLimited: return "模型服务请求过于频繁，请稍后重试。"
+    case .timeout: return "模型服务请求超时，请重试。"
+    case .network: return "无法连接模型服务，请检查网络连接。"
+    case .requestRejected: return "模型服务无法处理此次请求，请调整问题后重试。"
     case .inputTooLong: return "发送的内容太长，请缩短问题或减少所选会话后重试。"
-    case .outputTruncated: return "DeepSeek 的回复达到输出上限，未能完整返回。请缩小提问范围或减少所选会话后重试。"
-    case .emptyContent: return "DeepSeek 返回了空白回复，请重试。"
-    case .serviceUnavailable: return "DeepSeek 服务暂时不可用，请稍后重试。"
-    case .invalidResponse: return "无法读取 DeepSeek 返回的会话建议，请重试。"
+    case .outputTruncated: return "模型服务的回复达到输出上限，未能完整返回。请缩小提问范围或减少所选会话后重试。"
+    case .emptyContent: return "模型服务返回了空白回复，请重试。"
+    case .serviceUnavailable: return "模型服务暂时不可用，请稍后重试。"
+    case .missingUsage: return "托管需要实际 token 用量。请在服务或中转站开启 usage 返回，或切换模型服务。"
+    case .invalidResponse: return "无法读取模型服务返回的会话建议，请重试。"
     }
   }
 }
@@ -87,12 +88,8 @@ enum SessionAdvisor {
     return URLSession(configuration: configuration)
   }()
 
-  static func advise(_ question: String, sessions: [RemoteSession], key: String) async throws -> SessionAdvice {
-    try await advise(question, sessions: sessions, key: key, session: transport)
-  }
-
   static func advise(_ question: String, sessions: [RemoteSession], key: String,
-                     session: URLSession) async throws -> SessionAdvice {
+                     provider: AdvisorProvider = .deepSeek, session: URLSession = transport) async throws -> SessionAdvice {
     let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !question.isEmpty else { throw SessionAdvisorError.emptyQuestion }
     guard question.utf8.count <= 4096 else { throw SessionAdvisorError.questionTooLong }
@@ -119,7 +116,7 @@ enum SessionAdvisor {
       session_ids 按相关性排序，仅列出给定列表中有依据的 ID；没有匹配项时返回空数组。
       """
     let advice: SessionAdvice = try await completion(
-      instructions: instructions, userMessage: userMessage, key: key, maxTokens: 768, session: session)
+      instructions: instructions, userMessage: userMessage, key: key, maxTokens: 768, provider: provider, session: session)
     let message = advice.message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !message.isEmpty else { throw SessionAdvisorError.invalidResponse }
     let ids = advice.sessionIDs.filter { allowedIDs.remove($0) != nil }
@@ -155,19 +152,19 @@ enum SessionAdvisor {
        message.contains("however, you are requesting "))
   }
 
-  // Both manual analysis and foreground management use the model selected on this phone.
-  static let model = "deepseek-flash"
-
-  static func chatRequest(instructions: String, userMessage: String, key: String, maxTokens: Int) throws -> URLRequest {
-    let body: [String: Any] = [
-      "model": model,
-      "messages": [["role": "system", "content": instructions], ["role": "user", "content": userMessage]],
-      "thinking": ["type": "disabled"],
-      "response_format": ["type": "json_object"],
-      "max_tokens": maxTokens,
+  static func chatRequest(instructions: String, userMessage: String, key: String, maxTokens: Int,
+                          provider: AdvisorProvider = .deepSeek) throws -> URLRequest {
+    let provider = try provider.validated()
+    guard let base = URL(string: provider.baseURL) else { throw RelayError("模型服务地址无效。") }
+    let endpoint = base.appendingPathComponent("chat").appendingPathComponent("completions")
+    var body: [String: Any] = [
+      "model": provider.model,
+      "messages": [["role": "system", "content": instructions], ["role": "user", "content": userMessage]]
     ]
-    var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!,
-                             cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+    body[provider.id == AdvisorProvider.openAI.id ? "max_completion_tokens" : "max_tokens"] = maxTokens
+    if provider.builtin { body["response_format"] = ["type": "json_object"] }
+    if provider.id == AdvisorProvider.deepSeek.id { body["thinking"] = ["type": "disabled"] }
+    var request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
     request.httpMethod = "POST"
     request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -176,34 +173,46 @@ enum SessionAdvisor {
     return request
   }
 
-  static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
-                                       maxTokens: Int, session: URLSession) async throws -> T {
-    let request = try chatRequest(instructions: instructions, userMessage: userMessage, key: key, maxTokens: maxTokens)
-    let data: Data
-    let response: URLResponse
+  static func responseData(for request: URLRequest, session: URLSession, limit: Int) async throws -> Data {
     do {
-      (data, response) = try await session.data(for: request, delegate: RedirectBlocker())
-    } catch let error as URLError where error.code == .timedOut {
-      throw SessionAdvisorError.timeout
-    } catch {
-      if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
-      throw SessionAdvisorError.network
+      let (bytes, response) = try await session.bytes(for: request, delegate: RedirectBlocker())
+      defer { bytes.task.cancel() }
+      guard let http = response as? HTTPURLResponse else { throw SessionAdvisorError.invalidResponse }
+      switch http.statusCode {
+      case 200..<300, 400: break
+      case 413: throw SessionAdvisorError.inputTooLong
+      case 401, 403: throw SessionAdvisorError.authentication
+      case 402: throw SessionAdvisorError.quota
+      case 408, 504: throw SessionAdvisorError.timeout
+      case 429: throw SessionAdvisorError.rateLimited
+      case 400..<500: throw SessionAdvisorError.requestRejected
+      default: throw SessionAdvisorError.serviceUnavailable
+      }
+      let badRequest = http.statusCode == 400
+      let bound = badRequest ? 16 * 1024 : limit
+      let oversized = badRequest ? SessionAdvisorError.requestRejected : .invalidResponse
+      guard response.expectedContentLength <= Int64(bound) else { throw oversized }
+      var data = Data()
+      for try await byte in bytes {
+        guard data.count < bound else { throw oversized }
+        data.append(byte)
+      }
+      try Task.checkCancellation()
+      if badRequest { throw isContextLengthError(data) ? SessionAdvisorError.inputTooLong : .requestRejected }
+      return data
+    } catch let error as URLError {
+      if error.code == .cancelled || Task.isCancelled { throw CancellationError() }
+      throw error.code == .timedOut ? SessionAdvisorError.timeout : .network
     }
-    guard let http = response as? HTTPURLResponse else { throw SessionAdvisorError.invalidResponse }
-    switch http.statusCode {
-    case 200..<300: break
-    case 413: throw SessionAdvisorError.inputTooLong
-    case 400 where isContextLengthError(data): throw SessionAdvisorError.inputTooLong
-    case 401, 403: throw SessionAdvisorError.authentication
-    case 402: throw SessionAdvisorError.quota
-    case 408, 504: throw SessionAdvisorError.timeout
-    case 429: throw SessionAdvisorError.rateLimited
-    case 400..<500: throw SessionAdvisorError.requestRejected
-    default: throw SessionAdvisorError.serviceUnavailable
-    }
+  }
+
+  static func completion<T: Decodable>(instructions: String, userMessage: String, key: String,
+                                       maxTokens: Int, provider: AdvisorProvider = .deepSeek, session: URLSession) async throws -> T {
+    let request = try chatRequest(instructions: instructions, userMessage: userMessage, key: key,
+                                  maxTokens: maxTokens, provider: provider)
+    let data = try await responseData(for: request, session: session, limit: 128 * 1024)
     let decoder = JSONDecoder()
-    guard data.count <= 128 * 1024,
-          let choice = (try? decoder.decode(Completion.self, from: data))?.choices.first
+    guard let choice = (try? decoder.decode(Completion.self, from: data))?.choices.first
     else { throw SessionAdvisorError.invalidResponse }
     if choice.finish_reason == "length" { throw SessionAdvisorError.outputTruncated }
     guard choice.finish_reason == nil || choice.finish_reason == "stop", let content = choice.message?.content

@@ -19,7 +19,10 @@ const fit = new FitAddon.FitAddon();
 term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
 term.loadAddon(fit);
 
-const bridge = window.webkit.messageHandlers.terminal;
+const connectionID = window.terminalConnectionID ?? 0;
+const bridge = {postMessage(message) {
+  window.webkit.messageHandlers.terminal.postMessage({...message, connectionID});
+}};
 term.onData(terminalData);
 // Legacy mouse reports contain raw coordinate bytes, including values above 127.
 term.onBinary(bytes => bridge.postMessage({binary: btoa(bytes)}));

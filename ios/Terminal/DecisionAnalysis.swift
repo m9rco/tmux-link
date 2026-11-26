@@ -76,7 +76,7 @@ extension SessionAdvisor {
     try await analyzePrepared(snapshots.map { $0.prepared() }, key: key, session: session)
   }
 
-  static func analyzePrepared(_ screens: [DecisionBrief], key: String,
+  static func analyzePrepared(_ screens: [DecisionBrief], key: String, provider: AdvisorProvider = .deepSeek,
                               session: URLSession = transport) async throws -> [SessionDecision] {
     guard (1...maxDecisionSessions).contains(screens.count),
           Set(screens.map(\.id)).count == screens.count, screens.allSatisfy({ $0.id >= 0 })
@@ -121,7 +121,7 @@ extension SessionAdvisor {
       """
     struct Response: Decodable { let decisions: [SessionDecision] }
     let response: Response = try await completion(instructions: instructions, userMessage: userMessage,
-                                                  key: key, maxTokens: 8192, session: session)
+                                                  key: key, maxTokens: 8192, provider: provider, session: session)
     return try validatedDecisions(response.decisions, screens: included)
   }
 

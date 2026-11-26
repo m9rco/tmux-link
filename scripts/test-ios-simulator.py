@@ -176,6 +176,10 @@ def benchmark(device, tmp):
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testForegroundPhoneCompletesAnIsolatedQuestion",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testStatusButtonFitsIslandAndInlineLayouts",
                     "-only-testing:TmuxLinkDeviceTests/SessionAdvisorTests",
+                    "-only-testing:TmuxLinkDeviceTests/WorkspaceExperienceTests",
+                    "-only-testing:TmuxLinkDeviceTests/PersonalDecisionMemoryTests",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalSurvivesBackgroundAndReattachesAfterDetach",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testRecoveryRecognizesTheSameTmuxSessionAcrossPaneChanges",
                     "-only-testing:TmuxLinkDeviceTests/DecisionAnalysisTests",
                     "-resultBundlePath", result, "test-without-building")
                 attachments = tmp / "attachments"

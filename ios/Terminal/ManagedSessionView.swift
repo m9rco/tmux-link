@@ -94,6 +94,8 @@ struct ManagedSessionView: View {
   @State private var errorMessage: String?
   @State private var confirmForget = false
   @State private var copiedDraft: String?
+  @State private var feedbackError: String?
+  @State private var teachingExample: PersonalDecisionMemory.Example?
 
   private var polling: Bool { scenePhase == .active && status?.enabled == true }
   private var changing: Bool { pending != nil && pending != .status }
@@ -112,6 +114,13 @@ struct ManagedSessionView: View {
           }
         } else {
           AdvisorKeySection(editing: $editingKey).environmentObject(keyStatus)
+          Section {
+            NavigationLink {
+              PersonalDecisionSettings(node: PersonalDecisionMemory.scope(for: client), clientName: client.name)
+            } label: {
+              Label("我的决策偏好", systemImage: "person.crop.circle")
+            }.accessibilityIdentifier("managed.personal.settings")
+          }
           if let errorMessage {
             Section {
               Text(verbatim: errorMessage).foregroundStyle(.orange).textSelection(.enabled)
@@ -148,8 +157,14 @@ struct ManagedSessionView: View {
       } message: {
         Text("节点会保留过去 24 小时的用量。")
       }
+      .alert("个人偏好未更新", isPresented: Binding(get: { feedbackError != nil }, set: { if !$0 { feedbackError = nil } })) {
+        Button("好", role: .cancel) {}
+      } message: { Text(feedbackError ?? "") }
+      .sheet(item: $teachingExample) { entry in
+        DecisionPrincipleEditor(example: entry).environmentObject(controller)
+      }
     }
-    .onAppear { request(.status) }
+    .onAppear { controller.reloadPersonalMemory(); request(.status) }
     .onChange(of: scenePhase) { if $0 == .active { request(.status) } }
     .task(id: polling) {
       guard polling else { return }
@@ -190,7 +205,7 @@ struct ManagedSessionView: View {
           .disabled(changing).accessibilityIdentifier("managed.disable")
       }
     } footer: {
-      Text("打开 Tmux Link 时，iPhone 会处理本机启用的会话。锁屏或切到其他 App 时暂停，返回后继续。")
+      Text("切到后台后，进行中的模型请求可在系统允许的时间内收尾。返回 Tmux Link 后继续检查会话并提交仍有效的建议。")
     }
 
     Section {
@@ -211,7 +226,7 @@ struct ManagedSessionView: View {
     } header: {
       Text("托管设置")
     } footer: {
-      Text("iPhone 将当前问题、选项与简短记忆发送给 DeepSeek，密钥保存在本机钥匙串。节点记录选择与理由，并按所选模式处理。")
+      Text("iPhone 将当前问题、选项、简短记忆及适用的个人偏好发送给 \(keyStatus.provider.name)。节点记录选择与理由，并按所选模式处理。")
     }
     .disabled(changing)
   }
@@ -264,7 +279,33 @@ struct ManagedSessionView: View {
           Label(copiedDraft == draft ? "已复制草稿" : "复制草稿", systemImage: "doc.on.doc")
         }.buttonStyle(.borderless).accessibilityIdentifier("managed.draft.copy.\(index)")
       }
+      if let sample = PersonalDecisionMemory.example(for: record, node: PersonalDecisionMemory.scope(for: client), vote: .prefer) {
+        let saved = controller.personalMemory.examples.first {
+          $0.node == sample.node && $0.question == sample.question && $0.draft == sample.draft && $0.answer == sample.answer
+        }
+        Menu {
+          Button("下次优先这个回答") { remember(sample, vote: .prefer) }
+          Button("下次避免这个回答") { remember(sample, vote: .avoid) }
+          Button("提炼为通用原则…") { teachingExample = sample }
+          if let saved {
+            Button("撤销这条反馈", role: .destructive) {
+              do { try controller.updatePersonalMemory { $0.examples.removeAll { $0.id == saved.id } } }
+              catch { feedbackError = error.localizedDescription }
+            }
+          }
+        } label: {
+          let label = saved.map { $0.vote == .prefer ? "已记住 · 优先" : "已记住 · 避免" } ?? "反馈给托管"
+          Label(label, systemImage: saved == nil ? "hand.thumbsup" : "checkmark.circle")
+        }.buttonStyle(.borderless).accessibilityIdentifier("managed.personal.feedback.\(index)")
+      }
     }.padding(.vertical, 3).privacySensitive()
+  }
+
+  private func remember(_ sample: PersonalDecisionMemory.Example, vote: PersonalDecisionMemory.Vote) {
+    let entry = PersonalDecisionMemory.Example(id: sample.id, node: sample.node, question: sample.question,
+                                              answer: sample.answer, draft: sample.draft, vote: vote)
+    do { try controller.updatePersonalMemory { $0.record(entry) } }
+    catch { feedbackError = error.localizedDescription }
   }
 
   private func memory(_ status: ManagedStatus) -> some View {
@@ -362,6 +403,109 @@ struct ManagedSessionView: View {
     case "failed": return "未成功"
     case "interrupted": return "已中断"
     default: return outcome
+    }
+  }
+}
+
+private struct DecisionPrincipleEditor: View {
+  let example: PersonalDecisionMemory.Example
+  @EnvironmentObject private var controller: ManagedSessionController
+  @Environment(\.dismiss) private var dismiss
+  @State private var principle = ""
+  @State private var errorMessage: String?
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section("这次的决定") {
+          Text(verbatim: example.question)
+          Text(verbatim: example.answer).foregroundStyle(.secondary)
+        }
+        Section {
+          TextField("遇到这类取舍，我希望……，因为……", text: $principle, axis: .vertical)
+            .lineLimit(2...5).accessibilityLabel("下次决策时参考的原则")
+        } header: {
+          Text("希望下次怎么权衡")
+        } footer: {
+          Text("你写的原则会用于所有节点的后续问题，可在「我的决策偏好」里修改。")
+        }
+        if let errorMessage { Section { Text(errorMessage).foregroundStyle(.orange) } }
+      }
+      .privacySensitive()
+      .navigationTitle("提炼为通用原则").navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("保存") {
+            do {
+              try controller.updatePersonalMemory { $0 = try $0.addingPrinciple(principle) }
+              dismiss()
+            } catch { errorMessage = error.localizedDescription }
+          }.disabled(PersonalDecisionMemory.clean(principle).isEmpty)
+        }
+      }
+    }
+  }
+}
+
+private struct PersonalDecisionSettings: View {
+  let node: String
+  let clientName: String
+  @EnvironmentObject private var controller: ManagedSessionController
+  @State private var guidance = ""
+  @State private var errorMessage: String?
+
+  var body: some View {
+    Form {
+      Section {
+        TextField("例如：先看验证结果，再考虑发布", text: $guidance, axis: .vertical)
+          .lineLimit(2...5).accessibilityLabel("决策原则").accessibilityIdentifier("managed.personal.guidance")
+        Button("保存原则") {
+          do {
+            try controller.updatePersonalMemory { $0 = try $0.setGuidance(guidance) }
+            guidance = controller.personalMemory.guidance
+            errorMessage = nil
+          } catch { errorMessage = error.localizedDescription }
+        }.disabled(guidance == controller.personalMemory.guidance)
+      } header: {
+        Text("我的通用原则")
+      } footer: {
+        Text("适用于这部 iPhone 托管的所有节点。下次请求模型时生效。清空文字并保存即可移除。")
+      }
+      Section {
+        let entries = controller.personalMemory.examples.filter { $0.node == node }
+        if entries.isEmpty {
+          Text("在托管记录里点「反馈给托管」，选择下次优先或避免的回答。").foregroundStyle(.secondary)
+        } else {
+          ForEach(entries) { entry in
+            VStack(alignment: .leading, spacing: 5) {
+              Text(verbatim: entry.question).font(.subheadline)
+              Text(verbatim: (entry.vote == .prefer ? "优先 · " : "避免 · ") + entry.answer)
+                .font(.body.weight(.medium))
+              Button("撤销反馈", role: .destructive) {
+                do {
+                  try controller.updatePersonalMemory { $0.examples.removeAll { $0.id == entry.id } }
+                  errorMessage = nil
+                } catch { errorMessage = error.localizedDescription }
+              }.font(.caption).buttonStyle(.borderless)
+            }.padding(.vertical, 2)
+          }
+        }
+      } header: {
+        Text("来自 \(clientName) 的反馈")
+      } footer: {
+        Text("只在这个节点再次出现同一问题时参考。菜单里的回答还须出现在当前选项中。手机保留最近 \(PersonalDecisionMemory.maxExamples) 条反馈。")
+      }
+      if let message = errorMessage ?? (controller.personalMemoryUnavailable ? "暂时无法读取个人偏好，请解锁后重新打开。" : nil) {
+        Section { Text(message).foregroundStyle(.orange) }
+      }
+    }
+    .privacySensitive()
+    .navigationTitle("我的决策偏好")
+    .navigationBarTitleDisplayMode(.inline)
+    .onAppear {
+      controller.reloadPersonalMemory()
+      guidance = controller.personalMemory.guidance
     }
   }
 }

@@ -269,7 +269,7 @@ private struct DecisionReviewContent: View {
       if let results {
         if results.decisions.isEmpty {
           Section {
-            Label("DeepSeek 本次未返回候选答复。", systemImage: "text.bubble")
+            Label("模型本次未返回候选答复。", systemImage: "text.bubble")
               .accessibilityIdentifier("advisor.none")
           }
         }
@@ -296,7 +296,7 @@ private struct DecisionReviewContent: View {
           .disabled(included.isEmpty || !keyStatus.saved || editingKey || operation != nil)
           .accessibilityIdentifier("advisor.submit")
         } footer: {
-          Text("DeepSeek 将收到所选会话的编号、名称和这里展示的上下文。")
+          Text("\(keyStatus.provider.name) 将收到所选会话的编号、名称和这里展示的上下文。")
         }
       }
       if operation == .analyzing || operation == .opening {
@@ -321,6 +321,12 @@ private struct DecisionReviewContent: View {
       ToolbarItem(placement: .confirmationAction) {
         Button("关闭") { cancel(); close() }.accessibilityIdentifier("advisor.close")
       }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: AdvisorCredential.changed)) { _ in
+      if operation != .opening { cancel() }
+      results = nil
+      retryErrors = [:]
+      keyStatus.refresh()
     }
     .onDisappear { cancel() }
   }
@@ -442,15 +448,15 @@ private struct DecisionReviewContent: View {
     let menu = reading.brief.menu
     let status: String
     if retried {
-      status = "单独分析后，DeepSeek 仍未给出候选答复。"
+      status = "单独分析后，模型仍未给出候选答复。"
     } else if let menu, menu.items.isEmpty {
       status = "当前画面只有提交提示，可回原终端核对。"
     } else if menu != nil {
-      status = "终端显示了选择菜单，DeepSeek 未给出选择建议。"
+      status = "终端显示了选择菜单，模型未给出选择建议。"
     } else if focused != nil {
-      status = "原文中有提问，DeepSeek 未给出这道题的候选答复。"
+      status = "原文中有提问，模型未给出这道题的候选答复。"
     } else {
-      status = "DeepSeek 未识别出此会话当前有待答的问题。"
+      status = "模型未识别出此会话当前有待答的问题。"
     }
 
     return Section {
@@ -478,7 +484,7 @@ private struct DecisionReviewContent: View {
       readingHeader(reading)
     } footer: {
       if focused != nil, !retried {
-        Text("单独分析只会向 DeepSeek 发送本会话的编号、名称和本节展示的摘录。")
+        Text("单独分析只会向 \(keyStatus.provider.name) 发送本会话的编号、名称和本节展示的摘录。")
       }
     }
   }
@@ -519,15 +525,20 @@ private struct DecisionReviewContent: View {
     if let id {
       guard let results, results.isMissing(id), !results.emptyRetries.contains(id) else { return }
     }
+    let disclosedProvider = keyStatus.provider
     run(id.map(Operation.retrying) ?? .analyzing) {
       if let id { retryErrors[id] = nil }
-      guard let key = try AdvisorCredential.load() else {
+      guard let access = try AdvisorCredential.current() else {
         keyStatus.saved = false
-        if let id { retryErrors[id] = "请返回上下文预览保存 DeepSeek API Key。" }
-        else { errorMessage = "请先保存 DeepSeek API Key。" }
+        if let id { retryErrors[id] = "请返回上下文预览保存模型服务的 API Key。" }
+        else { errorMessage = "请先保存模型服务的 API Key。" }
         return
       }
-      let result = try await SessionAdvisor.analyzePrepared(approved, key: key)
+      guard access.provider == disclosedProvider else {
+        keyStatus.refresh()
+        throw RelayError("模型服务已切换，请确认服务后重新分析。")
+      }
+      let result = try await SessionAdvisor.analyzePrepared(approved, key: access.key, provider: access.provider)
       try Task.checkCancellation()
       if let id { results?.mergeRetry(result, for: id) }
       else { results = DecisionReviewResults(result) }
@@ -699,78 +710,211 @@ private func failureSection(_ errors: [String]) -> some View {
   }
 }
 
+@MainActor
 final class AdvisorKeyStatus: ObservableObject {
   @Published var saved = false
+  @Published var provider = AdvisorProvider.deepSeek
   @Published var errorMessage: String?
 
-  init() {
-    do { saved = try AdvisorCredential.load() != nil }
-    catch { errorMessage = error.localizedDescription }
+  init() { refresh() }
+
+  func refresh() {
+    do {
+      let catalog = try AdvisorProviders.load()
+      guard let selected = catalog.selected else { throw RelayError("请选择模型服务。") }
+      provider = selected
+      saved = try AdvisorCredential.load(for: selected) != nil
+      errorMessage = nil
+    } catch {
+      saved = false
+      errorMessage = error.localizedDescription
+    }
   }
 }
 
 struct AdvisorKeySection: View {
   @EnvironmentObject private var keyStatus: AdvisorKeyStatus
   @Binding var editing: Bool
-  @FocusState private var focused: Bool
-  @State private var draft = ""
 
   var body: some View {
-    Section {
-      if keyStatus.saved && !editing {
-        DisclosureGroup("已保存 DeepSeek API Key") {
-          Button("更换密钥") {
-            editing = true
-            keyStatus.errorMessage = nil
-            focused = true
-          }.accessibilityIdentifier("advisor.key.replace")
-          Button("移除密钥", role: .destructive, action: remove)
-            .accessibilityIdentifier("advisor.key.remove")
-        }.accessibilityIdentifier("advisor.key.saved")
-      } else {
-        SecureField("DeepSeek API Key", text: $draft)
-          .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
-          .focused($focused).submitLabel(.done).onSubmit(save)
-          .accessibilityIdentifier("advisor.key.input")
-        Button("保存密钥", action: save)
-          .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-          .accessibilityIdentifier("advisor.key.save")
-        if editing {
-          Button("取消更换") { clearDraft() }.accessibilityIdentifier("advisor.key.cancel")
-        }
+    Section("模型服务") {
+      Button { editing = true } label: {
+        LabeledContent(keyStatus.provider.name, value: keyStatus.saved ? keyStatus.provider.model : "配置密钥")
       }
-      if let errorMessage = keyStatus.errorMessage {
-        Text(verbatim: errorMessage).font(.callout).foregroundStyle(.orange)
-          .accessibilityIdentifier("advisor.key.error")
-      }
-    } header: {
-      Text("DeepSeek")
-    } footer: {
-      Text("API Key 保存在这台设备的钥匙串中。")
+      .accessibilityIdentifier("advisor.provider.settings")
+      if let error = keyStatus.errorMessage { Text(verbatim: error).foregroundStyle(.orange) }
     }
-    .onDisappear { draft = "" }
+    .sheet(isPresented: $editing, onDismiss: keyStatus.refresh) { AdvisorProviderSettings() }
+    .onReceive(NotificationCenter.default.publisher(for: AdvisorCredential.changed)) { _ in keyStatus.refresh() }
+  }
+}
+
+struct AdvisorProviderSettings: View {
+  @Environment(\.dismiss) private var dismiss
+  @State private var catalog = AdvisorProviders()
+  @State private var editing: AdvisorProvider?
+  @State private var errorMessage: String?
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          ForEach(catalog.profiles) { provider in
+            Button {
+              do {
+                var next = try AdvisorProviders.load()
+                guard next.profiles.contains(provider) else { refresh(); return }
+                if next.selectedID != provider.id {
+                  next.selectedID = provider.id
+                  try next.save()
+                }
+                catalog = next
+                errorMessage = nil
+              } catch { errorMessage = error.localizedDescription }
+            } label: {
+              HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(verbatim: provider.name).foregroundStyle(.primary)
+                  Text(verbatim: provider.model).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if provider.id == catalog.selectedID { Image(systemName: "checkmark") }
+              }
+            }
+            .accessibilityAddTraits(provider.id == catalog.selectedID ? .isSelected : [])
+            .accessibilityIdentifier("advisor.provider." + provider.id)
+          }
+        } header: { Text("当前服务") } footer: {
+          Text("托管和手动分析都通过所选服务处理。切换后，新请求将使用该服务的模型和密钥。")
+        }
+        Section {
+          if let selected = catalog.selected {
+            Button { editing = selected } label: { Label("配置 \(selected.name)", systemImage: "slider.horizontal.3") }
+          }
+          Button {
+            editing = AdvisorProvider(id: UUID().uuidString, name: "", baseURL: "", model: "")
+          } label: { Label("添加兼容服务或中转站", systemImage: "plus") }
+        }
+        if let errorMessage { Text(verbatim: errorMessage).foregroundStyle(.orange) }
+      }
+      .navigationTitle("模型服务").navigationBarTitleDisplayMode(.inline)
+      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+      .onAppear(perform: refresh)
+      .onReceive(NotificationCenter.default.publisher(for: AdvisorCredential.changed)) { _ in refresh() }
+      .sheet(item: $editing, onDismiss: refresh) { profile in
+        AdvisorProviderEditor(original: profile, isNew: !catalog.profiles.contains { $0.id == profile.id })
+      }
+    }
   }
 
-  private func clearDraft() {
-    draft = ""
-    editing = false
-    focused = false
-    keyStatus.errorMessage = nil
+  private func refresh() {
+    do { catalog = try AdvisorProviders.load(); errorMessage = nil }
+    catch { errorMessage = error.localizedDescription }
+  }
+}
+
+private struct AdvisorProviderEditor: View {
+  let original: AdvisorProvider
+  let isNew: Bool
+  @Environment(\.dismiss) private var dismiss
+  @State private var name: String
+  @State private var address: String
+  @State private var model: String
+  @State private var key = ""
+  @State private var savedKey = false
+  @State private var errorMessage: String?
+  @State private var removingKey = false
+  @State private var deletingProfile = false
+
+  init(original: AdvisorProvider, isNew: Bool) {
+    self.original = original
+    self.isNew = isNew
+    _name = State(initialValue: original.name)
+    _address = State(initialValue: original.baseURL)
+    _model = State(initialValue: original.model)
+  }
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          if original.builtin {
+            LabeledContent("服务", value: name)
+            LabeledContent("地址", value: address)
+          } else {
+            TextField("服务名称", text: $name)
+            TextField("HTTPS Base URL", text: $address)
+              .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+          }
+          TextField("模型 ID", text: $model).textInputAutocapitalization(.never).autocorrectionDisabled()
+        } header: { Text("服务配置") } footer: {
+          if !original.builtin { Text("填写兼容 Chat Completions 的服务地址，保留服务商要求的 /v1 或其他路径。") }
+        }
+        Section {
+          SecureField(savedKey ? "输入新密钥以更换" : "API Key", text: $key)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
+            .accessibilityIdentifier("advisor.key.input")
+          if savedKey {
+            Button("移除已保存的密钥", role: .destructive) { removingKey = true }
+          }
+        } header: { Text("本机钥匙串") } footer: {
+          Text("密钥只用于此服务地址。更改地址时需要重新输入。")
+        }
+        if !isNew && !original.builtin {
+          Section { Button("删除服务", role: .destructive) { deletingProfile = true } }
+        }
+        if let errorMessage { Text(verbatim: errorMessage).foregroundStyle(.orange) }
+      }
+      .navigationTitle(isNew ? "添加模型服务" : original.name).navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+        ToolbarItem(placement: .confirmationAction) {
+          Button(isNew ? "保存并使用" : "保存", action: save).accessibilityIdentifier("advisor.key.save")
+        }
+      }
+      .onAppear {
+        guard !isNew else { return }
+        do { savedKey = try AdvisorCredential.load(for: original) != nil }
+        catch { errorMessage = error.localizedDescription }
+      }
+      .confirmationDialog("移除本机保存的 API Key？", isPresented: $removingKey) {
+        Button("移除密钥", role: .destructive) {
+          do { try AdvisorCredential.remove(for: original); savedKey = false; key = ""; errorMessage = nil }
+          catch { errorMessage = error.localizedDescription }
+        }
+      }
+      .confirmationDialog("删除服务及其密钥，并使用 DeepSeek？", isPresented: $deletingProfile) {
+        Button("删除并切换到 DeepSeek", role: .destructive) {
+          do {
+            var catalog = try AdvisorProviders.load()
+            guard catalog.profiles.contains(original) else { throw RelayError("配置已更改，请重新打开此服务。") }
+            try AdvisorCredential.remove(for: original)
+            catalog.profiles.removeAll { $0.id == original.id }
+            if catalog.selectedID == original.id { catalog.selectedID = AdvisorProvider.deepSeek.id }
+            try catalog.save()
+            dismiss()
+          } catch { errorMessage = error.localizedDescription }
+        }
+      }
+    }
   }
 
   private func save() {
     do {
-      try AdvisorCredential.save(draft.trimmingCharacters(in: .whitespacesAndNewlines))
-      keyStatus.saved = true
-      clearDraft()
-    } catch { keyStatus.errorMessage = error.localizedDescription }
-  }
-
-  private func remove() {
-    do {
-      try AdvisorCredential.remove()
-      keyStatus.saved = false
-      clearDraft()
-    } catch { keyStatus.errorMessage = error.localizedDescription }
+      let provider = try AdvisorProvider(id: original.id, name: name, baseURL: address, model: model).validated()
+      var catalog = try AdvisorProviders.load()
+      guard isNew || catalog.profiles.contains(original) else { throw RelayError("配置已更改，请重新打开此服务。") }
+      let changedAddress = !isNew && provider.baseURL != original.baseURL
+      if isNew && key.isEmpty { throw RelayError("请输入此服务的 API Key。") }
+      if changedAddress && key.isEmpty { throw RelayError("地址已更改，请输入该地址的 API Key。") }
+      if !key.isEmpty { try AdvisorCredential.save(key, for: provider) }
+      if changedAddress { try AdvisorCredential.remove(for: original) }
+      if let index = catalog.profiles.firstIndex(where: { $0.id == provider.id }) { catalog.profiles[index] = provider }
+      else { catalog.profiles.append(provider) }
+      if isNew { catalog.selectedID = provider.id }
+      try catalog.save()
+      key = ""
+      dismiss()
+    } catch { errorMessage = error.localizedDescription }
   }
 }
