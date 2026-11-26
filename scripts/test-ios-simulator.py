@@ -116,6 +116,23 @@ def benchmark(device, tmp):
                              "-s", "tmux-link-managed-question-simulator", sys.executable, "-c",
                              "import time; print('What audience should the draft address?', flush=True); time.sleep(1800)",
                              env=runtime_env)
+        # A foreground executable with the normal tty editing discipline. This
+        # fixture accepts shortcuts without contacting an AI provider.
+        shortcut_dir = tmp / "agent-shortcut"
+        shortcut_dir.mkdir()
+        source = shortcut_dir / "codex.c"
+        source.write_text(
+            "#include <stdio.h>\n"
+            "int main(void) {\n"
+            "    int c;\n"
+            "    while ((c = getchar()) != EOF) { putchar(c); fflush(stdout); }\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        run("cc", "-o", shortcut_dir / "codex", source)
+        shortcut_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
+                             "-s", "tmux-link-agent-keys-simulator", "-c", shortcut_dir, "-e", "HISTFILE=/dev/null",
+                             "/bin/bash", "--noprofile", "--norc", "-i", env=runtime_env)
         tmux_path = str(Path(shutil.which("tmux")).parent)
         command = shlex.join(["/usr/bin/env", f"TMUX_TMPDIR={tmp}", f"HOME={tmp}",
                               f"PATH={tmux_path}:/usr/bin:/bin", str(ROOT / "target/debug/agent"), "attach"])
@@ -142,12 +159,15 @@ def benchmark(device, tmp):
                     "sessionName": session, "benchmarkSessionID": int(session_id.removeprefix("$")),
                     "snapshotFixtureID": int(snapshot_id.removeprefix("$")),
                     "managedQuestionFixtureID": int(question_id.removeprefix("$")),
+                    "agentShortcutFixtureID": int(shortcut_id.removeprefix("$")),
                     "conversationFixtureID": conversation_id, "conversationFixturePane": conversation_pane,
                 }))
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testOfflineEnglishKeyboard",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyMenusFollowForegroundIdentity",
+                    "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyInsertsTextOnlyWhileAgentIsForeground",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testKeyboardRowAndCursorModes",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testHostSnapshotRetainsEarlierConstraint",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testBoundConversationUsesLatestReply",

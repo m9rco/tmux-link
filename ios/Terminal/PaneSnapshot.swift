@@ -9,6 +9,7 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   var snapshotVersion: Int? = nil
   var managedVersion: Int? = nil
   var managedInstance: String? = nil
+  var agentContextVersion: Int? = nil
 
   var negotiatedSnapshotVersion: PaneSnapshotVersion? {
     guard snapshot == true else { return nil }

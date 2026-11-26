@@ -208,6 +208,23 @@ async fn initial_pty_grid<R: tokio::io::AsyncRead + Unpin>(
     Ok((grid, std::io::Cursor::new(prefix).chain(read)))
 }
 
+// The tracked attach command writes one line before execing the tmux client.
+fn attach_pid(line: &[u8]) -> Option<u32> {
+    let raw = line.strip_suffix(b"\n")?;
+    let pid = raw
+        .strip_suffix(b"\r")
+        .unwrap_or(raw)
+        .strip_prefix(b"TLCLIENT ")?;
+    if pid.is_empty() || pid.len() > 10 || !pid.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(pid)
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+}
+
 async fn run(
     (session, channel): handoff::SessionChannel,
     read: tokio::net::unix::OwnedReadHalf,
@@ -215,6 +232,7 @@ async fn run(
     target: Option<u64>,
     peer: Peer<'_>,
     fit_initial_grid: bool,
+    tracked: bool,
 ) -> Result<()> {
     output.stage("attaching").await?;
     let (mut applied_grid, mut read) = initial_pty_grid(read, fit_initial_grid).await?;
@@ -231,7 +249,12 @@ async fn run(
             )
             .await?;
         if let Some(id) = target {
-            channel.exec(true, format!("tmux-link-attach {id}")).await?;
+            let attach = if tracked {
+                "tmux-link-attach-context"
+            } else {
+                "tmux-link-attach"
+            };
+            channel.exec(true, format!("{attach} {id}")).await?;
         } else {
             channel.request_shell(true).await?;
         }
@@ -303,6 +326,7 @@ async fn run(
     let (samples, mut sample_rx) = tokio::sync::mpsc::channel::<u32>(1);
     let download = async {
         let mut acknowledgments = 0;
+        let mut preface = tracked.then(Vec::new);
         let ack_deadline = tokio::time::sleep(Duration::from_secs(20));
         tokio::pin!(ack_deadline);
         loop {
@@ -324,9 +348,27 @@ async fn run(
                 }
             };
             match message {
-                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                    output.data(&data).await?
+                ChannelMsg::Data { data } => {
+                    let mut data = &data[..];
+                    if let Some(line) = &mut preface {
+                        let length = data.len().min(32 - line.len());
+                        let end = data[..length].iter().position(|b| *b == b'\n');
+                        let consumed = end.map_or(length, |pos| pos + 1);
+                        line.extend_from_slice(&data[..consumed]);
+                        data = &data[consumed..];
+                        if end.is_none() && line.len() < 32 {
+                            continue;
+                        }
+                        if let Some(pid) = attach_pid(line) {
+                            output.frame(4, &pid.to_be_bytes()).await?;
+                        } else {
+                            output.data(line).await?;
+                        }
+                        preface = None;
+                    }
+                    output.data(data).await?
                 }
+                ChannelMsg::ExtendedData { data, .. } => output.data(&data).await?,
                 ChannelMsg::Close | ChannelMsg::Eof => break,
                 ChannelMsg::Success if framed && acknowledgments < 2 => {
                     acknowledgments += 1;
@@ -452,6 +494,46 @@ pub unsafe extern "C" fn tl_open_secure_fitted(
             target.into(),
             credentials,
             true,
+        )
+    }
+}
+
+/// Attach and receive the exact tmux client PID, or query that client's active pane.
+/// A zero client PID is reserved for the initial fitted PTY attach.
+/// # Safety
+/// Same requirements as tl_open_secure.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn tl_agent_context_secure(
+    fd: i32,
+    host: *const c_char,
+    port: u16,
+    user: *const c_char,
+    pin: *const c_char,
+    seed: *const u8,
+    id: i64,
+    client_pid: u32,
+    cert: *const u8,
+    cert_len: usize,
+    pkcs8: *const u8,
+    key_len: usize,
+) -> *mut c_char {
+    let target = if client_pid == 0 {
+        Target::TrackedTerminal(id)
+    } else {
+        Target::AgentContext(id, client_pid)
+    };
+    unsafe {
+        open_inner(
+            fd,
+            host,
+            port,
+            user,
+            pin,
+            seed,
+            target,
+            Some((cert, cert_len, pkcs8, key_len)),
+            client_pid == 0,
         )
     }
 }
@@ -585,6 +667,8 @@ pub unsafe extern "C" fn tl_advice_secure(
 #[derive(Clone, Copy)]
 enum Target<'a> {
     Terminal(Option<u64>),
+    TrackedTerminal(i64),
+    AgentContext(i64, u32),
     List,
     SnapshotV1(i64),
     SnapshotV2(i64),
@@ -620,7 +704,7 @@ unsafe fn open_inner(
     let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     let result = (|| -> Result<()> {
         ensure!(
-            !matches!(target, Target::SnapshotV2(id) if id < 0),
+            !matches!(target, Target::SnapshotV2(id) | Target::TrackedTerminal(id) | Target::AgentContext(id, _) if id < 0),
             "invalid snapshot ID"
         );
         if let Target::Managed(id, action) = target {
@@ -674,7 +758,8 @@ unsafe fn open_inner(
                 let (read, writer) = UnixStream::from_std(socket)?.into_split();
                 let mut output = Output {
                     writer,
-                    framed: credentials.is_some() && matches!(target, Target::Terminal(_)),
+                    framed: credentials.is_some()
+                        && matches!(target, Target::Terminal(_) | Target::TrackedTerminal(_)),
                 };
                 let peer = Peer {
                     host,
@@ -689,7 +774,23 @@ unsafe fn open_inner(
                 let connection = handoff::open_channel(&peer, key.as_ref(), &mut output).await?;
                 let (command, limit) = match target {
                     Target::Terminal(id) => {
-                        return run(connection, read, output, id, peer, fit_initial_grid).await;
+                        return run(connection, read, output, id, peer, fit_initial_grid, false)
+                            .await;
+                    }
+                    Target::TrackedTerminal(id) => {
+                        return run(
+                            connection,
+                            read,
+                            output,
+                            Some(id as u64),
+                            peer,
+                            fit_initial_grid,
+                            true,
+                        )
+                        .await;
+                    }
+                    Target::AgentContext(id, pid) => {
+                        (format!("tmux-link-agent-context {id} {pid}"), 4096)
                     }
                     Target::Advice(id, instance, ticket, _) => {
                         let command = match ticket {
@@ -741,6 +842,9 @@ unsafe fn open_inner(
                     }
                     if capture && status != Some(0) {
                         let diagnostic = String::from_utf8_lossy(&error);
+                        if matches!(target, Target::AgentContext(..)) {
+                            bail!("agent context unavailable");
+                        }
                         if managed {
                             if diagnostic.contains("unsupported request") {
                                 bail!("managed unsupported");
@@ -877,6 +981,22 @@ pub unsafe extern "C" fn tl_free_error(p: *mut c_char) {
 #[cfg(test)]
 mod grid_tests {
     use super::*;
+
+    #[test]
+    fn tracked_attach_only_accepts_its_initial_pid_line() {
+        assert_eq!(attach_pid(b"TLCLIENT 123\r\n"), Some(123));
+        assert_eq!(attach_pid(b"TLCLIENT 1\n"), Some(1));
+        for invalid in [
+            b"TLCLIENT 0\n".as_slice(),
+            b"TLCLIENT -1\n",
+            b"banner\n",
+            b"TLCLIENT 1 2\n",
+            b"TLCLIENT 123",
+            b"TLCLIENT 4294967296\n",
+        ] {
+            assert_eq!(attach_pid(invalid), None);
+        }
+    }
 
     #[tokio::test]
     async fn interrupted_first_frame_is_replayed_and_legacy_open_never_waits_for_input() {

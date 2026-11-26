@@ -46,13 +46,66 @@ private final class TypingBridge: NSObject, WKScriptMessageHandler {
   }
 }
 
-final class TerminalTypingKeyboard: UIView {
+final class AgentReplyButton: UIButton {
+  var onInsert: ((String) -> Void)?
+  private var context: String?
+  private var generation: UInt64 = 0
+
+  init(identifier: String) {
+    super.init(frame: .zero)
+    setTitle("Agent", for: .normal)
+    titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+    setTitleColor(.systemMint, for: .normal)
+    accessibilityIdentifier = identifier
+    accessibilityLabel = "Agent 快捷回复"
+    accessibilityHint = "选择一条短语或命令插入当前输入位置"
+    showsMenuAsPrimaryAction = true
+    isHidden = true
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  func setAgentContext(_ identity: String?) {
+    guard context != identity else { return }
+    context = identity
+    generation &+= 1
+    contextMenuInteraction?.dismissMenu()
+    isHidden = identity == nil
+    guard identity != nil else {
+      menu = nil
+      return
+    }
+
+    let revision = generation
+    func group(_ title: String, _ phrases: [String]) -> UIMenu {
+      let actions = phrases.map { phrase in
+        UIAction(title: phrase, identifier: UIAction.Identifier("terminal.agent." + phrase)) { [weak self] _ in
+          guard let self, generation == revision, !isHidden, isEnabled else { return }
+          onInsert?(phrase)
+        }
+      }
+      return UIMenu(title: title, options: .displayInline, children: actions)
+    }
+    menu = UIMenu(children: [
+      group("常用回复", ["Proceed", "Keep going", "Follow up on this", "Ack", "Summarize progress", "Run the tests"]),
+      group("斜杠命令", ["/compact", "/models", "/help"])
+    ])
+  }
+}
+
+final class TerminalTypingKeyboard: UIView, WKNavigationDelegate {
   private let bridge = TypingBridge()
+  private let agentButton = AgentReplyButton(identifier: "terminal.typing.agent")
+  private let agentButtonWidth: CGFloat = 60
   let surface: WKWebView
   private var panelHeight: NSLayoutConstraint!
   var onText: ((String) -> Void)? {
     get { bridge.onText }
     set { bridge.onText = newValue }
+  }
+  var onAgentReply: ((String) -> Void)? {
+    get { agentButton.onInsert }
+    set { agentButton.onInsert = newValue }
   }
 
   init() {
@@ -71,13 +124,20 @@ final class TerminalTypingKeyboard: UIView {
     surface.scrollView.isScrollEnabled = false
     surface.scrollView.contentInsetAdjustmentBehavior = .never
     surface.accessibilityIdentifier = "terminal.typing"
+    surface.navigationDelegate = self
     surface.translatesAutoresizingMaskIntoConstraints = false
+    agentButton.translatesAutoresizingMaskIntoConstraints = false
     addSubview(surface)
+    addSubview(agentButton)
     NSLayoutConstraint.activate([
       surface.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
       surface.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
       surface.topAnchor.constraint(equalTo: topAnchor),
-      surface.bottomAnchor.constraint(equalTo: bottomAnchor)
+      surface.bottomAnchor.constraint(equalTo: bottomAnchor),
+      agentButton.leftAnchor.constraint(equalTo: surface.leftAnchor),
+      agentButton.topAnchor.constraint(equalTo: surface.topAnchor),
+      agentButton.widthAnchor.constraint(equalToConstant: agentButtonWidth),
+      agentButton.heightAnchor.constraint(equalToConstant: 30)
     ])
     let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets/keyboard")!
     surface.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
@@ -90,6 +150,21 @@ final class TerminalTypingKeyboard: UIView {
   override func traitCollectionDidChange(_ previous: UITraitCollection?) {
     super.traitCollectionDidChange(previous)
     if previous?.verticalSizeClass != traitCollection.verticalSizeClass { panelHeight?.constant = preferredHeight }
+  }
+
+  func setAgentContext(_ identity: String?) {
+    let wasHidden = agentButton.isHidden
+    agentButton.setAgentContext(identity)
+    if wasHidden != agentButton.isHidden { updatePunctuationInset() }
+  }
+
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    updatePunctuationInset()
+  }
+
+  private func updatePunctuationInset() {
+    let width = agentButton.isHidden ? 0 : agentButtonWidth
+    surface.evaluateJavaScript("document.getElementById('punctuation').style.marginLeft = '\(width)px'", completionHandler: nil)
   }
 
   func resetLayout() {

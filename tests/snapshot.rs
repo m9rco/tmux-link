@@ -127,6 +127,111 @@ impl Drop for Server {
 }
 
 #[test]
+fn agent_shortcuts_follow_only_the_attached_client_across_sessions() {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::FromRawFd;
+
+    let server = Server::new("agent-context");
+    let program = server.0.join("codex");
+    let fixture = server.0.join("fixture.c");
+    fs::write(
+        &fixture,
+        "#include <unistd.h>\nint main(void) { for (;;) pause(); }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&fixture)
+            .arg("-o")
+            .arg(&program)
+            .status()
+            .unwrap()
+            .success()
+    );
+    server.session(
+        "ordinary-name",
+        "80",
+        "22",
+        &format!("exec {}", program.display()),
+    );
+    server.session("codex", "80", "22", "exec sleep 120");
+
+    // Give the forced command a real PTY, as OpenSSH does for the phone.
+    let (mut master, mut slave) = (-1, -1);
+    unsafe {
+        assert_eq!(
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            0
+        );
+    }
+    let slave = unsafe { File::from_raw_fd(slave) };
+    let master = unsafe { File::from_raw_fd(master) };
+    let mut child = server
+        .cmd(env!("CARGO_BIN_EXE_agent"))
+        .env("TERM", "xterm-256color")
+        .env("SSH_ORIGINAL_COMMAND", "tmux-link-attach-context 0")
+        .arg("attach")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    let mut marker = String::new();
+    let mut reader = BufReader::new(master);
+    reader.read_line(&mut marker).unwrap();
+    assert_eq!(marker.trim_end(), format!("TLCLIENT {}", child.id()));
+    let context = format!("tmux-link-agent-context 0 {}", child.id());
+    let limit = Instant::now() + Duration::from_secs(5);
+    let attached = loop {
+        let response = server.request(&context);
+        if response.status.success() {
+            let data: Value = serde_json::from_slice(&response.stdout).unwrap();
+            if data["isAgent"] == true {
+                break data;
+            }
+        }
+        assert!(
+            Instant::now() < limit,
+            "Agent client unavailable: {} {}",
+            String::from_utf8_lossy(&response.stdout),
+            String::from_utf8_lossy(&response.stderr)
+        );
+        sleep(Duration::from_millis(20));
+    };
+    assert_eq!(attached["agent"], "codex");
+    assert_eq!(attached["id"], 0);
+    assert!(attached["instance"].is_string() && attached["processInstance"].is_string());
+    assert!(!attached.to_string().contains(program.to_str().unwrap()));
+    let tty = server.tmux(&["list-clients", "-F", "#{client_tty}"]);
+    server.tmux(&["copy-mode", "-t", "$0:"]);
+    assert_eq!(server.json(&context)["isAgent"], false);
+    server.tmux(&["send-keys", "-t", "$0:", "-X", "cancel"]);
+    server.tmux(&["switch-client", "-c", tty.trim(), "-t", "$1"]);
+    let shell = server.json(&context);
+    assert_eq!(shell["id"], 1);
+    assert_eq!(shell["isAgent"], false);
+    assert!(shell["agent"].is_null() && shell["processInstance"].is_null());
+    server.tmux(&["detach-client", "-t", tty.trim()]);
+    assert!(child.wait().unwrap().success());
+    assert!(!server.request(&context).status.success());
+    for malformed in [
+        "tmux-link-agent-context 0",
+        "tmux-link-agent-context 0 0",
+        "tmux-link-agent-context 0 1 extra",
+        "tmux-link-attach-context +1",
+    ] {
+        assert!(!server.request(malformed).status.success(), "{malformed}");
+    }
+}
+
+#[test]
 fn selected_pane_snapshot_separates_history_preserves_grid_and_never_attaches() {
     let server = Server::new("selected");
     server.session("chosen task", "90", "12", r#"echo 'Goal: review the distribution plan.'

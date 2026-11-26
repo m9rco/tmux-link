@@ -99,6 +99,11 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private var backgrounded = false
   private var expiry: Timer?
   private var completed = false
+  private var attachedClientPID: UInt32?
+  private var drawerOpen = false
+  private var agentIdentity: String?
+  private var contextPoll: Task<Void, Never>?
+  private var pendingReply: Task<Void, Never>?
   private let transportBadge = UILabel()
   private var shortcuts: ShortcutDrawer!
   private let leave: (() -> Void)?
@@ -201,6 +206,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     ])
     shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave,
                                review: { [weak self] in self?.reviewDecisions() }) { [weak self] key in self?.press(key) }
+    web.typingKeyboard.onAgentReply = { [weak self] text in self?.insertAgentReply(text) }
+    shortcuts.onAgentReply = web.typingKeyboard.onAgentReply
+    shortcuts.onVisibilityChange = { [weak self] open in
+      self?.drawerOpen = open
+      self?.updateAgentMonitoring()
+    }
     if leave != nil {
       let edge = UISwipeGestureRecognizer(target: self, action: #selector(leaveSession))
       edge.direction = .right
@@ -249,6 +260,46 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     }
   }
 
+  private func showAgentIdentity(_ identity: String?) {
+    agentIdentity = identity
+    web?.typingKeyboard.setAgentContext(identity)
+    shortcuts?.setAgentContext(identity)
+  }
+
+  private func updateAgentMonitoring() {
+    guard active, ready, !backgrounded, let pid = attachedClientPID,
+          drawerOpen || !web.typingKeyboard.isHidden else {
+      contextPoll?.cancel()
+      contextPoll = nil
+      showAgentIdentity(nil)
+      return
+    }
+    guard contextPoll == nil else { return }
+    contextPoll = Task { [weak self, client, target] in
+      while !Task.isCancelled {
+        let identity = try? await TerminalTransport.agentIdentity(client, sessionID: target, attachPID: pid)
+        guard !Task.isCancelled else { return }
+        self?.showAgentIdentity(identity)
+        do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
+      }
+    }
+  }
+
+  private func insertAgentReply(_ text: String) {
+    guard active, ready, !backgrounded, let expected = agentIdentity, let pid = attachedClientPID else { return }
+    pendingReply?.cancel()
+    pendingReply = Task { [weak self, client, target] in
+      let current = try? await TerminalTransport.agentIdentity(client, sessionID: target, attachPID: pid)
+      guard !Task.isCancelled, let self, active, ready, !backgrounded, attachedClientPID == pid else { return }
+      pendingReply = nil
+      guard current == expected else {
+        showAgentIdentity(nil)
+        return
+      }
+      sendTerminalKey(text)
+    }
+  }
+
   private func setKeyboardVisible(_ visible: Bool) {
     guard web.typingKeyboard.isHidden == visible else { return }
     UIView.performWithoutAnimation {
@@ -256,6 +307,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       web.typingKeyboard.isHidden = !visible
       view.layoutIfNeeded()
     }
+    updateAgentMonitoring()
     web.evaluateJavaScript(visible ? "trackKeyboardCursor(true)" : "trackKeyboardCursor(false); term.blur()",
                            completionHandler: nil)
   }
@@ -398,6 +450,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   @objc private func pauseStatus() {
     guard active, !completed else { return }
     backgrounded = true
+    pendingReply?.cancel()
+    updateAgentMonitoring()
     // Flush any coalesced reading with its original deadline before suspension.
     refreshStatus(immediately: true)
   }
@@ -405,6 +459,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   @objc private func resumeStatus() {
     guard active, !completed else { return }
     backgrounded = false
+    updateAgentMonitoring()
     refreshStatus(immediately: true)
     startIslandIfAvailable()
   }
@@ -444,8 +499,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       return
     }
     let hasIdentity = connection.identity != nil
+    let trackAgent = session?.agentContextVersion == 1 && target >= 0
     let result = Task.detached(priority: .userInitiated) { [target] in
-      connection.run(worker, target: target, fitInitialGrid: true)
+      connection.run(worker, target: target, fitInitialGrid: true, contextPID: trackAgent ? 0 : nil)
     }
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       let stream = FileHandle(fileDescriptor: reader, closeOnDealloc: true)
@@ -468,6 +524,13 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
               let alert = UIAlertController(title: "暂时无法翻页", message: "会话仍已连接，请稍后再滑动一次。", preferredStyle: .alert)
               alert.addAction(UIAlertAction(title: "好", style: .default))
               present(alert, animated: true)
+            }
+          } else if kind == 4 && trackAgent && payload.count == 4 {
+            let pid = payload.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            DispatchQueue.main.async { [weak self] in
+              guard let self, active, !completed, attachedClientPID == nil, pid > 0 else { return }
+              attachedClientPID = pid
+              updateAgentMonitoring()
             }
           } else if kind == 0 {
             let rendered = DispatchSemaphore(value: 0)
@@ -524,6 +587,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     activityState.observedAt = observedAt
     if phase == .ready {
       ready = true
+      updateAgentMonitoring()
       statusBar.isHidden = navigationStatus != nil
       shortcuts.setReady(true)
       web.shortcutBar.setReady(true)
@@ -564,6 +628,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     let bytes = (obj["data"] as? String).map { Data($0.utf8) }
       ?? (obj["binary"] as? String).flatMap { Data(base64Encoded: $0) }
     if ready, let bytes {
+      pendingReply?.cancel()
       for offset in stride(from: 0, to: bytes.count, by: 16384) {
         send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
       }
@@ -638,6 +703,9 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
   private func disconnect() {
     ready = false
+    pendingReply?.cancel()
+    attachedClientPID = nil
+    updateAgentMonitoring()
     shortcuts?.setReady(false)
     web?.shortcutBar.setReady(false)
     web?.typingKeyboard.isUserInteractionEnabled = false

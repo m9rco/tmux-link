@@ -22,6 +22,7 @@ final class RemoteSessionTests: XCTestCase {
     let decisionFixtureIDs: [Int64]?
     let snapshotFixtureID: Int64?
     let managedQuestionFixtureID: Int64?
+    let agentShortcutFixtureID: Int64?
     let conversationFixtureID: Int64?
     let conversationFixturePane: UInt64?
   }
@@ -733,6 +734,135 @@ final class RemoteSessionTests: XCTestCase {
                                                    in: nil, contentWorld: .page) as? [String]
     XCTAssertEqual(output, ["\u{1b}[A", "\u{1b}[B", "\u{1b}[D", "\u{1b}[C",
                             "\u{1b}OA", "\u{1b}OB", "\u{1b}OD", "\u{1b}OC"])
+  }
+
+  @MainActor
+  private func menuActions(in menu: UIMenu) -> [UIAction] {
+    menu.children.flatMap { element -> [UIAction] in
+      if let action = element as? UIAction { return [action] }
+      if let submenu = element as? UIMenu { return menuActions(in: submenu) }
+      return []
+    }
+  }
+
+  @MainActor
+  func testAgentReplyMenusFollowForegroundIdentity() throws {
+    let keyboard = TerminalTypingKeyboard()
+    let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 360, height: 400))
+    let drawer = ShortcutDrawer(in: viewport, accent: .systemMint) { _ in XCTFail("Unexpected terminal key") }
+    drawer.setReady(true)
+    var replies: [String] = []
+    keyboard.onAgentReply = { replies.append($0) }
+    drawer.onAgentReply = { replies.append($0) }
+    let typingButton = try XCTUnwrap(descendants(keyboard).first { $0.accessibilityIdentifier == "terminal.typing.agent" } as? UIButton)
+    let drawerButton = try XCTUnwrap(descendants(drawer).first { $0.accessibilityIdentifier == "terminal.shortcuts.agent" } as? UIButton)
+    let buttons = [typingButton, drawerButton]
+    func setContext(_ id: String?) {
+      keyboard.setAgentContext(id)
+      drawer.setAgentContext(id)
+    }
+    for button in buttons {
+      XCTAssertTrue(button.isHidden)
+      XCTAssertNil(button.menu)
+    }
+    setContext("foreground-a")
+    var oldActions: [UIAction] = []
+    for button in buttons {
+      XCTAssertFalse(button.isHidden)
+      let actions = menuActions(in: try XCTUnwrap(button.menu))
+      let titles = actions.map(\.title)
+      XCTAssertEqual(Set(titles).count, titles.count)
+      for phrase in ["Proceed", "Follow up on this", "Ack", "/compact", "/models"] {
+        XCTAssertTrue(titles.contains(phrase), "Missing " + phrase)
+      }
+      replies.removeAll()
+      for action in actions { button.sendAction(action) }
+      XCTAssertEqual(replies, titles)
+      XCTAssertTrue(replies.allSatisfy { !$0.isEmpty && $0.rangeOfCharacter(from: .controlCharacters) == nil })
+      oldActions.append(try XCTUnwrap(actions.first))
+    }
+    setContext(nil)
+    replies.removeAll()
+    for (button, action) in zip(buttons, oldActions) {
+      XCTAssertTrue(button.isHidden)
+      XCTAssertNil(button.menu)
+      button.sendAction(action)
+    }
+    setContext("foreground-b")
+    for (button, action) in zip(buttons, oldActions) {
+      XCTAssertFalse(button.isHidden)
+      button.sendAction(action)
+    }
+    XCTAssertTrue(replies.isEmpty, "A stale menu wrote into a different foreground process")
+  }
+
+  @MainActor
+  func testAgentReplyInsertsTextOnlyWhileAgentIsForeground() async throws {
+    let config = try configuration()
+    guard let id = config.agentShortcutFixtureID else { throw XCTSkip("No isolated agent shortcut fixture") }
+    let client = ClientProfile(name: "Agent shortcut fixture", host: config.host, port: config.port,
+                               route: config.route ?? "", user: config.user, pin: config.fingerprint)
+    let sessions = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(sessions.first { $0.id == id && $0.name.hasPrefix("tmux-link-agent-keys-") })
+    let window = try XCTUnwrap(appWindow)
+    let previous = window.rootViewController
+    let screen = Screen(client: client, session: session)
+    window.rootViewController = screen
+    screen.view.layoutIfNeeded()
+    defer {
+      screen.stop()
+      window.rootViewController = previous
+    }
+    let terminal = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? TerminalWebView }.first)
+    let button = try XCTUnwrap(descendants(terminal.typingKeyboard).first {
+      $0.accessibilityIdentifier == "terminal.typing.agent"
+    } as? UIButton)
+    func waitFor(_ description: String, _ predicate: () async throws -> Bool) async throws {
+      let deadline = ProcessInfo.processInfo.systemUptime + 25
+      while ProcessInfo.processInfo.systemUptime < deadline {
+        if try await predicate() { return }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      throw RelayError("Timed out waiting for " + description)
+    }
+    func keys(_ text: String) async throws {
+      _ = try await terminal.callAsyncJavaScript("pressTerminalKey(text); return true",
+                  arguments: ["text": text], in: nil, contentWorld: .page)
+    }
+    func visible() async throws -> String {
+      let result = try await terminal.evaluateJavaScript("""
+        Array.from({length:term.rows}, (_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString(true)).join('\\n')
+        """)
+      return try XCTUnwrap(result as? String)
+    }
+    try await waitFor("SSH ready") { terminal.typingKeyboard.isUserInteractionEnabled }
+    _ = try await terminal.evaluateJavaScript("bridge.postMessage({showKeyboard:true}); true")
+    try await waitFor("English keyboard") { !terminal.typingKeyboard.isHidden }
+    try await keys("printf 'TL-SHELL-%s\\n' READY\r")
+    try await waitFor("fixture shell") { try await visible().contains("TL-SHELL-READY") }
+    XCTAssertTrue(button.isHidden)
+    try await keys("./codex\r")
+    try await waitFor("interactive Agent menu") { !button.isHidden && button.menu != nil }
+    let actions = menuActions(in: try XCTUnwrap(button.menu))
+    let staleAck = try XCTUnwrap(actions.first { $0.title == "Ack" })
+    for (title, expected) in [("Proceed", "Proceed"), ("/compact", "Proceed/compact")] {
+      button.sendAction(try XCTUnwrap(actions.first { $0.title == title }))
+      try await waitFor(expected) { try await visible().contains(expected) }
+    }
+    // cat echoes a canonical tty. A newline from either menu action would put
+    // this ordinary keystroke on a different line from the inserted phrases.
+    try await keys("!")
+    try await waitFor("one editable line") { try await visible().contains("Proceed/compact!") }
+    try await keys("\u{03}")
+    try await keys("printf 'TL-BACK-%s\\n' SHELL\r")
+    try await waitFor("return to shell") { try await visible().contains("TL-BACK-SHELL") }
+    button.sendAction(staleAck)
+    try await waitFor("shortcut hidden after Agent exit") { button.isHidden }
+    button.sendAction(staleAck)
+    try await keys("fixture-draft")
+    try await waitFor("shell echo") { try await visible().contains("fixture-draft") }
+    let shell = try await visible()
+    XCTAssertFalse(shell.contains("Ack"))
   }
 
   @MainActor

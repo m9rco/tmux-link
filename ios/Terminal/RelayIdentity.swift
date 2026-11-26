@@ -170,6 +170,20 @@ struct PhoneAdviceExchange {
   var payload = Data()
 }
 
+private struct AgentPaneContext: Decodable {
+  let version: Int
+  let id: Int64
+  let isAgent: Bool
+  let instance: String
+  let processInstance: String?
+
+  var identity: String? {
+    guard version == 1, isAgent, id >= 0, !instance.isEmpty,
+          let processInstance, !processInstance.isEmpty else { return nil }
+    return "\(id):\(instance):\(processInstance)"
+  }
+}
+
 struct TerminalTransport {
   let endpoint: String
   let port: UInt16
@@ -243,7 +257,13 @@ struct TerminalTransport {
     return try JSONDecoder().decode(ManagedStatus.self, from: data)
   }
 
-  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil) async throws -> Data {
+  static func agentIdentity(_ client: ClientProfile, sessionID: Int64, attachPID: UInt32) async throws -> String? {
+    guard sessionID >= 0, attachPID > 0 else { return nil }
+    let data = try await read(client, target: sessionID, contextPID: attachPID)
+    return try JSONDecoder().decode(AgentPaneContext.self, from: data).identity
+  }
+
+  private static func read(_ client: ClientProfile, target: Int64, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil, contextPID: UInt32? = nil) async throws -> Data {
     let connection = try TerminalTransport(client)
     var pair: [Int32] = [-1, -1]
     guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
@@ -255,7 +275,7 @@ struct TerminalTransport {
     // cooperative executor, including on devices with a small thread pool.
     async let message: String? = withCheckedContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2, managedAction: managedAction, advice: advice))
+        continuation.resume(returning: connection.run(worker, target: target, snapshotV2: snapshotV2, managedAction: managedAction, advice: advice, contextPID: contextPID))
       }
     }
     let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -280,7 +300,7 @@ struct TerminalTransport {
   }
 
   // Rust owns the supplied descriptor until return, on both success and error.
-  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil) -> String? {
+  func run(_ fd: Int32, target: Int64, fitInitialGrid: Bool = false, snapshotV2: Bool = false, managedAction: String? = nil, advice: PhoneAdviceExchange? = nil, contextPID: UInt32? = nil) -> String? {
     let der = identity?.certificate ?? Data()
     let pkcs8 = identity?.privateKey ?? Data()
     let open = snapshotV2 ? tl_snapshot_v2_secure : (fitInitialGrid ? tl_open_secure_fitted : tl_open_secure)
@@ -290,6 +310,10 @@ struct TerminalTransport {
           let seedPointer = seedBytes.bindMemory(to: UInt8.self).baseAddress!
           let certificate = der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress
           let privateKey = pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress
+          if let contextPID {
+            return tl_agent_context_secure(fd, endpoint, port, user, pin, seedPointer, target, contextPID,
+                                           certificate, cert.count, privateKey, key.count)
+          }
           if let advice {
             return advice.payload.withUnsafeBytes { (payload: UnsafeRawBufferPointer) in
               tl_advice_secure(fd, endpoint, port, user, pin, seedPointer, target, advice.instance, advice.ticket,

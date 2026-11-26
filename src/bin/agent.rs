@@ -7,6 +7,8 @@ use std::{
     process::Command,
 };
 
+#[path = "agent/agent_context.rs"]
+mod agent_context;
 #[path = "agent/import_link.rs"]
 mod import_link;
 
@@ -139,13 +141,22 @@ fn attach() -> Result<()> {
     if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-page ")) {
         return page(request);
     }
+    if let Some(request) = command.and_then(|c| c.strip_prefix("tmux-link-agent-context ")) {
+        return agent_context::print(request);
+    }
     if let Some((snapshot, request)) = command.and_then(|c| c.split_once(' '))
         && matches!(snapshot, "tmux-link-snapshot" | "tmux-link-snapshot-v2")
     {
         return print_snapshot(request, snapshot == "tmux-link-snapshot-v2");
     }
-    if let Some(id) = command.and_then(|c| c.strip_prefix("tmux-link-attach ")) {
-        let id: u64 = id.parse()?;
+    if let Some((op, id)) = command.and_then(|c| c.split_once(' '))
+        && matches!(op, "tmux-link-attach" | "tmux-link-attach-context")
+    {
+        let id: u64 = agent_context::numeric(id)?;
+        if op == "tmux-link-attach-context" {
+            println!("TLCLIENT {}", std::process::id());
+            io::stdout().flush()?;
+        }
         return Err(Command::new("tmux")
             .args(["-u", "attach-session", "-t", &format!("${id}")])
             .exec()
@@ -188,7 +199,7 @@ fn attach() -> Result<()> {
                 let fields = String::from_utf8_lossy(&details.stdout);
                 let (instance, directory) = details.status.success()
                     .then(|| fields.strip_suffix('\n').and_then(|s| s.split_once('\n'))).flatten().unzip();
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 2, "managedInstance": instance}))
+                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 2, "managedInstance": instance, "agentContextVersion": 1}))
             })
             .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string(&items)?);

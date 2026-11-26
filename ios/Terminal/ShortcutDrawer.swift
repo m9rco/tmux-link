@@ -5,9 +5,12 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
   private let panel = UIScrollView()
   private let dismiss = UIButton(type: .custom)
   private let reveal = UIButton(type: .custom)
+  private let agentButton = AgentReplyButton(identifier: "terminal.shortcuts.agent")
   private let keys = UIStackView()
   private var isOpen = false
   private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(drag(_:)))
+  var onVisibilityChange: ((Bool) -> Void)?
+  var onAgentReply: ((String) -> Void)?
 
   init(in viewport: UIView, accent: UIColor, leave: (() -> Void)? = nil,
        review: (() -> Void)? = nil, press: @escaping (String) -> Void) {
@@ -71,6 +74,15 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
       keys.addArrangedSubview(button)
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true
     }
+    agentButton.onInsert = { [weak self] phrase in
+      guard let self else { return }
+      onAgentReply?(phrase)
+      settle(open: false)
+    }
+    keys.addArrangedSubview(agentButton)
+    let agentHeight = agentButton.heightAnchor.constraint(equalToConstant: 44)
+    agentHeight.priority = UILayoutPriority(999)
+    agentHeight.isActive = true
     for key in TerminalKey.allCases {
       let label = key.title
       var style = UIButton.Configuration.tinted()
@@ -119,6 +131,10 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
     }
   }
 
+  func setAgentContext(_ identity: String?) {
+    agentButton.setAgentContext(identity)
+  }
+
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
     let point = touch.location(in: self)
     return isOpen ? panel.frame.contains(point) : point.x >= bounds.maxX - 22
@@ -149,7 +165,9 @@ final class ShortcutDrawer: UIView, UIGestureRecognizerDelegate {
   private func settle(open: Bool) {
     let offscreen = CGAffineTransform(translationX: panel.bounds.width, y: 0)
     if panel.isHidden { panel.transform = offscreen }
+    let changed = isOpen != open
     isOpen = open
+    if changed { onVisibilityChange?(open) }
     panel.isHidden = false
     dismiss.isHidden = !open
     reveal.isHidden = open
