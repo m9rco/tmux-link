@@ -70,6 +70,23 @@ def bound_conversation(tmp, runtime_env):
     return int(session[1:]), int(pane[1:])
 
 
+def activity_fixture(tmp, runtime_env):
+    """Create uniquely named test sessions; callers on a shared server remove both names."""
+    work = Path(tempfile.mkdtemp(prefix="tmux-link-activity-", dir=tmp))
+    name = work.name
+    run("cc", "-o", work / "codex", ROOT / "scripts/terminal-activity-fixture.c")
+    session = output("tmux", "-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{session_id}",
+                     "-s", name, "-x", "80", "-y", "12", "-c", work, work / "codex", env=runtime_env)
+    try:
+        run("tmux", "new-session", "-d", "-s", name + "-idle", "-e", "PS1=$ ", "-e", "ENV=/dev/null",
+            "-e", "HISTFILE=/dev/null", "-c", work,
+            "/bin/sh", "-i", env=runtime_env)
+    except BaseException:
+        subprocess.run(["tmux", "kill-session", "-t", session], env=runtime_env, check=False)
+        raise
+    return int(session[1:]), name
+
+
 def benchmark(device, tmp):
     sim = ["xcrun", "simctl"]
     derived = ROOT / "target/xcode-simulator-tests"
@@ -112,6 +129,7 @@ def benchmark(device, tmp):
                              "print(pathlib.Path(sys.argv[1]).read_text(), end='', flush=True); time.sleep(1800)",
                              report, env=runtime_env)
         conversation_id, conversation_pane = bound_conversation(tmp, runtime_env)
+        activity_id, activity_name = activity_fixture(tmp, runtime_env)
         question_id = output("tmux", "new-session", "-d", "-P", "-F", "#{session_id}",
                              "-s", "tmux-link-managed-question-simulator", sys.executable, "-c",
                              "import time; print('What audience should the draft address?', flush=True); time.sleep(1800)",
@@ -161,12 +179,14 @@ def benchmark(device, tmp):
                     "snapshotFixtureID": int(snapshot_id.removeprefix("$")),
                     "managedQuestionFixtureID": int(question_id.removeprefix("$")),
                     "agentShortcutFixtureID": int(shortcut_id.removeprefix("$")),
+                    "activityFixtureID": activity_id, "activityFixtureName": activity_name,
                     "conversationFixtureID": conversation_id, "conversationFixturePane": conversation_pane,
                 }))
                 run(*sim, "terminate", device, bundle)
                 result = tmp / "benchmark.xcresult"
                 run(*build, "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testTerminalPerformanceBaseline",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testOfflineEnglishKeyboard",
+                    "-only-testing:TmuxLinkDeviceTests/SessionActivityTests",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyMenusFollowForegroundIdentity",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testAgentReplyInsertsTextOnlyWhileAgentIsForeground",
                     "-only-testing:TmuxLinkDeviceTests/RemoteSessionTests/testKeyboardRowAndCursorModes",

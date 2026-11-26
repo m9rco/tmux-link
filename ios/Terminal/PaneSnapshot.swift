@@ -10,6 +10,12 @@ struct RemoteSession: Codable, Hashable, Identifiable {
   var managedVersion: Int? = nil
   var managedInstance: String? = nil
   var agentContextVersion: Int? = nil
+  // Optional list metadata. Keep unknown wire values decodable for older apps.
+  var activity: String? = nil
+  var activitySample: String? = nil
+
+  enum ActivitySignal: String { case running, waiting, idle, observing }
+  var activitySignal: ActivitySignal? { activity.flatMap(ActivitySignal.init) }
 
   var negotiatedSnapshotVersion: PaneSnapshotVersion? {
     guard snapshot == true else { return nil }

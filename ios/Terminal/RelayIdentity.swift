@@ -219,8 +219,12 @@ struct TerminalTransport {
   }
 
   static func list(_ client: ClientProfile) async throws -> [RemoteSession] {
-    let data = try await read(client, target: -2)
+    let data = try await listData(client)
     return try JSONDecoder().decode([RemoteSession].self, from: data)
+  }
+
+  static func listData(_ client: ClientProfile) async throws -> Data {
+    try await read(client, target: -2)
   }
 
   static func snapshot(_ client: ClientProfile, session: RemoteSession, version: PaneSnapshotVersion) async throws -> DecisionSnapshot {

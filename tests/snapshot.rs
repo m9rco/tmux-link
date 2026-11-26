@@ -934,3 +934,134 @@ fn managed_forced_command_is_session_scoped_and_has_a_closed_vocabulary() {
     let unchanged = run("tmux-link-managed-v1 status 0");
     assert_eq!(unchanged.stdout, output.stdout);
 }
+
+#[test]
+fn list_activity_tracks_only_the_current_pane_without_exporting_its_contents() {
+    let server = Server::new("activity-list");
+    let code = server.0.join("fixture.c");
+    let binary = server.0.join("codex");
+    fs::write(&code, r#"
+        #include <stdio.h>
+        int main(void) {
+            setvbuf(stdout, NULL, _IONBF, 0);
+            fputs("\033[?1049h\033[2J\033[HPRIVATE-STREAM\r\n• Working (2s • esc to interrupt)", stdout);
+            for (int key; (key = getchar()) != EOF;) {
+                if (key == 'w')
+                    fputs("\033[2J\033[H• Working (2s • esc to interrupt)\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\nPress Enter to confirm\r\nWAIT-MENU", stdout);
+                if (key == 'o' || key == 'p')
+                    printf("\033[2J\033[HPRIVATE-OUTPUT-%c", key);
+            }
+            return 0;
+        }
+    "#).unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&code)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success()
+    );
+    server.session(
+        "带 空格|分隔",
+        "80",
+        "18",
+        &format!("exec {}", binary.display()),
+    );
+    server.wait_for("$0:", "esc to interrupt");
+    let list = || server.json("tmux-link-list")[0].clone();
+    let running = list();
+    assert_eq!(running["name"], "带 空格|分隔");
+    assert_eq!(running["activity"], "running", "{running}");
+    assert!(running.get("activitySample").is_none());
+    assert!(!running.to_string().contains("PRIVATE-STREAM"));
+    server.tmux(&["send-keys", "-t", "%0", "w", "Enter"]);
+    server.wait_for("$0:", "WAIT-MENU");
+    let waiting = list();
+    assert_eq!(waiting["activity"], "waiting");
+    assert!(waiting.get("activitySample").is_none());
+
+    server.tmux(&["send-keys", "-t", "%0", "o", "Enter"]);
+    server.wait_for("$0:", "PRIVATE-OUTPUT-o");
+    let stream = list();
+    assert_eq!(stream["activity"], "observing");
+    let sample = stream["activitySample"].as_str().unwrap();
+    assert_eq!(list()["activitySample"], sample);
+    assert!(!stream.to_string().contains("PRIVATE-OUTPUT"));
+    server.tmux(&["send-keys", "-t", "%0", "p", "Enter"]);
+    server.wait_for("$0:", "PRIVATE-OUTPUT-p");
+    assert_ne!(list()["activitySample"], sample);
+
+    // A second pane changes the foreground target. Keep its path (including
+    // delimiter-like characters) intact and ignore an idle shell's typed input.
+    let cwd = server.0.join("中文|two words\tproject");
+    fs::create_dir(&cwd).unwrap();
+    let pane = server.tmux(&[
+        "split-window",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "$0:",
+        "-c",
+        cwd.to_str().unwrap(),
+        "/bin/sh",
+        "-i",
+    ]);
+    let pane = pane.trim();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        if list()["activity"] == "idle" {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(30));
+    }
+    let idle = list();
+    // macOS resolves /tmp through /private/tmp for the process cwd.
+    let expected = fs::canonicalize(cwd).unwrap();
+    assert_eq!(idle["directory"], expected.to_str().unwrap());
+    server.tmux(&["send-keys", "-t", pane, "-l", "未执行的文字"]);
+    assert_eq!(list()["activity"], "idle");
+    server.tmux(&["select-pane", "-t", "%0"]);
+    assert_eq!(list()["activity"], "observing");
+    server.tmux(&["copy-mode", "-t", "%0"]);
+    assert_eq!(list()["activity"], "idle");
+}
+
+#[test]
+fn list_observes_output_from_shell_builtins_without_a_running_child() {
+    use std::io::Write;
+    let server = Server::new("activity-builtin");
+    let pipe = server.0.join("steps");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Feed a real foreground shell from a separate FD: its PTY only receives
+    // the shell's own output. No keyboard echo, subprocess, or focus change.
+    server.session("report", "60", "12", &format!(
+        "exec 3<> {}; echo BUILTIN-READY; while IFS= read -r step <&3; do printf 'BUILTIN-%s\\n' \"$step\"; done",
+        pipe.display()
+    ));
+    server.wait_for("$0:", "BUILTIN-READY");
+    let mut writer = fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+    let list = || server.json("tmux-link-list")[0].clone();
+    let baseline = list();
+    assert_eq!(baseline["activity"], "observing", "{baseline}");
+    let mut sample = baseline["activitySample"].as_str().unwrap().to_owned();
+    for step in ["一", "二"] {
+        writeln!(writer, "{step}").unwrap();
+        server.wait_for("$0:", &format!("BUILTIN-{step}"));
+        let next = list();
+        assert_eq!(next["activity"], "observing");
+        let next_sample = next["activitySample"].as_str().unwrap();
+        assert_ne!(sample, next_sample);
+        assert_eq!(list()["activitySample"], next_sample);
+        sample = next_sample.into();
+    }
+}

@@ -144,8 +144,16 @@ fn capture_v2(target: &str, separator: &str, window: usize) -> Result<Option<Str
     )
 }
 
+// Recognize the same complete CodeMaker frame used by detailed snapshots,
+// including its narrow idle composer. Never interpret arbitrary prose as UI.
+pub(super) fn footer_activity(rows: &[&str]) -> Option<&'static str> {
+    let mut visible = rows.to_vec();
+    let state = screen::clean(&mut visible);
+    state.or_else(|| (visible.len() < rows.len()).then_some("waiting"))
+}
+
 // Only a bounded-read overflow permits a smaller v2 retry.
-fn capture(args: &[&str], raw_limit: usize) -> Result<Option<String>> {
+pub(super) fn capture(args: &[&str], raw_limit: usize) -> Result<Option<String>> {
     let mut child = Command::new("tmux")
         .args(args)
         .stdin(Stdio::null())

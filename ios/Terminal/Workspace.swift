@@ -103,6 +103,17 @@ final class WorkspaceActivity: ObservableObject {
   @Published var isActive = false
 }
 
+private enum SessionListAvailable: EnvironmentKey {
+  static let defaultValue = true
+}
+
+private extension EnvironmentValues {
+  var sessionListAvailable: Bool {
+    get { self[SessionListAvailable.self] }
+    set { self[SessionListAvailable.self] = newValue }
+  }
+}
+
 final class EnrollmentStatus: ObservableObject {
   @Published var error: String?
 }
@@ -168,6 +179,7 @@ struct Workspace: View {
         .navigationDestination(for: ClientProfile.self) { Sessions(client: $0).id($0) }
     }
     .tint(mint).preferredColorScheme(.dark)
+    .environment(\.sessionListAvailable, activity.isActive && editor == nil && pairing == nil && !showingProviders && message == nil)
     .environmentObject(managed)
     .onReceive(store.$clients) { managed.updateClients($0) }
     .onReceive(activity.$isActive) {
@@ -420,31 +432,93 @@ private struct ProfileEditor: View {
 
 @MainActor
 final class SessionListModel: ObservableObject {
+  enum Activity: Equatable {
+    case running, waiting
+    var title: String { self == .running ? "正在处理或输出" : "正在等待输入" }
+  }
+  private struct Sample {
+    let instance: String
+    let value: String
+  }
   @Published private(set) var sessions: [RemoteSession] = []
+  @Published private(set) var indicators: [Int64: Activity] = [:]
   @Published private(set) var failure: String?
   @Published private(set) var loading = true
   private var revision = 0
+  private var fetching = false
+  private var samples: [Int64: Sample] = [:]
   private let fetch: (ClientProfile) async throws -> [RemoteSession]
 
   init(fetch: @escaping (ClientProfile) async throws -> [RemoteSession] = SessionDirectory.fetch) {
     self.fetch = fetch
   }
 
-  func refresh(_ client: ClientProfile) async -> [RemoteSession]? {
+  func refresh(_ client: ClientProfile, quietly: Bool = false) async -> [RemoteSession]? {
+    if quietly && fetching { return nil }
     revision &+= 1
     let request = revision
-    loading = true
-    defer { if request == revision { loading = false } }
+    fetching = true
+    if !quietly && !loading { loading = true }
+    defer {
+      if request == revision {
+        fetching = false
+        if loading { loading = false }
+      }
+    }
     do {
       let items = try await fetch(client)
       guard request == revision, !Task.isCancelled else { return nil }
-      sessions = items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-      failure = nil
+      recordActivity(items)
+      // Samples are transient. Publishing a new list for every changing token
+      // would redraw rows even while their visible running state stays the same.
+      let sorted = items.map { item in
+        var row = item
+        row.activitySample = nil
+        return row
+      }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+      if sessions != sorted { sessions = sorted }
+      if failure != nil { failure = nil }
       return sessions
     } catch {
-      if request == revision, !Task.isCancelled { failure = error.localizedDescription }
+      if request == revision, !Task.isCancelled {
+        clearActivity()
+        failure = error.localizedDescription
+      }
       return nil
     }
+  }
+
+  func clearActivity() {
+    samples.removeAll()
+    if !indicators.isEmpty { indicators = [:] }
+  }
+
+  private func recordActivity(_ sessions: [RemoteSession]) {
+    var observed: [Int64: Sample] = [:]
+    var next: [Int64: Activity] = [:]
+    for session in sessions {
+      switch session.activitySignal {
+      case .running: next[session.id] = .running
+      case .waiting: next[session.id] = .waiting
+      case .observing:
+        guard let instance = session.managedInstance, !instance.isEmpty,
+              let sample = session.activitySample, !sample.isEmpty else { continue }
+        observed[session.id] = Sample(instance: instance, value: sample)
+        if let previous = samples[session.id], previous.instance == instance, previous.value != sample {
+          next[session.id] = .running
+        }
+      case .idle, nil: break
+      }
+    }
+    samples = observed
+    if indicators != next { indicators = next }
+  }
+
+  var activityPollInterval: Duration? {
+    guard sessions.contains(where: { $0.activitySignal != nil })
+    else { return nil }
+    if failure != nil { return .seconds(20) }
+    return sessions.contains(where: { $0.activitySignal == .observing || $0.activitySignal == .running }) ? .seconds(4) : .seconds(8)
   }
 
   func matching(_ query: String) -> [RemoteSession] {
@@ -458,6 +532,8 @@ final class SessionListModel: ObservableObject {
 
 private struct Sessions: View {
   @EnvironmentObject private var managed: ManagedSessionController
+  @Environment(\.sessionListAvailable) private var workspaceAvailable
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let client: ClientProfile
   @StateObject private var directory = SessionListModel()
   @State private var search = ""
@@ -465,6 +541,12 @@ private struct Sessions: View {
   @State private var managedSession: RemoteSession?
   @State private var pendingSelection: AdvisorSelection?
   @State private var advisorDestination: AdvisorSelection?
+  @State private var onScreen = false
+
+  private var observing: Bool {
+    onScreen && workspaceAvailable && !showingAdvisor && managedSession == nil && pendingSelection == nil && advisorDestination == nil
+  }
+  private var polling: Bool { observing && directory.activityPollInterval != nil }
 
   private var advisorNotice: String? {
     if directory.loading && directory.sessions.isEmpty { return "正在读取会话…" }
@@ -497,6 +579,7 @@ private struct Sessions: View {
           Text("没有匹配的会话").foregroundStyle(.secondary)
         }
         ForEach(visibleSessions) { session in
+          let activity = observing ? directory.indicators[session.id] : nil
           HStack(spacing: 12) {
             NavigationLink {
               TerminalView(client: client, session: session)
@@ -510,10 +593,17 @@ private struct Sessions: View {
                   }
                 }.padding(.vertical, 7)
               } icon: {
-                Image(systemName: "rectangle.split.2x1").foregroundStyle(mint)
+                Group {
+                  if activity == .running && !reduceMotion {
+                    ProgressView().progressViewStyle(.circular).controlSize(.small).tint(mint)
+                  } else {
+                    Image(systemName: activity == .running ? "hourglass" : activity == .waiting ? "text.bubble" : "rectangle.split.2x1")
+                      .foregroundStyle(activity == .waiting ? Color.secondary : mint)
+                  }
+                }.frame(width: 22, height: 22).accessibilityHidden(true)
               }
               .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain).contextMenu {
+            }.buttonStyle(.plain).accessibilityValue(activity?.title ?? "").contextMenu {
               Button("复制会话名称") { UIPasteboard.general.string = session.name }
               if let directory = session.directory, !directory.isEmpty {
                 Button("复制工作目录") { UIPasteboard.general.string = directory }
@@ -559,15 +649,28 @@ private struct Sessions: View {
       ) {
         advisorDestination?.terminal
       }
-      .task(id: client) { await refresh() }
+      .onAppear { onScreen = true }
+      .onDisappear { onScreen = false }
+      .task(id: observing) {
+        directory.clearActivity()
+        if observing { await refresh() }
+      }
+      .task(id: polling) {
+        guard polling else { return }
+        while !Task.isCancelled, let interval = directory.activityPollInterval {
+          do { try await Task.sleep(for: interval) } catch { return }
+          guard !Task.isCancelled else { return }
+          await refresh(quietly: true)
+        }
+      }
   }
 
   private func isManaged(_ session: RemoteSession) -> Bool {
     managed.targets.contains { $0.clientID == client.id && $0.sessionID == session.id && $0.instance == session.managedInstance }
   }
 
-  @MainActor private func refresh() async {
-    if let items = await directory.refresh(client) { managed.updateSessions(items, client: client) }
+  @MainActor private func refresh(quietly: Bool = false) async {
+    if let items = await directory.refresh(client, quietly: quietly) { managed.updateSessions(items, client: client) }
   }
 
   @MainActor

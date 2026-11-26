@@ -23,22 +23,26 @@ final class RemoteSessionTests: XCTestCase {
     let snapshotFixtureID: Int64?
     let managedQuestionFixtureID: Int64?
     let agentShortcutFixtureID: Int64?
+    let activityFixtureID: Int64?
+    let activityFixtureName: String?
     let conversationFixtureID: Int64?
     let conversationFixturePane: UInt64?
+
+    static func load() throws -> Connection {
+      if let fixture = ProcessInfo.processInfo.environment["TMUX_LINK_E2E_FIXTURE"] {
+        return try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
+      }
+      let file = try XCTUnwrap(
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+      ).appendingPathComponent("tmux-link-e2e.json")
+      guard FileManager.default.fileExists(atPath: file.path) else {
+        throw XCTSkip("Copy tmux-link-e2e.json to the app Documents folder to run the live test.")
+      }
+      return try JSONDecoder().decode(Connection.self, from: Data(contentsOf: file))
+    }
   }
 
-  func configuration() throws -> Connection {
-    if let fixture = ProcessInfo.processInfo.environment["TMUX_LINK_E2E_FIXTURE"] {
-      return try JSONDecoder().decode(Connection.self, from: Data(fixture.utf8))
-    }
-    let file = try XCTUnwrap(
-      FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-    ).appendingPathComponent("tmux-link-e2e.json")
-    guard FileManager.default.fileExists(atPath: file.path) else {
-      throw XCTSkip("Copy tmux-link-e2e.json to the app Documents folder to run the live test.")
-    }
-    return try JSONDecoder().decode(Connection.self, from: Data(contentsOf: file))
-  }
+  func configuration() throws -> Connection { try Connection.load() }
 
   func testHostSnapshotRetainsEarlierConstraint() async throws {
     let config = try configuration()

@@ -3,6 +3,77 @@ import XCTest
 
 @MainActor
 final class WorkspaceExperienceTests: XCTestCase {
+  func testSessionActivityUsesConsecutiveSamplesAndStopsAtAQuestion() async throws {
+    let client = ClientProfile()
+    var row = RemoteSession(id: 4, name: "Agent", managedInstance: "original-pane", activity: "observing", activitySample: "one")
+    var fails = false
+    let directory = SessionListModel { _ in
+      if fails { throw URLError(.networkConnectionLost) }
+      return [row]
+    }
+    _ = await directory.refresh(client)
+    XCTAssertTrue(directory.indicators.isEmpty)
+    XCTAssertEqual(directory.activityPollInterval, .seconds(4))
+    row.activitySample = "two"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertEqual(directory.indicators[row.id], .running)
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+    row.activity = "running"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertEqual(directory.indicators[row.id], .running)
+    row.activity = "waiting"
+    row.activitySample = "new prompt"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertEqual(directory.indicators[row.id], .waiting)
+    XCTAssertEqual(directory.activityPollInterval, .seconds(8))
+    row.activity = "observing"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+    row.managedInstance = "different-pane"
+    row.activitySample = "other"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+    directory.clearActivity()
+    row.activitySample = "after resume"
+    _ = await directory.refresh(client)
+    XCTAssertNil(directory.indicators[row.id])
+    fails = true
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+    XCTAssertEqual(directory.activityPollInterval, .seconds(20))
+    fails = false
+    row.activitySample = "after failure"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+    row.activity = "idle"
+    _ = await directory.refresh(client, quietly: true)
+    XCTAssertNil(directory.indicators[row.id])
+  }
+
+  func testLegacyAndUnknownActivitiesDoNotPollAndBackgroundPollsDoNotOverlap() async throws {
+    let payload = Data(#"[{"id":1,"name":"legacy"},{"id":2,"name":"future","activity":"unexpected"}]"#.utf8)
+    let old = try JSONDecoder().decode([RemoteSession].self, from: payload)
+    let client = ClientProfile()
+    let started = expectation(description: "SSH fetch started")
+    var suspended: CheckedContinuation<[RemoteSession], Never>?
+    var calls = 0
+    let directory = SessionListModel { _ in
+      calls += 1
+      return await withCheckedContinuation { suspended = $0; started.fulfill() }
+    }
+    let manual = Task { await directory.refresh(client) }
+    await fulfillment(of: [started], timeout: 2)
+    let skipped = await directory.refresh(client, quietly: true)
+    XCTAssertNil(skipped)
+    XCTAssertEqual(calls, 1)
+    suspended?.resume(returning: old)
+    _ = await manual.value
+    XCTAssertEqual(directory.sessions.count, 2)
+    XCTAssertTrue(directory.indicators.isEmpty)
+    XCTAssertNil(directory.activityPollInterval)
+  }
+
   func testDirectoryKeepsLastSuccessfulListAndRejectsLateResults() async throws {
     let client = ClientProfile()
     let input = [RemoteSession(id: 10, name: "10", directory: "/work/Router"),

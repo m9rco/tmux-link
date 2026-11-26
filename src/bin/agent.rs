@@ -7,6 +7,8 @@ use std::{
     process::Command,
 };
 
+#[path = "agent/activity_list.rs"]
+mod activity_list;
 #[path = "agent/agent_context.rs"]
 mod agent_context;
 #[path = "agent/import_link.rs"]
@@ -166,19 +168,12 @@ fn attach() -> Result<()> {
         matches!(command, None | Some("tmux-link-list")),
         "unsupported request"
     );
+    if command == Some("tmux-link-list") {
+        return activity_list::print();
+    }
     let list = Command::new("tmux")
         .args(["-u", "list-sessions", "-F", "#{session_id}|#{session_name}"])
         .output()?;
-    if command == Some("tmux-link-list") && !list.status.success() {
-        let reason = String::from_utf8_lossy(&list.stderr);
-        if reason.contains("no server running")
-            || reason.contains("No such file or directory")
-            || reason.contains("no sessions")
-        {
-            println!("[]");
-            return Ok(());
-        }
-    }
     ensure!(
         list.status.success(),
         "no tmux sessions available for this account"
@@ -188,23 +183,6 @@ fn attach() -> Result<()> {
         .lines()
         .filter_map(|line| line.split_once('|'))
         .collect();
-    if command == Some("tmux-link-list") {
-        let items = sessions
-            .iter()
-            .map(|(id, name)| -> Result<_> {
-                let id: u64 = id.strip_prefix('$').context("invalid tmux ID")?.parse()?;
-                let details = Command::new("tmux")
-                    .args(["-u", "display-message", "-p", "-t", &format!("${id}:"), "#{pid}-#{session_created}-#{pane_id}-#{pane_pid}\n#{pane_current_path}"])
-                    .output()?;
-                let fields = String::from_utf8_lossy(&details.stdout);
-                let (instance, directory) = details.status.success()
-                    .then(|| fields.strip_suffix('\n').and_then(|s| s.split_once('\n'))).flatten().unzip();
-                Ok(serde_json::json!({"id": id, "name": name, "touchPaging": true, "directory": directory.filter(|s| !s.is_empty()), "snapshot": true, "snapshotVersion": 2, "managedVersion": 2, "managedInstance": instance, "agentContextVersion": 1}))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        println!("{}", serde_json::to_string(&items)?);
-        return Ok(());
-    }
     ensure!(!sessions.is_empty(), "no sessions");
     let index = if sessions.len() == 1 {
         0
