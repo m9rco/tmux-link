@@ -23,27 +23,10 @@ enum TerminalKey: String, CaseIterable {
   }
 }
 
-// Draw both keyboard surfaces in the session window. Remote keyboard windows
-// cannot reliably composite a child WKWebView.
 final class TerminalWebView: WKWebView {
   let shortcutBar = TerminalKeyboardBar()
-  let typingKeyboard = TerminalTypingKeyboard()
+  var englishKeyboard: TerminalEnglishKeyboard { shortcutBar.englishKeyboard }
   override var inputAccessoryView: UIView? { nil }
-}
-
-private final class KeyboardSurface: WKWebView {
-  // A tap on a key must leave the terminal as first responder.
-  override var canBecomeFirstResponder: Bool { false }
-}
-
-private final class TypingBridge: NSObject, WKScriptMessageHandler {
-  var onText: ((String) -> Void)?
-
-  func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-    guard message.frameInfo.isMainFrame, let body = message.body as? [String: String],
-          let text = body["text"], !text.isEmpty, text.utf8.count <= 512 else { return }
-    onText?(text)
-  }
 }
 
 final class AgentReplyButton: UIButton {
@@ -93,141 +76,171 @@ final class AgentReplyButton: UIButton {
   }
 }
 
-final class TerminalTypingKeyboard: UIView, WKNavigationDelegate {
-  private let bridge = TypingBridge()
-  private let agentButton = AgentReplyButton(identifier: "terminal.typing.agent")
-  private let agentButtonWidth: CGFloat = 60
-  let surface: WKWebView
-  private var panelHeight: NSLayoutConstraint!
-  var onText: ((String) -> Void)? {
-    get { bridge.onText }
-    set { bridge.onText = newValue }
-  }
+final class TerminalKeyboardBar: UIView {
+  var press: ((String) -> Void)?
+  var hideKeyboard: (() -> Void)?
+  var changeMode: (() -> Void)?
+  var onPaste: (([NSItemProvider]) -> Void)?
   var onAgentReply: ((String) -> Void)? {
     get { agentButton.onInsert }
     set { agentButton.onInsert = newValue }
   }
 
-  init() {
-    let config = WKWebViewConfiguration()
-    config.websiteDataStore = .nonPersistent()
-    config.userContentController.add(bridge, name: "typingKeyboard")
-    surface = KeyboardSurface(frame: .zero, configuration: config)
-    super.init(frame: .zero)
-    panelHeight = heightAnchor.constraint(equalToConstant: preferredHeight)
-    panelHeight.priority = UILayoutPriority(999)
-    panelHeight.isActive = true
-    backgroundColor = Screen.surface
-    surface.isOpaque = false
-    surface.backgroundColor = Screen.surface
-    surface.underPageBackgroundColor = Screen.surface
-    surface.scrollView.isScrollEnabled = false
-    surface.scrollView.contentInsetAdjustmentBehavior = .never
-    surface.accessibilityIdentifier = "terminal.typing"
-    surface.navigationDelegate = self
-    surface.translatesAutoresizingMaskIntoConstraints = false
-    agentButton.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(surface)
-    addSubview(agentButton)
-    NSLayoutConstraint.activate([
-      surface.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
-      surface.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
-      surface.topAnchor.constraint(equalTo: topAnchor),
-      surface.bottomAnchor.constraint(equalTo: bottomAnchor),
-      agentButton.leftAnchor.constraint(equalTo: surface.leftAnchor),
-      agentButton.topAnchor.constraint(equalTo: surface.topAnchor),
-      agentButton.widthAnchor.constraint(equalToConstant: agentButtonWidth),
-      agentButton.heightAnchor.constraint(equalToConstant: 30)
-    ])
-    let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "assets/keyboard")!
-    surface.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
-  }
-
-  required init?(coder: NSCoder) { fatalError() }
-
-  private var preferredHeight: CGFloat { traitCollection.verticalSizeClass == .compact ? 150 : 216 }
-
-  override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-    super.traitCollectionDidChange(previous)
-    if previous?.verticalSizeClass != traitCollection.verticalSizeClass { panelHeight?.constant = preferredHeight }
-  }
-
-  func setAgentContext(_ identity: String?) {
-    let wasHidden = agentButton.isHidden
-    agentButton.setAgentContext(identity)
-    if wasHidden != agentButton.isHidden { updatePunctuationInset() }
-  }
-
-  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    updatePunctuationInset()
-  }
-
-  private func updatePunctuationInset() {
-    let width = agentButton.isHidden ? 0 : agentButtonWidth
-    surface.evaluateJavaScript("document.getElementById('punctuation').style.marginLeft = '\(width)px'", completionHandler: nil)
-  }
-
-  func resetLayout() {
-    surface.evaluateJavaScript("window.resetLayout?.()", completionHandler: nil)
-  }
-}
-
-final class TerminalKeyboardBar: UIView {
-  var press: ((String) -> Void)?
-  var hideKeyboard: (() -> Void)?
+  private let agentButton = AgentReplyButton(identifier: "terminal.typing.agent")
+  let englishKeyboard = TerminalEnglishKeyboard()
+  private(set) var isEnglishMode = false
+  private let modeButton = UIButton(type: .system)
+  private let rows = UIStackView()
+  private var windowBottomLimit: NSLayoutConstraint?
+  private let pasteControl: UIPasteControl
   private var remoteButtons: [UIButton] = []
+  private(set) var isReady = false
 
   init() {
+    let config = UIPasteControl.Configuration()
+    config.displayMode = .iconAndLabel
+    config.baseForegroundColor = .systemMint
+    config.baseBackgroundColor = UIColor.systemMint.withAlphaComponent(0.15)
+    pasteControl = UIPasteControl(configuration: config)
     super.init(frame: .zero)
-    let height = heightAnchor.constraint(equalToConstant: 44)
-    height.priority = UILayoutPriority(999)
-    height.isActive = true
+    accessibilityIdentifier = "terminal.keyboard"
     overrideUserInterfaceStyle = .dark
     backgroundColor = Screen.surface
-    autoresizingMask = .flexibleWidth
-    accessibilityIdentifier = "terminal.keyboard"
-    let row = UIStackView()
-    row.distribution = .fillEqually
-    row.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(row)
-    NSLayoutConstraint.activate([
-      row.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
-      row.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
-      row.topAnchor.constraint(equalTo: topAnchor),
-      row.bottomAnchor.constraint(equalTo: bottomAnchor)
-    ])
-    for key: TerminalKey in [.escape, .tab, .interrupt, .prefix, .left, .up, .down, .right] {
-      let button = UIButton(type: .system)
-      button.setTitle(key.title, for: .normal)
-      button.titleLabel?.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
-      button.tintColor = key == .escape ? .systemOrange : .label
-      button.accessibilityIdentifier = "terminal.keyboard." + key.title
-      switch key {
-      case .interrupt: button.accessibilityLabel = "Control C"
-      case .prefix: button.accessibilityLabel = "Control B"
-      case .left: button.accessibilityLabel = "方向左"
-      case .up: button.accessibilityLabel = "方向上"
-      case .down: button.accessibilityLabel = "方向下"
-      case .right: button.accessibilityLabel = "方向右"
-      default: break
-      }
-      button.addAction(UIAction { [weak self] _ in self?.press?(key.rawValue) }, for: .touchUpInside)
-      row.addArrangedSubview(button)
-      remoteButtons.append(button)
-    }
+    pasteConfiguration = UIPasteConfiguration(forAccepting: NSString.self)
+    pasteControl.accessibilityIdentifier = "terminal.keyboard.paste"
     let hide = UIButton(type: .system)
     hide.tintColor = .secondaryLabel
     hide.setImage(UIImage(systemName: "keyboard.chevron.compact.down"), for: .normal)
     hide.accessibilityIdentifier = "terminal.keyboard.hide"
     hide.accessibilityLabel = "收起键盘"
     hide.addAction(UIAction { [weak self] _ in self?.hideKeyboard?() }, for: .touchUpInside)
-    row.addArrangedSubview(hide)
+
+    modeButton.accessibilityIdentifier = "terminal.keyboard.mode"
+    modeButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+    modeButton.tintColor = .secondaryLabel
+    modeButton.addAction(UIAction { [weak self] _ in
+      guard let self, isReady else { return }
+      changeMode?()
+    }, for: .touchUpInside)
+    setEnglishMode(false)
+
+    let enter = keyButton(.enter)
+    enter.setTitle("回车 ↵", for: .normal)
+    enter.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+    enter.backgroundColor = UIColor.white.withAlphaComponent(0.09)
+    enter.layer.cornerRadius = 10
+
+    // The flexible gap grows on iPad. Paste stays by the left thumb and
+    // Enter and the keyboard switch keep their positions when Agent appears.
+    let actionGap = UIView()
+    let actions = UIStackView(arrangedSubviews: [hide, pasteControl, actionGap, agentButton, modeButton, enter])
+    actions.spacing = 2
+    let agentWidth = agentButton.widthAnchor.constraint(equalToConstant: 50)
+    agentWidth.priority = UILayoutPriority(999) // An inactive Agent is hidden by the stack.
+    let pasteWidth = pasteControl.widthAnchor.constraint(equalToConstant: 166)
+    pasteWidth.priority = .defaultHigh
+
+    let commands = keyGroup([.escape, .tab, .interrupt])
+    let arrows = keyGroup([.left, .up, .down, .right])
+    arrows.backgroundColor = UIColor.white.withAlphaComponent(0.045)
+    arrows.layer.cornerRadius = 10
+    let keyGap = UIView()
+    let keys = UIStackView(arrangedSubviews: [commands, keyGap, arrows])
+    let preferredCommands = commands.widthAnchor.constraint(equalToConstant: 156)
+    preferredCommands.priority = .defaultHigh
+
+    rows.axis = .vertical
+    [keys, englishKeyboard, actions].forEach(rows.addArrangedSubview)
+    rows.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(rows)
+    let nearBottom = rows.bottomAnchor.constraint(equalTo: bottomAnchor)
+    nearBottom.priority = .defaultHigh
+    let insideSafeArea = rows.bottomAnchor.constraint(lessThanOrEqualTo: safeAreaLayoutGuide.bottomAnchor)
+    insideSafeArea.priority = UILayoutPriority(998)
+    let topHeight = keys.heightAnchor.constraint(equalToConstant: 44)
+    let bottomHeight = actions.heightAnchor.constraint(equalToConstant: 44)
+    // An enclosing UIStackView can collapse the entire panel to zero height.
+    [topHeight, bottomHeight].forEach { $0.priority = UILayoutPriority(999) }
+    NSLayoutConstraint.activate([
+      hide.widthAnchor.constraint(equalToConstant: 44), modeButton.widthAnchor.constraint(equalToConstant: 46),
+      enter.widthAnchor.constraint(equalToConstant: 70), agentWidth, pasteWidth,
+      preferredCommands, arrows.widthAnchor.constraint(equalTo: commands.widthAnchor, multiplier: 4 / 3),
+      keyGap.widthAnchor.constraint(greaterThanOrEqualToConstant: 4),
+      topHeight, bottomHeight, nearBottom, insideSafeArea,
+      rows.topAnchor.constraint(equalTo: topAnchor),
+      rows.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
+      rows.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 4),
+      rows.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -4)
+    ])
     setReady(false)
   }
 
   required init?(coder: NSCoder) { fatalError() }
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    windowBottomLimit?.isActive = false
+    windowBottomLimit = nil
+    // The terminal extends under SwiftUI's safe area. Keep the keys above the
+    // actual home indicator even if the hosting view has zero bottom insets.
+    if let window {
+      let limit = rows.bottomAnchor.constraint(lessThanOrEqualTo: window.safeAreaLayoutGuide.bottomAnchor)
+      limit.priority = UILayoutPriority(998)
+      limit.isActive = true
+      windowBottomLimit = limit
+    }
+  }
+
+  private func keyGroup(_ group: [TerminalKey]) -> UIStackView {
+    let stack = UIStackView(arrangedSubviews: group.map(keyButton))
+    stack.distribution = .fillEqually
+    return stack
+  }
+
+  func setEnglishMode(_ english: Bool) {
+    isEnglishMode = english
+    modeButton.setTitle(english ? "快捷" : "ABC", for: .normal)
+    modeButton.accessibilityLabel = english ? "切换到快捷键" : "切换到英文键盘"
+    englishKeyboard.setExpanded(english)
+  }
+
+  private func keyButton(_ key: TerminalKey) -> UIButton {
+    let button = UIButton(type: .system)
+    button.setTitle(key.title, for: .normal)
+    button.titleLabel?.font = .monospacedSystemFont(ofSize: 16, weight: .medium)
+    button.tintColor = key == .escape ? .systemOrange : .label
+    button.accessibilityIdentifier = "terminal.keyboard." + key.title
+    switch key {
+    case .interrupt: button.accessibilityLabel = "Control C"
+    case .left: button.accessibilityLabel = "方向左"
+    case .up: button.accessibilityLabel = "方向上"
+    case .down: button.accessibilityLabel = "方向下"
+    case .right: button.accessibilityLabel = "方向右"
+    case .enter: button.accessibilityLabel = "回车"
+    default: break
+    }
+    button.addAction(UIAction { [weak self] _ in
+      guard let self, isReady else { return }
+      press?(key.rawValue)
+    }, for: .touchUpInside)
+    remoteButtons.append(button)
+    return button
+  }
+
   func setReady(_ ready: Bool) {
+    isReady = ready
     remoteButtons.forEach { $0.isEnabled = ready }
+    agentButton.isEnabled = ready
+    modeButton.isEnabled = ready
+    englishKeyboard.isUserInteractionEnabled = ready
+    pasteControl.target = ready ? self : nil
+    pasteControl.isUserInteractionEnabled = ready
+  }
+
+  func setAgentContext(_ identity: String?) { agentButton.setAgentContext(identity) }
+
+  override func paste(itemProviders: [NSItemProvider]) {
+    guard isReady, !itemProviders.isEmpty else { return }
+    onPaste?(itemProviders)
   }
 }

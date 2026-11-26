@@ -4,6 +4,8 @@ let inputSelection = null;
 let typedEcho = null;
 let confirmedRange = null;
 let pasting = false;
+// UIKit orders clipboard loads and subsequent keys before committing their encoded bytes to the PTY.
+let capturedInput = null;
 const echoSeed = crypto.getRandomValues(new Uint32Array(1))[0];
 
 function echoHash(text, hash = echoSeed) {
@@ -132,14 +134,34 @@ function selectTerminalInput(x, y, firstTap = null) {
   return true;
 }
 
-function pasteTerminal(text) {
+function pasteTerminal(text, confirmed = false, capture = false) {
+  // tmux can enable bracketed paste on its client while the pane itself is in plain mode.
+  text = text.replace(/[\r\n]+$/, '');
+  if (!confirmed && /[\r\n]/.test(text)) return {confirm: true};
+  if (!text) return {data: ''};
   pasting = true;
-  try { term.paste(text); } finally { pasting = false; }
+  try {
+    if (capture) return {data: captureTerminalData(() => term.paste(text))};
+    term.paste(text);
+  } finally {
+    pasting = false;
+  }
+}
+
+function captureTerminalData(action) {
+  capturedInput = '';
+  try { action(); return capturedInput; }
+  finally { capturedInput = null; }
+}
+
+function deliverTerminalData(data) {
+  if (capturedInput === null) bridge.postMessage({data});
+  else capturedInput += data;
 }
 
 function terminalData(data) {
   // Mouse/focus reports from the TUI do not move the shell's edit boundary.
-  if (/^\x1b\[(?:<|M|[IO]$)/.test(data)) { bridge.postMessage({data}); return; }
+  if (/^\x1b\[(?:<|M|[IO]$)/.test(data)) { deliverTerminalData(data); return; }
   const horizontalArrow = /^\x1b(?:\[|O)[CD]$/.test(data);
   const moving = horizontalArrow || data === '\x01' || data === '\x05';
   if (moving && !inputSelection) {
@@ -175,15 +197,15 @@ function terminalData(data) {
     markInputStart();
   }
   if (!paste && (/[\r\n]/.test(data) || (!text && !deletion && !horizontalArrow))) inputStart = null;
-  bridge.postMessage({data});
+  deliverTerminalData(data);
 }
 
 function installSelectionTouches(area) {
   area.addEventListener('paste', event => {
-    if (!inputSelection || !event.clipboardData) return;
+    if (!event.clipboardData) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    pasteTerminal(event.clipboardData.getData('text/plain'));
+    bridge.postMessage({pasteText: event.clipboardData.getData('text/plain')});
   }, true);
   let start, lastTap, selectedOnSecondTap = false;
   area.addEventListener('touchstart', event => {

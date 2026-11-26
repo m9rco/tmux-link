@@ -33,6 +33,7 @@
 		A44F27A1115D08282C89AADC /* SessionUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D6DC17B87AEC72ED3C056A1 /* SessionUpload.swift */; };
 		AD259FE4D26F6A234AC5A0B8 /* DecisionAnalysisTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2C727DCFA2239DF0ABE54FB /* DecisionAnalysisTests.swift */; };
 		B5EAFB8D266F9AF61649BDE3 /* DecisionBrief.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A7DBE55A9CFA423B0E95B9 /* DecisionBrief.swift */; };
+		BD6FB2469FF6F1ECC46F53A7 /* TerminalEnglishKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4390EAB83D3B46288FC00EEF /* TerminalEnglishKeyboard.swift */; };
 		BEDB8B4F79C210230FF55FD8 /* HostPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41FCFFF9214E39BAAD8876FB /* HostPairing.swift */; };
 		C24030632CB36AF220E8422F /* Identity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E17E7A33DF530425EC38227 /* Identity.swift */; };
 		C30137AD36DA41CA140718CD /* SessionAdvisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BAC02991976F9464F7D84E /* SessionAdvisor.swift */; };
@@ -87,6 +88,7 @@
 		3581CC9D0D9A90CE72BA01F8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		40A95C15D89DCB37F1EEA411 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		41FCFFF9214E39BAAD8876FB /* HostPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPairing.swift; sourceTree = "<group>"; };
+		4390EAB83D3B46288FC00EEF /* TerminalEnglishKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalEnglishKeyboard.swift; sourceTree = "<group>"; };
 		4AA2EEF93695DF540A0B4342 /* Bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge.h; sourceTree = "<group>"; };
 		532E5781C607397047CFA944 /* SessionActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityTests.swift; sourceTree = "<group>"; };
 		578B5E364A900CEF7B36DD35 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
@@ -192,6 +194,7 @@
 				7D6DC17B87AEC72ED3C056A1 /* SessionUpload.swift */,
 				E2C1D3D17608FFE8B023AF9D /* ShortcutDrawer.swift */,
 				041A4999E044381EC94F6B56 /* TerminalChoiceMenu.swift */,
+				4390EAB83D3B46288FC00EEF /* TerminalEnglishKeyboard.swift */,
 				EE4F1C5B0D7174B0EAF498EE /* TerminalIsland.swift */,
 				E7689B1069B33CEF2B1190C8 /* TerminalKeyboard.swift */,
 				A7B7C2F3ECC3EE5231EE846C /* TerminalTextSelection.swift */,
@@ -372,6 +375,7 @@
 				83EF24147C36F0781E6B09A8 /* ShortcutDrawer.swift in Sources */,
 				676C0A528180E6BBF0172B42 /* TerminalActivity.swift in Sources */,
 				0731E90B2E791E69DBE356DF /* TerminalChoiceMenu.swift in Sources */,
+				BD6FB2469FF6F1ECC46F53A7 /* TerminalEnglishKeyboard.swift in Sources */,
 				E96295C1E720F34EA4EC208E /* TerminalIsland.swift in Sources */,
 				A3FEA1110F037B6DCBA456DC /* TerminalKeyboard.swift in Sources */,
 				3C10FC563397D079E12E746D /* TerminalTextSelection.swift in Sources */,
@@ -402,7 +406,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -415,7 +419,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -455,7 +459,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -465,7 +469,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -504,7 +508,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Terminal-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link";
@@ -517,7 +521,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				OTHER_LDFLAGS = "-ltmux_link_mobile -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile;
 				SDKROOT = iphoneos;
@@ -590,7 +594,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StatusWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Tmux Link Status";
@@ -600,7 +604,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.tmuxlink.mobile.status;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;

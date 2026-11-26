@@ -65,13 +65,17 @@ extension RemoteSessionTests {
       NotificationCenter.default.post(name: event, object: scene)
     }
 
-    try await waitFor("first attach") { web.typingKeyboard.isUserInteractionEnabled }
+    try await waitFor("first attach") { web.shortcutBar.isReady }
+    XCTAssertFalse(web.shortcutBar.isHidden)
+    web.shortcutBar.hideKeyboard?()
+    XCTAssertTrue(web.shortcutBar.isHidden)
     let before = try await generation()
     move(UIScene.didEnterBackgroundNotification)
     try await Task.sleep(nanoseconds: 250_000_000)
     move(UIScene.didActivateNotification)
     let afterShortSwitch = try await generation()
     XCTAssertEqual(afterShortSwitch, before)
+    XCTAssertTrue(web.shortcutBar.isHidden)
 
     let mark = "\u{15}TL_RC=$((${TL_RC:-0}+1)); printf 'RC-%s\\n' ARMED"
     if ProcessInfo.processInfo.environment["TMUX_LINK_REAL_APP_SWITCH"] == "1" {
@@ -94,8 +98,9 @@ extension RemoteSessionTests {
     }
     try await waitFor("reattach to the original session") {
       let now = try await generation()
-      return web.typingKeyboard.isUserInteractionEnabled && now > before
+      return web.shortcutBar.isReady && now > before
     }
+    XCTAssertTrue(web.shortcutBar.isHidden)
 
     // A late reply from the old document must not write to the new stream.
     _ = try await web.callAsyncJavaScript(

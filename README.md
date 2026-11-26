@@ -80,9 +80,9 @@ iOS 0.4.5（Build 35）起，手机在本地过滤常见凭据、输入框边线
 
 从终端右边缘向左滑可拉出快捷键，包括 Esc、PgUp、PgDn、Tab、Ctrl-C、Ctrl-B、方向键和回车。键盘弹出或横屏时可以滚动按键列。点正文或在按键列上向右滑即可收起，远端终端保持相同行列数。
 
-点终端打开英文键盘。Shift 切换大小写，123 切换数字和符号。键盘上方有 Esc、Tab、Ctrl-C、Ctrl-B 和 ← ↑ ↓ →。在 shell 里按 ↑、↓ 可以翻看命令历史，在终端菜单里可以上下移动选项。
+进入会话后，终端底部默认显示两排按键。方向键、Esc、Tab 和 Ctrl-C 在上排，粘贴和回车在下排。可以先在其他 App 写好命令或提示词，回到会话点「粘贴」，再按回车提交。粘贴时会去掉末尾换行；如果中间还有换行，会先提示确认，因为部分终端程序会逐行执行。需要临时打字时，点「ABC」展开原来的离线英文键盘，可使用 Shift、数字和符号；点同一位置的「快捷」切回两排。收起后点终端正文可重新展开。
 
-iOS Build 43 和 v0.5.3 节点支持 Agent 快捷回复。当前窗格的前台程序被识别为交互式 Agent 时，键盘符号行和右侧快捷栏会出现 **Agent**。点开可选 `Proceed`、`Keep going`、`Follow up on this`、`Ack` 等英文回复，以及 `/compact`、`/models` 和 `/help`。选中的文字插入当前光标处，可以继续编辑，按回车发送。命令的可用性取决于会话中运行的 CLI。
+v0.5.3 起的节点支持 Agent 快捷回复。当前窗格的前台程序被识别为交互式 Agent 时，底部面板和右侧快捷栏会出现 **Agent**。点开可选 `Proceed`、`Keep going`、`Follow up on this`、`Ack` 等英文回复，以及 `/compact`、`/models` 和 `/help`。选中的文字插入当前光标处，按回车发送。命令的可用性取决于会话中运行的 CLI。
 
 双击光标所在的输入行可选中当前可见输入，继续键入或粘贴可替换选区。长按光标行后点「粘贴」，文本会通过终端当前的粘贴模式送到远端。长按输出可拖动系统选区手柄，再点「复制」。会话列表中也可长按名称复制。
 
@@ -281,13 +281,13 @@ tmux-link-center 127.0.0.1:7682 /home/tmuxrelay/link/primary.sock --websocket bu
 | tmux 集成 | 真实 Linux / OpenSSH 隧道，验证错误指纹、未授权密钥、分片输入、尺寸调整和断线重连 |
 | 输入协议 | 超大帧和未知帧被拒绝并断开连接 |
 | 发布包 | x86_64 和 ARM64 构建包安装后执行实际二进制 |
-| iOS | 设备与 ARM64 模拟器构建，校验 IPA 内嵌的实时活动扩展，并在模拟器通过真实 SSH 和 tmux 测量首屏与 100 次按键回显 |
+| iOS | 设备与 ARM64 模拟器构建，校验 IPA 内嵌的实时活动扩展，并在模拟器通过真实 SSH 和 tmux 测量首屏与 100 次粘贴回显 |
 
 输入缓冲区在同一连接中复用，减少连续按键和粘贴时的重复分配。SSH 即使遇到输入协议错误也会发起断开，关闭等待上限为 5 秒。
 
 读取会话列表成功后，手机会将最近使用的 SSH 连接保留 20 秒。打开相同主机的会话时可以复用这条连接，主机指纹、路由、用户和设备凭据都要匹配。终端会优先用手机实测的行列数打开远程 PTY。
 
-每次推送和 PR 的 CI 在 `simulator-performance` 构建产物中保存一份 JSON。它记录打开会话到 xterm 首次显示远端标记的时间，以及内置键盘发出按键到 xterm 显示远端回显的中位数和 P95。CI 使用隔离的本地 SSH/tmux，适合比较客户端版本。下方真机测试会通过实际中继生成同样的指标，保存在 XCTest 的 `terminal-performance.json` 附件中。两组数据应分别比较。
+每次推送和 PR 的 CI 在 `simulator-performance` 构建产物中保存一份 JSON。它记录打开会话到 xterm 首次显示远端标记的时间，以及点击粘贴到 xterm 显示远端回显的中位数和 P95。CI 使用隔离的本地 SSH/tmux，适合比较客户端版本。下方真机测试会通过实际中继生成同样的指标，保存在 XCTest 的 `terminal-performance.json` 附件中。两组数据应分别比较。
 
 `cargo fmt --all -- --check` 和 `cargo clippy --workspace --all-targets -- -D warnings` 检查 Rust 代码。`scripts/e2e-linux.sh` 使用临时 Docker 容器和临时密钥，通过 iOS 同一 Rust FFI 入口访问真实 Linux tmux，检查错误指纹、未授权设备密钥、会话选择、输入回显、窗口尺寸和重连后的 shell 状态。Apple Silicon 上默认测试目标为 x86_64 Linux musl，Docker 需要支持运行 amd64 镜像。终端组件、字符数据和字体的许可证位于 `ios/assets/`。
 

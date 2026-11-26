@@ -39,10 +39,13 @@ def verify(archive):
     entries = [PurePosixPath(name) for name in archive.namelist()]
     if any("_CodeSignature" in path.parts or path.name == "embedded.mobileprovision" for path in entries):
         raise ValueError("Unsigned IPA contains a signing resource or provisioning profile")
+    for name in ("index.html", "terminal-input.js", "screen.js", "xterm.js"):
+        if host / "assets" / name not in entries:
+            raise ValueError(f"IPA is missing the terminal resource {name}")
     keyboard = host / "assets/keyboard"
     for name in ("index.html", "keyboard.css", "keyboard.js", "simple-keyboard.js", "LICENSE-simple-keyboard"):
         if keyboard / name not in entries:
-            raise ValueError(f"IPA is missing the offline keyboard resource {name}")
+            raise ValueError(f"IPA is missing the offline English keyboard resource {name}")
     for name in ("pinyin.js", "decoder.js", "LICENSE-pinyin-simp", "AUTHORS-pinyin-simp"):
         if keyboard / name in entries:
             raise ValueError(f"IPA still contains the retired Pinyin keyboard resource {name}")

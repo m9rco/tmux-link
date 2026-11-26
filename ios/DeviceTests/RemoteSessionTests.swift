@@ -763,21 +763,44 @@ final class RemoteSessionTests: XCTestCase {
     defer { controller.dismiss(animated: false) }
     let bar = TerminalKeyboardBar()
     let buttons = descendants(bar).compactMap { $0 as? UIButton }
-    let shortcuts = buttons.filter { $0.accessibilityIdentifier != "terminal.keyboard.hide" }
-    let expected = ["Esc": "\u{1b}", "Tab": "\t", "⌃C": "\u{03}", "⌃B": "\u{02}",
+    let shortcuts = buttons.filter {
+      $0.accessibilityIdentifier?.hasPrefix("terminal.keyboard.") == true &&
+      $0.accessibilityIdentifier != "terminal.keyboard.hide" && $0.accessibilityIdentifier != "terminal.keyboard.mode"
+    }
+    let expected = ["Esc": "\u{1b}", "Tab": "\t", "⌃C": "\u{03}", "↵": "\r",
                     "↑": "\u{1b}[A", "↓": "\u{1b}[B", "←": "\u{1b}[D", "→": "\u{1b}[C"]
+    let paste = try XCTUnwrap(descendants(bar).first { $0.accessibilityIdentifier == "terminal.keyboard.paste" } as? UIPasteControl)
+    XCTAssertNil(paste.target)
     XCTAssertEqual(shortcuts.count, expected.count)
-    XCTAssertEqual(Set(shortcuts.compactMap { $0.title(for: .normal) }), Set(expected.keys))
+    XCTAssertEqual(Set(shortcuts.compactMap(\.accessibilityIdentifier)), Set(expected.keys.map { "terminal.keyboard." + $0 }))
     XCTAssertTrue(shortcuts.allSatisfy { !$0.isEnabled })
     bar.setReady(true)
+    XCTAssertTrue(paste.target === bar)
+    bar.frame = CGRect(x: 0, y: 0, width: 320, height: 88)
+    bar.setAgentContext("narrow-agent-pane")
+    bar.layoutIfNeeded()
+    let ids = ["terminal.typing.agent", "terminal.keyboard.paste", "terminal.keyboard.mode", "terminal.keyboard.hide"]
+    let controls = try ids.map { id in try XCTUnwrap(descendants(bar).first { $0.accessibilityIdentifier == id }) } + shortcuts
+    let enter = try XCTUnwrap(shortcuts.first { $0.accessibilityIdentifier == "terminal.keyboard.↵" })
+    let enterFrame = enter.convert(enter.bounds, to: bar)
+    for control in controls {
+      let frame = control.convert(control.bounds, to: bar)
+      XCTAssertFalse(control.isHidden, control.accessibilityIdentifier ?? "")
+      XCTAssertGreaterThanOrEqual(frame.width, 43.99, control.accessibilityIdentifier ?? "")
+      XCTAssertGreaterThanOrEqual(frame.height, 43.99, control.accessibilityIdentifier ?? "")
+      XCTAssertTrue(bar.bounds.insetBy(dx: -0.01, dy: -0.01).contains(frame))
+      if abs(frame.midY - enterFrame.midY) < 1 && control !== enter {
+        XCTAssertLessThanOrEqual(frame.maxX, enterFrame.minX + 0.01)
+      }
+    }
     var keys: [String] = []
     bar.press = { keys.append($0) }
     for button in shortcuts {
-      let title = try XCTUnwrap(button.title(for: .normal))
+      let id = try XCTUnwrap(button.accessibilityIdentifier)
+      let key = String(id.dropFirst("terminal.keyboard.".count))
       XCTAssertTrue(button.isEnabled)
-      XCTAssertEqual(button.accessibilityIdentifier, "terminal.keyboard." + title)
       button.sendActions(for: .touchUpInside)
-      XCTAssertEqual(keys.last, expected[title])
+      XCTAssertEqual(keys.last, expected[key])
     }
     XCTAssertEqual(keys.count, expected.count)
     let script = #"""
@@ -809,7 +832,8 @@ final class RemoteSessionTests: XCTestCase {
 
   @MainActor
   func testAgentReplyMenusFollowForegroundIdentity() throws {
-    let keyboard = TerminalTypingKeyboard()
+    let keyboard = TerminalKeyboardBar()
+    keyboard.setReady(true)
     let viewport = UIView(frame: CGRect(x: 0, y: 0, width: 360, height: 400))
     let drawer = ShortcutDrawer(in: viewport, accent: .systemMint) { _ in XCTFail("Unexpected terminal key") }
     drawer.setReady(true)
@@ -876,7 +900,7 @@ final class RemoteSessionTests: XCTestCase {
       window.rootViewController = previous
     }
     let terminal = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? TerminalWebView }.first)
-    let button = try XCTUnwrap(descendants(terminal.typingKeyboard).first {
+    let button = try XCTUnwrap(descendants(terminal.shortcutBar).first {
       $0.accessibilityIdentifier == "terminal.typing.agent"
     } as? UIButton)
     func waitFor(_ description: String, file: StaticString = #filePath, line: UInt = #line,
@@ -901,12 +925,12 @@ final class RemoteSessionTests: XCTestCase {
         """)
       return try XCTUnwrap(result as? String)
     }
-    try await waitFor("SSH ready") { terminal.typingKeyboard.isUserInteractionEnabled }
+    try await waitFor("SSH ready") { terminal.shortcutBar.isReady }
     // A hardware key or paste can arrive the moment the session reports ready.
     try await keys("printf 'TL-SHELL-%s\\n' READY\r")
     try await waitFor("first command after attach") { try await visible().contains("TL-SHELL-READY") }
     _ = try await terminal.evaluateJavaScript("bridge.postMessage({showKeyboard:true}); true")
-    try await waitFor("English keyboard") { !terminal.typingKeyboard.isHidden }
+    try await waitFor("command keyboard") { !terminal.shortcutBar.isHidden }
     XCTAssertTrue(button.isHidden)
     try await keys("./codex\r")
     try await waitFor("interactive Agent menu") { !button.isHidden && button.menu != nil }
@@ -933,38 +957,207 @@ final class RemoteSessionTests: XCTestCase {
   }
 
   @MainActor
-  func testOfflineEnglishKeyboard() async throws {
-    let saved = UserDefaults.standard.object(forKey: "terminal.typing.language")
-    defer { UserDefaults.standard.set(saved, forKey: "terminal.typing.language") }
-    UserDefaults.standard.set("zh", forKey: "terminal.typing.language")
-    let board = TerminalTypingKeyboard()
-    let page = board.surface
-    var committed: [String] = []
-    board.onText = { committed.append($0) }
-    for _ in 0..<100 {
-      if (try? await page.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool == true { break }
-      try await Task.sleep(nanoseconds: 50_000_000)
+  func testCompactKeyboardPasteRequiresExplicitReturn() async throws {
+    let config = try configuration()
+    guard let id = config.agentShortcutFixtureID else { throw XCTSkip("No isolated shell for clipboard test") }
+    let client = ClientProfile(name: "Keyboard fixture", host: config.host, port: config.port,
+                               route: config.route ?? "", user: config.user, pin: config.fingerprint)
+    let sessions = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(sessions.first { $0.id == id && $0.name.hasPrefix("tmux-link-agent-keys-") })
+    let window = try XCTUnwrap(appWindow)
+    let previous = window.rootViewController
+    let screen = Screen(client: client, session: session)
+    window.rootViewController = screen
+    screen.view.layoutIfNeeded()
+    defer {
+      screen.dismiss(animated: false)
+      screen.stop()
+      window.rootViewController = previous
     }
-    let script = #"""
-      function assertEnglishLayout() {
-        if (keyboard.getButtonElement('{lang}')) throw new Error('Unexpected language switch');
+    let web = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? TerminalWebView }.first)
+    let bar = web.shortcutBar
+    let paste = try XCTUnwrap(descendants(bar).compactMap { $0 as? UIPasteControl }.first)
+    let enter = try XCTUnwrap(descendants(bar).first { $0.accessibilityIdentifier == "terminal.keyboard.↵" } as? UIButton)
+    let stamp = "KB-" + UUID().uuidString.prefix(6) + "-"
+    // Exercise the explicit test providers even if somebody taps the device
+    // during the fixture. No personal clipboard item is needed for this test.
+    screen.view.isUserInteractionEnabled = false
+    func waitFor(_ label: String, _ condition: () async throws -> Bool) async throws {
+      let deadline = Date().addingTimeInterval(20)
+      while Date() < deadline {
+        if try await condition() { return }
+        try await Task.sleep(for: .milliseconds(80))
       }
-      const tap = k => keyboard.getButtonElement(k).click();
-      assertEnglishLayout();
-      const initialSpace = keyboard.getButtonElement('{space}').textContent;
-      tap('a'); tap('{shift}'); assertEnglishLayout(); tap('B'); tap('c');
-      tap('{symbols}'); assertEnglishLayout(); tap('7');
-      tap('{more}'); assertEnglishLayout(); tap('{braceL}'); tap('{braceR}');
-      tap('{symbols}'); tap('d');
-      document.querySelector('#punctuation button').click();
-      tap('{space}'); tap('{bksp}'); tap('{enter}');
-      return [initialSpace, keyboard.getInput()];
+      XCTFail("Timed out waiting for " + label)
+      throw RelayError("Timed out waiting for " + label)
+    }
+    func waitForLine(_ suffix: String) async throws {
+      let marker = stamp + suffix
+      try await waitFor(marker) {
+        let value = try await web.callAsyncJavaScript("""
+          const b = term.buffer.active;
+          const lines = Array.from({length: term.rows}, (_, i) => b.getLine(b.viewportY + i)?.translateToString(true));
+          const status = ['wrong-body', 'extra-return', 'extra-key', 'wrong-return', 'wrong-order', 'duplicate', 'unconfirmed'];
+          return status.find(code => lines.includes(prefix + code)) || (lines.includes(marker) ? 'ready' : '');
+          """, arguments: ["marker": marker, "prefix": stamp], in: nil, contentWorld: .page) as? String
+        if let value, !value.isEmpty, value != "ready" {
+          let failure = "Paste fixture reported " + value + " while waiting for " + suffix
+          XCTFail(failure)
+          throw RelayError(failure)
+        }
+        return value == "ready"
+      }
+    }
+    try await waitFor("ready") { bar.isReady }
+    try await waitFor("command keyboard visible on entry") { !bar.isHidden }
+    screen.view.layoutIfNeeded()
+    bar.layoutIfNeeded()
+    let pasteFrame = paste.convert(paste.bounds, to: bar)
+    let enterFrame = enter.convert(enter.bounds, to: bar)
+    XCTAssertEqual(pasteFrame.midY, enterFrame.midY, accuracy: 1)
+    for arrow in ["←", "↑", "↓", "→"] {
+      let button = try XCTUnwrap(descendants(bar).first { $0.accessibilityIdentifier == "terminal.keyboard." + arrow })
+      XCTAssertLessThanOrEqual(button.convert(button.bounds, to: bar).maxY, pasteFrame.minY + 1)
+    }
+    // Render only the native controls, excluding terminal content and other windows.
+    let controls = UIGraphicsImageRenderer(bounds: bar.bounds).image { _ in
+      _ = bar.drawHierarchy(in: bar.bounds, afterScreenUpdates: true)
+    }
+    let attachment = XCTAttachment(image: controls)
+    attachment.name = "compact-keyboard-device"
+    attachment.lifetime = .keepAlways
+    add(attachment)
+    bar.hideKeyboard?()
+    XCTAssertTrue(bar.isHidden)
+    _ = try await web.evaluateJavaScript("term.textarea.click(); true")
+    try await waitFor("command keyboard") { !bar.isHidden }
+    let target = try XCTUnwrap(paste.target)
+    let sample = "第一行 🌙\nsecond line\n"
+    let plain = "a clipboard prompt"
+    // On the isolated pane read the actual bytes after SSH/tmux. A short quiet
+    // interval distinguishes insertion from an extra Return already in flight.
+    let program = #"""
+      import os, tty, termios, select, base64
+      original = termios.tcgetattr(0)
+      def mark(text):
+          os.write(1, ('\r\n' + '\#(stamp)' + text + '\r\n').encode())
+      def fail(code):
+          mark(code)
+          raise SystemExit()
+      def read(n):
+          data = b''
+          while len(data) < n:
+              if not select.select([0], [], [], 15)[0]: raise TimeoutError()
+              data += os.read(0, n - len(data))
+          return data
+      def check(body, label):
+          mark(label + '-ready')
+          if read(len(body)) != body: fail('wrong-body')
+          if select.select([0], [], [], .3)[0]: fail('extra-return' if read(1) in (b'\r', b'\n') else 'extra-key')
+          mark(label + '-staged')
+          if read(1) != b'\r': fail('wrong-return')
+      try:
+          tty.setraw(0)
+          os.write(1, b'\x1b[2J\x1b[H\x1b[?2004h')
+          check(b'\x1b[200~' + base64.b64decode('\#(Data(sample.utf8).base64EncodedString())').rstrip(b'\r\n').replace(b'\n', b'\r') + b'\x1b[201~', 'multi')
+          os.write(1, b'\x1b[?2004l')
+          check(b'\#(plain)', 'plain')
+          mark('ordered-ready')
+          if read(5) != b'late\r': fail('wrong-order')
+          if select.select([0], [], [], .3)[0]: fail('duplicate')
+          mark('confirm-ready')
+          if select.select([0], [], [], 2)[0]: fail('unconfirmed')
+          mark('noinput')
+      finally:
+          os.write(1, b'\x1b[?2004l')
+          termios.tcsetattr(0, termios.TCSANOW, original)
       """#
-    let result = try await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page) as? [String]
-    XCTAssertEqual(result, ["space", ""])
-    let expected = ["a", "B", "c", "7", "{", "}", "d", "/", " ", "\u{7f}", "\r"]
-    for _ in 0..<30 where committed.count < expected.count { try await Task.sleep(nanoseconds: 20_000_000) }
-    XCTAssertEqual(committed, expected)
+    let command = "\u{15}python3 -c \"import base64;exec(base64.b64decode('"
+      + Data(program.utf8).base64EncodedString() + "'))\"\r"
+    _ = try await web.callAsyncJavaScript("pressTerminalKey(text); return true", arguments: ["text": command],
+                                         in: nil, contentWorld: .page)
+    for (label, text) in [("multi", sample), ("plain", plain + "\r\n")] {
+      try await waitForLine(label + "-ready")
+      target.paste?(itemProviders: [NSItemProvider(object: text as NSString)])
+      if label == "multi" {
+        try await waitFor("multi-line confirmation") { screen.presentedViewController is UIAlertController }
+        let alert = try XCTUnwrap(screen.presentedViewController as? UIAlertController)
+        XCTAssertTrue(alert.actions.contains { $0.style == .default && $0.title == "粘贴多行" })
+        screen.confirmClipboardPaste()
+        alert.dismiss(animated: false)
+      }
+      try await waitForLine(label + "-staged")
+      enter.sendActions(for: .touchUpInside)
+    }
+    try await waitForLine("ordered-ready")
+    let delayed = NSItemProvider()
+    delayed.registerObject(ofClass: NSString.self, visibility: .all) { completion in
+      DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(250)) {
+        completion("late" as NSString, nil)
+      }
+      return nil
+    }
+    target.paste?(itemProviders: [delayed])
+    enter.sendActions(for: .touchUpInside)
+    try await waitForLine("confirm-ready")
+    target.paste?(itemProviders: [NSItemProvider(object: "# one\n# two" as NSString)])
+    try await waitFor("confirmation for unbracketed multiline input") { screen.presentedViewController is UIAlertController }
+    try await waitForLine("noinput")
+  }
+
+  @MainActor
+  func testOptionalEnglishKeyboardTypesAndReturnsToCompactLayout() async throws {
+    let config = try configuration()
+    guard let id = config.agentShortcutFixtureID else { throw XCTSkip("No isolated English keyboard fixture") }
+    let client = ClientProfile(name: "English keyboard fixture", host: config.host, port: config.port,
+                               route: config.route ?? "", user: config.user, pin: config.fingerprint)
+    let sessions = try await SessionDirectory.fetch(client)
+    let session = try XCTUnwrap(sessions.first { $0.id == id && $0.name.hasPrefix("tmux-link-agent-keys-") })
+    let window = try XCTUnwrap(appWindow)
+    let previous = window.rootViewController
+    let screen = Screen(client: client, session: session)
+    window.rootViewController = screen
+    screen.view.layoutIfNeeded()
+    defer { screen.stop(); window.rootViewController = previous }
+    let web = try XCTUnwrap(descendants(screen.view).compactMap { $0 as? TerminalWebView }.first)
+    func waitFor(_ label: String, _ check: () async throws -> Bool) async throws {
+      let deadline = Date().addingTimeInterval(20)
+      while Date() < deadline {
+        if try await check() { return }
+        try await Task.sleep(for: .milliseconds(80))
+      }
+      throw RelayError("Timed out waiting for " + label)
+    }
+    try await waitFor("compact keyboard on entry") { web.shortcutBar.isReady && !web.shortcutBar.isHidden }
+    XCTAssertNil(web.englishKeyboard.surface)
+    let mode = try XCTUnwrap(descendants(web.shortcutBar).first { $0.accessibilityIdentifier == "terminal.keyboard.mode" } as? UIButton)
+    // Clear this private fixture's previous draft and make the typing probe a shell comment.
+    _ = try await web.evaluateJavaScript(#"term.input('\x15# ', true); window.englishKeyEvents = []; window.englishWatch = term.onData(s => englishKeyEvents.push(s)); true"#)
+    defer { web.evaluateJavaScript("englishWatch.dispose()", completionHandler: nil) }
+    mode.sendActions(for: .touchUpInside)
+    try await waitFor("optional English keys") {
+      guard !web.englishKeyboard.isHidden, let page = web.englishKeyboard.surface else { return false }
+      return (try? await page.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool == true
+    }
+    let page = try XCTUnwrap(web.englishKeyboard.surface)
+    let state = try await page.callAsyncJavaScript(#"""
+      const tap = key => keyboard.getButtonElement(key).click();
+      const space = keyboard.getButtonElement('{space}').textContent;
+      if (keyboard.getButtonElement('{lang}')) throw new Error('Unexpected language switch');
+      tap('a'); tap('{shift}'); tap('B'); tap('c');
+      tap('{symbols}'); tap('7'); tap('{more}'); tap('{braceL}'); tap('{braceR}');
+      tap('{symbols}'); tap('d'); document.querySelector('#punctuation button').click();
+      tap('{space}'); tap('{bksp}'); tap('{enter}');
+      return [space, keyboard.getInput()];
+      """#, arguments: [:], in: nil, contentWorld: .page) as? [String]
+    XCTAssertEqual(state, ["space", ""])
+    let keys = ["a", "B", "c", "7", "{", "}", "d", "/", " ", "\u{7f}", "\r"]
+    try await waitFor("English key events") {
+      let typed = try await web.evaluateJavaScript("englishKeyEvents") as? [String] ?? []
+      return typed.filter { !$0.hasPrefix("\u{1b}[") } == keys
+    }
+    mode.sendActions(for: .touchUpInside)
+    try await waitFor("return to compact keyboard") { web.englishKeyboard.isHidden && !web.shortcutBar.isHidden }
   }
 
   @MainActor
@@ -1019,10 +1212,9 @@ final class RemoteSessionTests: XCTestCase {
     }
     func open() async throws {
       _ = try await web.evaluateJavaScript("term.textarea.click(); true")
-      for _ in 0..<100 where terminal.typingKeyboard.isHidden {
+      for _ in 0..<100 where terminal.shortcutBar.isHidden {
         try await Task.sleep(for: .milliseconds(20))
       }
-      XCTAssertFalse(terminal.typingKeyboard.isHidden)
       XCTAssertFalse(terminal.shortcutBar.isHidden)
     }
     func fixtureReply(key: String, marker: String) async throws -> (row: Int, suffix: String) {
@@ -1043,6 +1235,10 @@ final class RemoteSessionTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "Remote fixture did not draw " + marker])
     }
 
+    if !terminal.shortcutBar.isHidden {
+      hide.sendActions(for: .touchUpInside)
+      _ = try await sampleGrid()
+    }
     let initial = try await web.evaluateJavaScript("[term.cols, term.rows]") as? [Int]
     let full = try XCTUnwrap(initial)
     let canvas = web.bounds.size
@@ -1130,14 +1326,14 @@ final class RemoteSessionTests: XCTestCase {
       let restored = try await sampleGrid()
       XCTAssertEqual(restored.minY, fullGrid.minY, accuracy: pixel)
       XCTAssertEqual(restored.maxY, fullGrid.maxY, accuracy: pixel)
-      XCTAssertTrue(terminal.typingKeyboard.isHidden)
+      XCTAssertTrue(terminal.shortcutBar.isHidden)
     }
     if checkRemoteCursor {
       try await checkBottomEditor(hiddenCursor: false)
       try await checkBottomEditor(hiddenCursor: true)
     }
     try await open()
-    XCTAssertTrue(terminal.typingKeyboard.window === terminal.window)
+    XCTAssertTrue(terminal.shortcutBar.window === terminal.window)
     let statusButton = try XCTUnwrap(descendants(window).compactMap { $0 as? UIButton }.first {
       $0.accessibilityIdentifier == "terminal.status.details"
     })
@@ -1149,18 +1345,12 @@ final class RemoteSessionTests: XCTestCase {
                   "Status tap hit \(type(of: statusHit)), button \(frame), safe insets \(window.safeAreaInsets)")
     let terminalHit = try XCTUnwrap(window.hitTest(CGPoint(x: frame.midX, y: frame.maxY + 8), with: nil))
     XCTAssertTrue(terminalHit.isDescendant(of: web), "The row below the status button must accept terminal taps")
-    let keys = terminal.typingKeyboard.surface
-    let keyFrame = keys.convert(keys.bounds, to: window)
+    let keyFrame = terminal.shortcutBar.convert(terminal.shortcutBar.bounds, to: window)
     XCTAssertEqual(keyFrame.maxY, window.bounds.maxY, accuracy: pixel)
-    let bottomEdges = try await keys.evaluateJavaScript("""
-      ['{symbols}', '{space}', '{enter}'].map(k => keyboard.getButtonElement(k).getBoundingClientRect().bottom)
-      """) as? [Double]
-    let edges = try XCTUnwrap(bottomEdges)
-    XCTAssertEqual(edges.count, 3)
-    for edge in edges {
-      let point = keys.convert(CGPoint(x: keys.bounds.midX, y: CGFloat(edge)), to: window)
-      XCTAssertEqual(point.y, window.bounds.maxY, accuracy: pixel)
-    }
+    XCTAssertLessThanOrEqual(keyFrame.height, 88 + window.safeAreaInsets.bottom + pixel)
+    let paste = try XCTUnwrap(descendants(terminal.shortcutBar).first { $0 is UIPasteControl })
+    let pasteFrame = paste.convert(paste.bounds, to: window)
+    XCTAssertTrue(keyFrame.insetBy(dx: -pixel, dy: -pixel).contains(pasteFrame))
     XCTAssertEqual(viewport.convert(viewport.bounds, to: window).maxY,
                    terminal.shortcutBar.convert(terminal.shortcutBar.bounds, to: window).minY, accuracy: 1)
     hide.sendActions(for: .touchUpInside)
@@ -1277,6 +1467,10 @@ final class RemoteSessionTests: XCTestCase {
         descendants(screen.view).first { $0.accessibilityIdentifier == "terminal.connection" }
           as? UILabel)
       XCTAssertEqual(connection.text, "●  已连接")
+      let entryBar = try XCTUnwrap((web as? TerminalWebView)?.shortcutBar)
+      XCTAssertFalse(entryBar.isHidden)
+      entryBar.hideKeyboard?()
+      screen.view.layoutIfNeeded()
       if suffix == "-messages" {
         // The real fullscreen viewer was already on its last page before attach.
         try await waitFor("Message 200")
@@ -1385,8 +1579,8 @@ final class RemoteSessionTests: XCTestCase {
         // from the live shell without opening the drawer or sending a prefix.
         let board = try XCTUnwrap(web as? TerminalWebView)
         _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
-        for _ in 0..<50 where board.typingKeyboard.isHidden { try await Task.sleep(nanoseconds: 20_000_000) }
-        XCTAssertFalse(board.typingKeyboard.isHidden)
+        for _ in 0..<50 where board.shortcutBar.isHidden { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(board.shortcutBar.isHidden)
         if selected.touchPaging == true {
           try await type("tmux set-option prefix C-a && git status && printf '__GIT_%s__\\n' READY")
           try await waitFor("__GIT_READY__")
@@ -1437,13 +1631,12 @@ final class RemoteSessionTests: XCTestCase {
         try await toggle(dismiss)
         let terminal = try XCTUnwrap(web as? TerminalWebView)
         let bar = terminal.shortcutBar
-        let board = terminal.typingKeyboard.surface
         func showKeyboard() async throws {
           _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
-          for _ in 0..<50 where terminal.typingKeyboard.isHidden {
+          for _ in 0..<50 where terminal.shortcutBar.isHidden {
             try await Task.sleep(nanoseconds: 20_000_000)
           }
-          XCTAssertFalse(terminal.typingKeyboard.isHidden)
+          XCTAssertFalse(terminal.shortcutBar.isHidden)
         }
         try await showKeyboard()
         // Raw PTY reads verify that UIKit, xterm, SSH and tmux preserve the actual bytes.
@@ -1461,23 +1654,8 @@ final class RemoteSessionTests: XCTestCase {
           button.sendActions(for: .touchUpInside)
         }
         try await waitFor("__BAR_1b09031b5b411b5b42__")
-        try await type(
-          "saved=$(stty -g); stty raw -echo; printf '__KEYS_%s__\\r\\n' READY; "
-            + "b=$(dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); "
-            + "stty \"$saved\"; printf '__KEYS_%s__\\n' \"$b\""
-        )
-        try await waitFor("__KEYS_READY__")
-        _ = try await board.evaluateJavaScript("""
-          window.tapKey = k => keyboard.getButtonElement(k).click();
-          tapKey('x'); tapKey('{shift}'); tapKey('B'); true
-          """)
         bar.hideKeyboard?()
-        XCTAssertTrue(terminal.typingKeyboard.isHidden)
-        try await showKeyboard()
-        _ = try await board.evaluateJavaScript("""
-          tapKey('{symbols}'); tapKey('7'); tapKey('{bksp}'); tapKey('{enter}'); true
-          """)
-        try await waitFor("__KEYS_7842377f0d__")
+        XCTAssertTrue(terminal.shortcutBar.isHidden)
       }
     }
   }
@@ -1601,36 +1779,34 @@ final class RemoteSessionTests: XCTestCase {
     }
     coldMs = (receipt.arrival - open) * 1000
     phase = "warmup"
-    let board = web.typingKeyboard.surface
+    let board = web.shortcutBar
     let keyboardDeadline = ProcessInfo.processInfo.systemUptime + 5
-    while true {
-      let loaded = (try? await board.evaluateJavaScript("typeof keyboard === 'object'")) as? Bool
-      if loaded == true && web.typingKeyboard.isUserInteractionEnabled { break }
+    while !board.isReady {
       guard ProcessInfo.processInfo.systemUptime < keyboardDeadline else { return XCTFail("Keyboard did not become ready") }
       try await Task.sleep(for: .milliseconds(20))
     }
-    _ = try await web.evaluateJavaScript("bridge.postMessage({showKeyboard:true});true")
-    while web.typingKeyboard.isHidden {
-      guard ProcessInfo.processInfo.systemUptime < keyboardDeadline else { return XCTFail("Keyboard did not open") }
+    while board.isHidden {
+      guard ProcessInfo.processInfo.systemUptime < keyboardDeadline else { return XCTFail("Default keyboard did not open") }
       try await Task.sleep(for: .milliseconds(20))
     }
-    func press(_ key: String) async throws {
-      _ = try await board.callAsyncJavaScript("keyboard.handleButtonClicked(key); return true",
-                                              arguments: ["key": key], in: nil, contentWorld: .page)
+    let paste = try XCTUnwrap(descendants(board).compactMap { $0 as? UIPasteControl }.first)
+    let target = try XCTUnwrap(paste.target)
+    func insert(_ text: String) {
+      target.paste?(itemProviders: [NSItemProvider(object: text as NSString)])
     }
 
-    // The first key crosses two just-opened WebKit views. The fixture accepts z to reset
-    // its sequence before sampling. Keep listening for the first reply across the retry.
+    // Time the default paste action up to the corresponding remote render.
+    // The fixture resets its sequence on z before samples are taken.
     let warm = receipt.expect("TL-WARM")
     let warmStart = ProcessInfo.processInfo.systemUptime
     warmupAttempts = 1
-    try await press("z")
+    insert("z")
     while receipt.isPending(warm) {
       let elapsed = ProcessInfo.processInfo.systemUptime - warmStart
       if elapsed >= 20 { break }
       if elapsed >= 10 && warmupAttempts == 1 {
         warmupAttempts += 1
-        try await press("z")
+        insert("z")
       } else {
         try await Task.sleep(for: .milliseconds(50))
       }
@@ -1641,16 +1817,16 @@ final class RemoteSessionTests: XCTestCase {
     }
     warmupMs = (receipt.arrival - warmStart) * 1000
 
-    // Every numbered sample dispatches a single key and requires its matching remote render.
+    // Every numbered sample inserts a clipboard character and requires its matching remote render.
     func tap(_ key: String, expect marker: String) async throws -> Double? {
       let event = receipt.expect(marker)
       let start = ProcessInfo.processInfo.systemUptime
-      try await press(key)
+      insert(key)
       guard await XCTWaiter.fulfillment(of: [event], timeout: 5) == .completed else { return nil }
       return (receipt.arrival - start) * 1000
     }
     let keys = Array("abcdefghijklmnopqrstuvwxy")
-    phase = "typing"
+    phase = "paste"
     for n in 1...sampleCount {
       let key = String(keys[(n - 1) % keys.count])
       guard let ms = try await tap(key, expect: String(format: "TL-%03d-", n) + key) else {

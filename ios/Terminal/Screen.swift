@@ -134,6 +134,12 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private weak var contentBackSwipe: UISwipeGestureRecognizer?
   private lazy var editMenu = UIEditMenuInteraction(delegate: self)
   private var menuSnapshot: (text: String, offset: Int, selected: String)?
+  private var clipboardInput: Task<Bool, Never>?
+  private var clipboardEpoch = 0
+  private var clipboardSequence = 0
+  private var readingClipboard: Progress?
+  private weak var clipboardConfirmation: UIAlertController?
+  private var pendingMultiline: (text: String, epoch: Int)?
   private var scrollOrigin = CGPoint.zero
   private var lastScrollDistance: CGFloat = 0
   private var firstScrollStep = true
@@ -168,10 +174,17 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     config.websiteDataStore = .nonPersistent()
     config.userContentController.add(self, name: "terminal")
     web = TerminalWebView(frame: .zero, configuration: config)
-    web.typingKeyboard.isUserInteractionEnabled = false
-    web.typingKeyboard.onText = { [weak self] text in self?.sendTerminalKey(text) }
+    web.englishKeyboard.onText = { [weak self] key in self?.sendTerminalKey(key) }
+    web.shortcutBar.onPaste = { [weak self] providers in self?.pasteFromKeyboard(providers) }
     web.shortcutBar.press = { [weak self] key in self?.press(key) }
     web.shortcutBar.hideKeyboard = { [weak self] in self?.setKeyboardVisible(false) }
+    web.shortcutBar.changeMode = { [weak self] in
+      guard let self, !web.shortcutBar.isHidden else { return }
+      UIView.performWithoutAnimation {
+        self.web.shortcutBar.setEnglishMode(self.web.englishKeyboard.isHidden)
+        self.view.layoutIfNeeded()
+      }
+    }
     web.navigationDelegate = self
     web.isOpaque = false
     web.underPageBackgroundColor = Self.surface
@@ -219,9 +232,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     transportBadge.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentHuggingPriority(.required, for: .horizontal)
     latency.setContentCompressionResistancePriority(.required, for: .horizontal)
-    web.shortcutBar.isHidden = true
-    web.typingKeyboard.isHidden = true
-    let stack = UIStackView(arrangedSubviews: [bar, viewport!, web.shortcutBar, web.typingKeyboard])
+    let stack = UIStackView(arrangedSubviews: [bar, viewport!, web.shortcutBar])
     stack.axis = .vertical
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -234,8 +245,8 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     shortcuts = ShortcutDrawer(in: viewport, accent: accent, leave: leave,
                                review: { [weak self] in self?.reviewDecisions() },
                                upload: { [weak self] in self?.chooseUpload() }) { [weak self] key in self?.press(key) }
-    web.typingKeyboard.onAgentReply = { [weak self] text in self?.insertAgentReply(text) }
-    shortcuts.onAgentReply = web.typingKeyboard.onAgentReply
+    web.shortcutBar.onAgentReply = { [weak self] text in self?.insertAgentReply(text) }
+    shortcuts.onAgentReply = web.shortcutBar.onAgentReply
     shortcuts.onVisibilityChange = { [weak self] open in
       self?.drawerOpen = open
       self?.updateAgentMonitoring()
@@ -333,13 +344,13 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
 
   private func showAgentIdentity(_ identity: String?) {
     agentIdentity = identity
-    web?.typingKeyboard.setAgentContext(identity)
+    web?.shortcutBar.setAgentContext(identity)
     shortcuts?.setAgentContext(identity)
   }
 
   private func updateAgentMonitoring() {
     guard active, ready, !verifyingConnection, !backgrounded, let pid = attachedClientPID,
-          drawerOpen || !web.typingKeyboard.isHidden else {
+          drawerOpen || !web.shortcutBar.isHidden else {
       contextPoll?.cancel()
       contextPoll = nil
       showAgentIdentity(nil)
@@ -372,10 +383,10 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   private func setKeyboardVisible(_ visible: Bool) {
-    guard web.typingKeyboard.isHidden == visible else { return }
+    guard web.shortcutBar.isHidden == visible else { return }
     UIView.performWithoutAnimation {
+      if !visible { web.shortcutBar.setEnglishMode(false) }
       web.shortcutBar.isHidden = !visible
-      web.typingKeyboard.isHidden = !visible
       view.layoutIfNeeded()
     }
     updateAgentMonitoring()
@@ -435,8 +446,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       UIAction(title: "粘贴", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
         guard let self, isCurrent(attempt), ready, !verifyingConnection, !backgrounded,
               let text = UIPasteboard.general.string, !text.isEmpty else { return }
-        web.callAsyncJavaScript("pasteTerminal(text)", arguments: ["text": text], in: nil, in: .page,
-                                completionHandler: nil)
+        queueClipboardText(text)
       },
       UIAction(title: "选取并复制", image: UIImage(systemName: "text.cursor")) { [weak self] _ in
         self?.showSelection(snapshot.text, snapshot.offset)
@@ -448,6 +458,115 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   func editMenuInteraction(_ interaction: UIEditMenuInteraction, willDismissMenuFor configuration: UIEditMenuConfiguration,
                            animator: UIEditMenuInteractionAnimating) {
     menuSnapshot = nil
+  }
+
+  func pasteFromKeyboard(_ providers: [NSItemProvider]) {
+    guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return }
+    queueClipboardAction { [weak self] epoch in
+      guard let self else { return false }
+      let text: String? = await withCheckedContinuation { continuation in
+        self.readingClipboard = provider.loadObject(ofClass: NSString.self) { item, _ in
+          continuation.resume(returning: item as? String)
+        }
+      }
+      guard validClipboard(epoch) else { return false }
+      readingClipboard = nil
+      guard let text else {
+        clipboardNotice("无法读取剪贴板文字")
+        return false
+      }
+      return await insertClipboardText(text, epoch: epoch)
+    }
+  }
+
+  private func queueClipboardText(_ text: String, confirmed: Bool = false) {
+    queueClipboardAction(dismissingConfirmation: confirmed) { [weak self] epoch in
+      await self?.insertClipboardText(text, epoch: epoch, confirmed: confirmed) ?? false
+    }
+  }
+
+  // Providers can load asynchronously (e.g. Universal Clipboard). A quick tap on
+  // Return must reach the PTY after the paste, including when two pastes are queued.
+  private func queueClipboardAction(afterSuccess: Bool = false, dismissingConfirmation: Bool = false,
+                                    _ action: @escaping @MainActor (Int) async -> Bool) {
+    let epoch = clipboardEpoch
+    guard validClipboard(epoch), presentedViewController == nil || dismissingConfirmation else { return }
+    let prior = clipboardInput
+    clipboardSequence &+= 1
+    let sequence = clipboardSequence
+    clipboardInput = Task { [weak self] in
+      let previousSucceeded = await prior?.value ?? true
+      guard let self, validClipboard(epoch) else { return false }
+      defer { if clipboardSequence == sequence { clipboardInput = nil } }
+      guard (!afterSuccess || previousSucceeded), presentedViewController == nil || dismissingConfirmation else { return false }
+      return await action(epoch)
+    }
+  }
+
+  private func validClipboard(_ epoch: Int) -> Bool {
+    active && ready && !completed && !backgrounded && !verifyingConnection && epoch == clipboardEpoch
+  }
+
+  private func invalidateClipboard() {
+    clipboardEpoch &+= 1
+    pendingMultiline = nil
+    if let clipboardConfirmation, presentedViewController === clipboardConfirmation {
+      clipboardConfirmation.dismiss(animated: false)
+    }
+    readingClipboard?.cancel()
+    readingClipboard = nil
+    clipboardInput?.cancel()
+    clipboardInput = nil
+  }
+
+  private func clipboardNotice(_ message: String) {
+    guard presentedViewController == nil else { return }
+    let alert = UIAlertController(title: message, message: nil, preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: "好", style: .default))
+    present(alert, animated: true)
+  }
+
+  func confirmClipboardPaste() {
+    guard let request = pendingMultiline else { return }
+    pendingMultiline = nil
+    guard validClipboard(request.epoch) else { return }
+    queueClipboardText(request.text, confirmed: true)
+  }
+
+  private func insertClipboardText(_ text: String, epoch: Int, confirmed: Bool = false) async -> Bool {
+    guard validClipboard(epoch), !text.isEmpty else { return false }
+    guard text.utf8.count <= Self.inputLimit else {
+      clipboardNotice("文字超出输入缓冲区，请分段粘贴")
+      return false
+    }
+    let result = try? await web.callAsyncJavaScript("return pasteTerminal(text, confirmed, true)",
+      arguments: ["text": text, "confirmed": confirmed], in: nil, contentWorld: .page)
+    guard validClipboard(epoch), let response = result as? [String: Any] else { return false }
+    if response["confirm"] as? Bool == true {
+      guard presentedViewController == nil else { return false }
+      let alert = UIAlertController(title: "粘贴多行？", message: "当前程序可能把行间换行当成回车，立即执行前面的行。", preferredStyle: .alert)
+      clipboardConfirmation = alert
+      pendingMultiline = (text, epoch)
+      alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self, weak alert] _ in
+        guard let self, let alert, clipboardConfirmation === alert else { return }
+        pendingMultiline = nil
+      })
+      alert.addAction(UIAlertAction(title: "粘贴多行", style: .default) { [weak self, weak alert] _ in
+        guard let self, let alert, clipboardConfirmation === alert else { return }
+        confirmClipboardPaste()
+      })
+      present(alert, animated: true)
+      return false
+    }
+    guard let encoded = response["data"] as? String, !encoded.isEmpty else { return false }
+    let bytes = Data(encoded.utf8)
+    let frames = (bytes.count + 16_383) / 16_384
+    guard bytes.count + 5 * frames <= Self.inputLimit - pendingBytes else {
+      clipboardNotice("文字超出输入缓冲区，请分段粘贴")
+      return false
+    }
+    sendInput(bytes)
+    return !completed
   }
 
   @objc private func scrollTerminal(_ pan: UIPanGestureRecognizer) {
@@ -523,6 +642,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   @objc private func pauseStatus() {
     guard active, !backgrounded else { return }
     backgrounded = true
+    invalidateClipboard()
     uploadFlow?.enteredBackground()
     if !completed && session?.managedInstance != nil {
       recoveryEnabled = true
@@ -578,7 +698,6 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   private func setInputEnabled(_ enabled: Bool) {
     shortcuts?.setReady(enabled)
     web?.shortcutBar.setReady(enabled)
-    web?.typingKeyboard.isUserInteractionEnabled = enabled
   }
 
   private func loadTerminalPage() {
@@ -782,7 +901,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       updateAgentMonitoring()
       statusBar.isHidden = navigationStatus != nil
       setInputEnabled(!verifyingConnection)
-      if !web.typingKeyboard.isHidden {
+      if !web.shortcutBar.isHidden {
         web.evaluateJavaScript("trackKeyboardCursor(true)", completionHandler: nil)
       }
       transportBadge.text = hasIdentity ? "mTLS · SSH" : "SSH"
@@ -831,6 +950,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
       viewport.setCursor(row: row, rows: rows)
     }
     if obj["showKeyboard"] as? Bool == true, ready, !verifyingConnection, !backgrounded { setKeyboardVisible(true) }
+    if let text = obj["pasteText"] as? String { queueClipboardText(text) }
     if let metrics = obj["layout"] as? [String: Double],
       let w = metrics["width"], let h = metrics["height"],
       let gw = metrics["gridWidth"], let gh = metrics["gridHeight"] {
@@ -839,10 +959,14 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
     let bytes = (obj["data"] as? String).map { Data($0.utf8) }
       ?? (obj["binary"] as? String).flatMap { Data(base64Encoded: $0) }
     if ready, !verifyingConnection, !backgrounded, let bytes {
-      pendingReply?.cancel()
-      for offset in stride(from: 0, to: bytes.count, by: 16384) {
-        send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
-      }
+      if clipboardInput != nil {
+        // Hardware keys arrive directly from xterm, including Return after Command-V.
+        queueClipboardAction(afterSuccess: true) { [weak self] epoch in
+          guard let self, validClipboard(epoch) else { return false }
+          sendInput(bytes)
+          return !completed
+        }
+      } else { sendInput(bytes) }
     }
     if let cols = obj["cols"] as? Int, let rows = obj["rows"] as? Int, cols > 0, rows > 0 {
       dimensions = (UInt16(clamping: cols), UInt16(clamping: rows))
@@ -860,13 +984,22 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
         UInt8(c >> 8), UInt8(truncatingIfNeeded: c), UInt8(r >> 8), UInt8(truncatingIfNeeded: r),
       ]))
   }
+  private static let inputLimit = 1_048_576
+
+  private func sendInput(_ bytes: Data) {
+    pendingReply?.cancel()
+    for offset in stride(from: 0, to: bytes.count, by: 16384) {
+      send(0, bytes.subdata(in: offset..<min(offset + 16384, bytes.count)))
+    }
+  }
+
   private func send(_ kind: UInt8, _ bytes: Data) {
     guard fd >= 0 else { return }
     var frame = Data([kind])
     var size = UInt32(bytes.count).bigEndian
     frame.append(Data(bytes: &size, count: 4))
     frame.append(bytes)
-    guard pendingBytes + frame.count <= 1_048_576 else {
+    guard pendingBytes + frame.count <= Self.inputLimit else {
       finish("输入过多，请重新连接")
       return
     }
@@ -987,6 +1120,7 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
   }
 
   private func disconnect() {
+    invalidateClipboard()
     uploadFlow?.cancel()
     if let uploadController, presentedViewController === uploadController { dismiss(animated: false) }
     uploadFlow = nil
@@ -1015,6 +1149,17 @@ final class Screen: UIViewController, WKScriptMessageHandler, WKNavigationDelega
 
   private func sendTerminalKey(_ key: String) {
     guard ready, !verifyingConnection, !backgrounded else { return }
+    if clipboardInput != nil {
+      queueClipboardAction(afterSuccess: true) { [weak self] epoch in
+        guard let self, validClipboard(epoch) else { return false }
+        let result = try? await web.callAsyncJavaScript("return captureTerminalData(() => pressTerminalKey(key))",
+          arguments: ["key": key], in: nil, contentWorld: .page)
+        guard validClipboard(epoch), let encoded = result as? String else { return false }
+        sendInput(Data(encoded.utf8))
+        return !completed
+      }
+      return
+    }
     web.callAsyncJavaScript("pressTerminalKey(key)", arguments: ["key": key], in: nil, in: .page, completionHandler: nil)
   }
   override func accessibilityPerformEscape() -> Bool {
