@@ -133,8 +133,9 @@ extension TerminalTransport {
       der.withUnsafeBytes { (cert: UnsafeRawBufferPointer) in
         pkcs8.withUnsafeBytes { (key: UnsafeRawBufferPointer) in
           tl_upload_secure(worker, file, endpoint, port, user, pin, seedBytes.bindMemory(to: UInt8.self).baseAddress!,
-                           id, instance, directory, name, size, cert.bindMemory(to: UInt8.self).baseAddress,
-                           cert.count, key.bindMemory(to: UInt8.self).baseAddress, key.count)
+                           id, instance, directory, name, size,
+                           der.isEmpty ? nil : cert.bindMemory(to: UInt8.self).baseAddress, cert.count,
+                           pkcs8.isEmpty ? nil : key.bindMemory(to: UInt8.self).baseAddress, key.count)
         }
       }
     }
